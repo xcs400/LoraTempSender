@@ -1,0 +1,6 @@
+[{ NAME:  titre: 'DONSKYTECH',
+'DASHBOARD_TITLE':'MQTT DASHBOARD',
+'MQTT_BROKER':'ws://broker.emqx.io:8083/mqtt',
+'MQTT_TOPIC':'home/OMG_ESP32_LORA/#'
+}
+]
