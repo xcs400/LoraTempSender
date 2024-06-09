@@ -1,11 +1,12 @@
- #ifdef HELTEC_V2
+ #ifdef HELTEC_V3
 
-#include <LoRa.h>
 #include <SPI.h>
 
 #include <Wire.h>
 #include <stdio.h>
  
+#include <RadioLib.h>
+
 #include <OneWire.h>
 #include <DallasTemperature.h>
 
@@ -19,57 +20,74 @@
 #include <driver/adc.h>
 #include <WiFi.h>
 
+#define V3 1
 
-#define  ALLWAYSCREEN           0       // enable screen and serial output  ;  drawbattery more heavily   use for test only
+
+
+#define  ALLWAYSCREEN          1       // enable screen and serial output  ;  drawbattery more heavily   use for test only
 #define  USDELAY                120000000  //120 s
 
 #define MAXBATT                 4200    // The default Lipo is 4200mv when the battery is fully charged.
 #define LIGHT_SLEEP_VOLTAGE     3750    // Point where start light sleep
 #define MINBATT                 3200    // The default Lipo is 3200mv when the battery is empty...this WILL be low on the 3.3v rail specs!!!
 
-#define VOLTAGE_DIVIDER         3.20    // Lora has 220k/100k voltage divider so need to reverse that reduction via (220k+100k)/100k on vbat GPIO37 or ADC1_1 (early revs were GPIO13 or ADC2_4 but do NOT use with WiFi.begin())
 #define DEFAULT_VREF            1100    // Default VREF use if no e-fuse calibration
 #define VBATT_SAMPLE            500     // Battery sample rate in ms
 #define VBATT_SMOOTH            5      // Number of averages in sample
 #define ADC_READ_STABILIZE      5       // in ms (delay from GPIO control and ADC connections times)
 #define LO_BATT_SLEEP_TIME      10*60*1000*1000     // How long when low batt to stay in sleep (us)
 #define HELTEC_V2_1             1       // Set this to switch between GPIO13(V2.0) and GPIO37(V2.1) for VBatt ADC.
-  #define VBATT_GPIO              21      // Heltec GPIO to toggle VBatt read connection ... WARNING!!! This also connects VEXT to VCC=3.3v so be careful what is on header.  Also, take care NOT to have ADC read connection in OPEN DRAIN when GPIO goes HIGH
+
+#ifdef  V3
+   #define VBATT_GPIO                37      //  390/100DIV
+   #define VBATT_VEXTGPIO                36      // 3
+  #define VOLTAGE_DIVIDER         3.90    // Lora has 390k/100k voltage divider 
+  #define PIN_VBAT   ADC1_CHANNEL_1
+#endif
+
 #define __DEBUG                 0       // DEBUG Serial output
 
 
-
-// Heltec ESP32 wifi    v2.1
-
-#define SCK  5 // GPIO5  -- SX1278's SCK
-#define MISO 19 // GPIO19 -- SX1278's MISnO
-#define MOSI 27 // GPIO27 -- SX1278's MOSI
-#define SS   18 // GPIO18 -- SX1278's CS
-#define RST  14 // GPIO14 -- SX1278's RESET
-#define DI0  26 // GPIO26 -- SX1278's IRQ(Interrupt Request)
 #define BAND 868E6
+
+// NSS pin:   10
+// DIO0 pin:  2
+// RESET pin: 9
+// DIO1 pin:  3
+//SX1278 radio = new Module(10, 2, 9, 3);
+SX1262 radio = new Module(SS, DIO0, RST_LoRa, BUSY_LoRa);
 
 
 RTC_DATA_ATTR int bootCount = 0;  // deep sleep saved 
 
 // GPIO where the DS18B20 is connected to
-const int oneWireBus =23;     
-
+#ifdef V3
+const int oneWireBus =34;     
+#endif
 // Setup a oneWire instance to communicate with any OneWire devices
 OneWire oneWire(oneWireBus);
 
 // Pass our oneWire reference to Dallas Temperature sensor 
 DallasTemperature sensors(&oneWire);
 
-SSD1306 display(0x3c, 4, 15);
+/*
+ * @param _address I2C Display address
+     * @param _sda I2C SDA pin number, default to -1 to skip Wire begin call
+     * @param _scl I2C SCL pin number, default to -1 (only SDA = -1 is considered to skip Wire begin call)
+     * @param g display geometry dafault to generic GEOMETRY_128_64, see OLEDDISPLAY_GEOMETRY definition for other options
+     * @param _i2cBus on ESP32 with 2 I2C HW buses, I2C_ONE for 1st Bus, I2C_TWO fot 2nd bus, default I2C_ONE
+     * @param _frequency for Frequency by default Let's use ~700khz if ESP8266 is in 160Mhz mode, this will be limited to ~400khz if the ESP8266 in 80Mhz mode
+   */
 
-
+#ifdef V3
+SSD1306 display(0x3c, SDA_OLED, SCL_OLED );
+#endif
 
 uint16_t Sample();
 void drawBattery(uint16_t, bool = false);
 
 esp_adc_cal_characteristics_t *adc_chars;
-
+ String msg;
 
 uint16_t ReadVBatt() {
   int reading = 666;
@@ -77,9 +95,9 @@ uint16_t ReadVBatt() {
   digitalWrite(VBATT_GPIO, LOW);              // ESP32 Lora v2.1 reads on GPIO37 when GPIO21 is low
   delay(ADC_READ_STABILIZE);                  // let GPIO stabilize
   #if (defined(HELTEC_V2_1))
-  pinMode(ADC1_CHANNEL_1, OPEN_DRAIN);        // ADC GPIO37
-  reading = adc1_get_raw(ADC1_CHANNEL_1);
-  pinMode(ADC1_CHANNEL_1, INPUT);             // Disconnect ADC before GPIO goes back high so we protect ADC from direct connect to VBATT (i.e. no divider)
+  pinMode(PIN_VBAT, OPEN_DRAIN);        // ADC GPIO37
+  reading = adc1_get_raw(PIN_VBAT);
+  pinMode(PIN_VBAT, INPUT);             // Disconnect ADC before GPIO goes back high so we protect ADC from direct connect to VBATT (i.e. no divider)
   #else
   //pinMode(ADC2_CHANNEL_4, OPEN_DRAIN);        // ADC GPIO13
   adc2_get_raw(ADC2_CHANNEL_4,ADC_WIDTH_BIT_12,&reading);
@@ -127,9 +145,19 @@ void setup() {
 
   unsigned long StartTime = millis();
 
-  pinMode(16, OUTPUT);  // reset OLED
-  pinMode(25, OUTPUT);
+#ifdef V3
+  #define OLEDRST RST_OLED 
+#endif
+
+  pinMode(VBATT_GPIO, OUTPUT);  // v33 sur ADCIN
+ digitalWrite(VBATT_GPIO, LOW);              // ESP32 Lora v2.1 reads on GPIO37 when GPIO21 is low
+
+  pinMode(VBATT_VEXTGPIO, OUTPUT);  // reset OLED
+ digitalWrite(VBATT_VEXTGPIO, LOW);              // ESP32 Lora v2.1 reads on GPIO37 when GPIO21 is low
  
+
+  pinMode(OLEDRST, OUTPUT);  // reset OLED
+  pinMode(LED, OUTPUT);
                                              //pour allumer l ecran     
   pinMode(VBATT_GPIO,OUTPUT);
   
@@ -159,31 +187,44 @@ void setup() {
   double pct = map(voltage,MINBATT,MAXBATT,0,100);
   uint8_t bars = round(pct );
 
-  SPI.begin(SCK, MISO, MOSI, SS);
-  LoRa.setPins(SS, RST, DI0);
-  if (!LoRa.begin(BAND)) {
-  //  Serial.println("Starting LoRa failed!");
-  //  while (1)
-  //    ;
-    }
+ Serial.begin(115200);
+    while (!Serial)
+      ; 
+
+  //SPI.begin(SCK, MISO, MOSI, SS);
+/*
+Parameters:
+freq – Carrier frequency in MHz. Defaults to 434.0 MHz.
+bw – LoRa bandwidth in kHz. Defaults to 125.0 kHz.
+sf – LoRa spreading factor. Defaults to 9.
+cr – LoRa coding rate denominator. Defaults to 7 (coding rate 4/7).
+syncWord – 1-byte LoRa sync word. Defaults to RADIOLIB_SX126X_SYNC_WORD_PRIVATE (0x12).
+power – Output power in dBm. Defaults to 10 dBm.
+preambleLength – LoRa preamble length in symbols. Defaults to 8 symbols.
+tcxoVoltage – TCXO reference voltage to be set on DIO3. Defaults to 1.6 V. If you are seeing -706/-707 error codes, it likely means you are using non-0 value for module with XTAL. To use XTAL, either set this value to 0, or set SX126x::XTAL to true.
+useRegulatorLDO – Whether to use only LDO regulator (true) or DC-DC regulator (false). Defaults to false.
+*/
+//                       freq,  bw,   sf,cr,syncWord,power,preambleLength,tcxoVoltage,useRegulatorLDO
+    int state = radio.begin(868.0, 125.0, 7, 5, 0x12,    14,       8);
+
+   Serial.printf("\r\n  init Radio Lora . state %u",state);
 
 
-  String NodeId = "Yaourt1" ;  // WiFi.macAddress();
+
+  String NodeId = "Yaourt3" ;  // WiFi.macAddress();
   sensors.requestTemperatures(); 
   float temperatureC = sensors.getTempCByIndex(0);
 
-  String msg = "{\"model\":\"ESP32TEMP\",\"id\":\"" + NodeId + "\",\"TempCelsius\":" + String(temperatureC) +  ",\"Elapsed\":" + String((int)round((double)bootCount*USDELAY/1000000)) + ",\"Vbatt\":" + String(voltage) + ",\"Charge%\":" + String(bars) + "}";
+   msg = "{\"model\":\"ESP32TEMP\",\"id\":\"" + NodeId + "\",\"TempCelsius\":" + String(temperatureC) +  ",\"Elapsed\":" + String((int)round((double)bootCount*USDELAY/1000000)) + ",\"Vbatt\":" + String(voltage) + ",\"Charge%\":" + String(bars) + "}";
  
 
   if (bootCount==0  || ALLWAYSCREEN)
     {
-    digitalWrite(16, LOW); // set GPIO16 low to reset OLED
+    digitalWrite(OLEDRST, LOW); // set GPIO16 low to reset OLED
     delay(200);
-    digitalWrite(16, HIGH); // while OLED is running, must set GPIO16 in high
+    digitalWrite(OLEDRST, HIGH); // while OLED is running, must set GPIO16 in high
   
-    Serial.begin(115200);
-    while (!Serial)
-      ; 
+   
     Serial.println();
     Serial.println("LoRa Sender Test");
   
@@ -201,32 +242,22 @@ void setup() {
     display.drawString(0, 30, "voltage: " + String(voltage) + "mv");
   
 
-    Serial.println(String(msg));
+ //   Serial.println(String(msg));
     
     display.drawString(40, 0, String(NodeId));
     display.drawString(0, 15, "tempc: " + String(temperatureC) + " C");
     display.display();
     delay(2000); // wait for  2  second
 
-    digitalWrite(21, HIGH); //por etteindre l ecran 
-    pinMode(21, INPUT);
+    digitalWrite(VBATT_GPIO, HIGH); //por etteindre l ecran 
+    pinMode(VBATT_GPIO, INPUT);
     }
 
-
- 
- 
-  // send packet
-  LoRa.beginPacket();
-   // Send json string
-  LoRa.print(msg);
-  LoRa.endPacket();
-  LoRa.end();
  
 
-
-  digitalWrite(25, HIGH); // turn the LED on (HIGH is the voltage level)
+  digitalWrite(LED, HIGH); // turn the LED on (HIGH is the voltage level)
   delay(2); // wait for a  ms second
-  digitalWrite(25, LOW); // turn the LED off by making the voltage LOW
+  digitalWrite(LED, LOW); // turn the LED off by making the voltage LOW
 
 
   bootCount++;
@@ -237,17 +268,32 @@ void setup() {
 //  pinMode(25, INPUT);
  //   pinMode(21, INPUT);
 
- adc_power_off();
+// adc_power_off();
 
 
 
   unsigned long CurrentTime = millis();
  unsigned long ElapsedTime = CurrentTime - StartTime;
 
- esp_sleep_enable_timer_wakeup(USDELAY- (ElapsedTime *1000) );  
- esp_deep_sleep_start();  
+ //esp_sleep_enable_timer_wakeup(USDELAY- (ElapsedTime *1000) );  
+ //esp_deep_sleep_start();  
 }
 
-void loop(void){}
+void loop(void){
+
+  digitalWrite(LED, HIGH); // turn the LED on (HIGH is the voltage level)
+  delay(100); // wait for a  ms second
+  digitalWrite(LED, LOW); // turn the LED off by making the voltage LOW
+
+
+int transmissionState = RADIOLIB_ERR_NONE;
+  transmissionState = radio.startTransmit(msg);
+
+    Serial.println(String(msg));
+     Serial.printf(" state= %u",transmissionState);
+   delay(180000); // wait for a  ms second
+  
+}
+
 
 #endif
