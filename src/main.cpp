@@ -21,7 +21,7 @@
 
 
 #define  ALLWAYSCREEN           0       // enable screen and serial output  ;  drawbattery more heavily   use for test only
-#define  USDELAY                120000000  //120 s
+#define  USDELAY                60000000  //60 s
 
 #define MAXBATT                 4200    // The default Lipo is 4200mv when the battery is fully charged.
 #define LIGHT_SLEEP_VOLTAGE     3750    // Point where start light sleep

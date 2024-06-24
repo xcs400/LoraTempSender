@@ -1,4 +1,4 @@
- #ifdef HELTEC_V3
+ #ifdef HELTEC_V3_YAOURT
 
 #include <SPI.h>
 
@@ -247,7 +247,7 @@ useRegulatorLDO – Whether to use only LDO regulator (true) or DC-DC regulator 
     display.drawString(40, 0, String(NodeId));
     display.drawString(0, 15, "tempc: " + String(temperatureC) + " C");
     display.display();
-    delay(2000); // wait for  2  second
+    delay(60000); // wait for  2  second
 
     digitalWrite(VBATT_GPIO, HIGH); //por etteindre l ecran 
     pinMode(VBATT_GPIO, INPUT);
@@ -286,12 +286,17 @@ void loop(void){
   digitalWrite(LED, LOW); // turn the LED off by making the voltage LOW
 
 
+
+    display.drawString(0, 0, "Module:");
+    display.drawString(0, 30, "voltage: " + String(voltage) + "mv");
+  
+
 int transmissionState = RADIOLIB_ERR_NONE;
   transmissionState = radio.startTransmit(msg);
 
     Serial.println(String(msg));
      Serial.printf(" state= %u",transmissionState);
-   delay(180000); // wait for a  ms second
+   delay(5000); // wait for a  ms second
   
 }
 
