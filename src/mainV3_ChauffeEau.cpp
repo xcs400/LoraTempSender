@@ -51,6 +51,8 @@ unsigned long   DelaiLastLorain=0;
  unsigned long lorain = 0;
  unsigned long dureEtat=0;
  unsigned long countChangeetat=0;
+unsigned long previoussend=0;
+unsigned long off=0;
 
  String msg;
  String command;
@@ -119,6 +121,7 @@ WebVar varWeb[] = {
     {"PompeTotalOFF", &dureeTotalOFF, "int", "RO",1.0/1000,NULL,"sec"}  ,
     {"PompeTotalDuty", &dureeTotalDuty, "int", "RO",1.0/1000,NULL,"sec"}  ,
     {"contlora", &contlora, "int", "RO",1.0,NULL,"cnt"}  ,
+   {"offsend", &off, "int", "RW",1.0,NULL,"cnt"}  ,
 
 
 };
@@ -157,8 +160,10 @@ String generateJSONString() {
 
 // Page HTML à servir
  // Fonction pour générer le tableau HTML
+ String softrev= "1.0 26/06/2024";
+
 String generateHTMLTable() {
-    String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Variables</title></head><body><h1>Variables</h1><table border='1'><tr><th>Nom</th><th>Valeur lue</th><th>Valeur à écrire</th><th>Unité</th><th>Action</th></tr>";
+    String html = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Chauffe Eau rev"+ softrev + "</title></head><body><h1>Chauffe Eau ,rev:"+ softrev + "</h1><table border='1'><tr><th>Nom</th><th>Valeur lue</th><th>Valeur à écrire</th><th>Unité</th><th>Action</th></tr>";
     
     for (int i = 0; i < sizeof(varWeb) / sizeof(varWeb[0]); i++) {
         html += "<tr><td>" + String(varWeb[i].name) + "</td><td id='value_" + String(varWeb[i].name) + "'>";
@@ -244,6 +249,7 @@ esp_adc_cal_characteristics_t *adc_chars;
 
 unsigned long previousMillis = 0;
 
+
 void setFlag(void);
 
 
@@ -303,6 +309,17 @@ float processReceivedMessage(const String &receivedMsg)
                 }               
 
  
+
+        if (command=="off")
+                {
+                 off=1;
+                }               
+       if (command=="on")
+                {
+                 off=0;
+                }               
+
+
        if (command=="getparametre")
               { 
             // Construire le message JSON  " + generateJSONString() + "
@@ -655,26 +672,31 @@ void loop() {
                     {ESP.restart(); // Redémarrage de l'ESP32
                     }
 
-            if (temperatureRemote > seuilON   ) {
+            if (temperatureRemote > seuilON   &&   temperature1 >  temperature2  ) {
                 Nextrequested = POMPEON_DELAI;
                 digitalWrite(POMPE, HIGH);
             }
 
-            if  ( currentMillis -  lorain  >  250 * 60 *1000)  // 250 secondes sans temperature remote  ?
-                {Nextrequested = WAITREMOTE;
-                }
-            break;
+
 
         case POMPEOFF_DUTY:
             digitalWrite(POMPE, LOW);
+
             if (currentMillis - previousPompeMillis >= dutyoff) {
+
+             if  ( currentMillis -  lorain  >  250 * 60 *1000)  // 250 secondes sans temperature remote  ?   on verifie que bien recu
+                {Nextrequested = WAITREMOTE;
+                }
+            else
                 Nextrequested = POMPEOFF;
             }
             break;
 
         case POMPEON_DELAI:
             digitalWrite(POMPE, HIGH);
-            if (temperatureRemote < seuilOFF     ||    
+
+
+            if (temperatureRemote < seuilOFF     ||    temperature1 <=  temperature2+0.5   ||   temperatureRemote <  temperature2 ||  
                currentMillis - previousPompeMillis >= intervalpompe  )
                 {
                 Nextrequested = POMPEOFF_DUTY;
@@ -685,6 +707,39 @@ void loop() {
         default:
             break;
     }
+
+   unsigned long retry= currentMillis - previoussend;
+
+if (retry> 59*1000)    // retransmet au bout d'une minute
+{
+previoussend=currentMillis;
+
+             // Construire le message JSON
+            msg = "{\"model\":\"ESP32TEMP\",\"id\":\"" + NodeId + "\",\"OState\":\"" + getPompeStateName((void*)&CurrentStatePompe) + 
+                        "\",\"NState\":\"" + getPompeStateName((void*)&Nextrequested) + 
+                        "\",\"D\":" + String((int)round((double)dureEtat/1000)) + 
+                        ",\"T1\":" + String(temperature1) + 
+                        ",\"T2\":" + String(temperature2) + 
+                        ",\"TR\":" + String(temperatureRemote) + 
+                        ",\"Elapsed\":" + String((int)round((double)currentMillis/1000)) + 
+                        "}";
+                        // Démarrer la transmission
+
+          if (!off)    
+          {       
+                    int transmissionState = radio.startTransmit(msg);
+                    delay(500);  // Attendre suffisamment longtemps pour que la transmission ait lieu
+                //  receivedFlag = 0;
+
+        // Commencer à recevoir les messages
+                int startReceiveState = radio.startReceive();
+                if (startReceiveState != RADIOLIB_ERR_NONE) {
+                    Serial.printf("Failed to start receive, code: %d\n", startReceiveState);
+                }
+          }
+ 
+}
+
     if  (Nextrequested !=CurrentStatePompe)
             {
             countChangeetat++;
@@ -713,16 +768,20 @@ void loop() {
                         ",\"Elapsed\":" + String((int)round((double)currentMillis/1000)) + 
                         "}";
                         // Démarrer la transmission
-                    int transmissionState = radio.startTransmit(msg);
-                    delay(500);  // Attendre suffisamment longtemps pour que la transmission ait lieu
-                //  receivedFlag = 0;
 
-        // Commencer à recevoir les messages
-                int startReceiveState = radio.startReceive();
-                if (startReceiveState != RADIOLIB_ERR_NONE) {
-                    Serial.printf("Failed to start receive, code: %d\n", startReceiveState);
+                if (!off)    
+                {  
+                            int transmissionState = radio.startTransmit(msg);
+                            delay(500);  // Attendre suffisamment longtemps pour que la transmission ait lieu
+                        //  receivedFlag = 0;
+
+                // Commencer à recevoir les messages
+                        int startReceiveState = radio.startReceive();
+                        if (startReceiveState != RADIOLIB_ERR_NONE) {
+                            Serial.printf("Failed to start receive, code: %d\n", startReceiveState);
+                        }
                 }
-
+          CurrentStatePompe=Nextrequested;
 
 
             }
