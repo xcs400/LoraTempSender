@@ -210,7 +210,7 @@ useRegulatorLDO – Whether to use only LDO regulator (true) or DC-DC regulator 
    Serial.printf("\r\n  init Radio Lora . state %u",state);
 
 
-
+sensors.begin();
   String NodeId = "Yaourt3" ;  // WiFi.macAddress();
   sensors.requestTemperatures(); 
   float temperatureC = sensors.getTempCByIndex(0);

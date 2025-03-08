@@ -13,7 +13,7 @@
 #include "rom/ets_sys.h"
 #include "soc/rtc_cntl_reg.h"
 #include "soc/sens_reg.h"
-
+ 
 
 #include <esp_adc_cal.h>
 #include <driver/adc.h>
@@ -21,7 +21,8 @@
 
 
 #define  ALLWAYSCREEN           0       // enable screen and serial output  ;  drawbattery more heavily   use for test only
-#define  USDELAY                60000000  //60 s
+
+#define  USDELAY                  2*60000000  //60 s
 
 #define MAXBATT                 4200    // The default Lipo is 4200mv when the battery is fully charged.
 #define LIGHT_SLEEP_VOLTAGE     3750    // Point where start light sleep
@@ -51,6 +52,8 @@
 
 
 RTC_DATA_ATTR int bootCount = 0;  // deep sleep saved 
+RTC_DATA_ATTR float oldtemperatureC =0.0;
+RTC_DATA_ATTR int skip=0;
 
 // GPIO where the DS18B20 is connected to
 const int oneWireBus =23;     
@@ -159,24 +162,20 @@ void setup() {
   double pct = map(voltage,MINBATT,MAXBATT,0,100);
   uint8_t bars = round(pct );
 
-  SPI.begin(SCK, MISO, MOSI, SS);
-  LoRa.setPins(SS, RST, DI0);
-  if (!LoRa.begin(BAND)) {
-  //  Serial.println("Starting LoRa failed!");
-  //  while (1)
-  //    ;
-    }
+ 
 
+  sensors.begin();
 
-  String NodeId = "Yaourt1" ;  // WiFi.macAddress();
   sensors.requestTemperatures(); 
   float temperatureC = sensors.getTempCByIndex(0);
 
-  String msg = "{\"model\":\"ESP32TEMP\",\"id\":\"" + NodeId + "\",\"TempCelsius\":" + String(temperatureC) +  ",\"Elapsed\":" + String((int)round((double)bootCount*USDELAY/1000000)) + ",\"Vbatt\":" + String(voltage) + ",\"Charge%\":" + String(bars) + "}";
- 
+
 
   if (bootCount==0  || ALLWAYSCREEN)
     {
+      String NodeId = "Yaourt1" ;  // WiFi.macAddress();
+      String msg = "{\"model\":\"ESP32TEMP\",\"id\":\"" + NodeId + "\",\"TempCelsius\":" + String(temperatureC) +  ",\"Elapsed\":" + String((int)round((double)bootCount*USDELAY/1000000)) + ",\"Vbatt\":" + String(voltage) + ",\"Charge\":" + String(bars) + ",\"skip\":" + String(skip) +  "}";
+     
     digitalWrite(16, LOW); // set GPIO16 low to reset OLED
     delay(200);
     digitalWrite(16, HIGH); // while OLED is running, must set GPIO16 in high
@@ -213,20 +212,43 @@ void setup() {
     }
 
 
+  //  Serial.begin(115200);
+  //  while (!Serial)
+  //    ; 
+ if ( (temperatureC <  oldtemperatureC+0.26)  &&   (temperatureC >  oldtemperatureC-0.26 )    &&  skip < 5   )      //  normalement emet toute les 2mn;   saute 5fois si pareil
+{
+  skip++;
+//  Serial.println("skip");
+}
+else
+{
+  String NodeId = "Yaourt1" ;  // WiFi.macAddress();
+  String msg = "{\"model\":\"ESP32TEMP\",\"id\":\"" + NodeId + "\",\"TempCelsius\":" + String(temperatureC) +  ",\"Elapsed\":" + String((int)round((double)bootCount*USDELAY/1000000)) + ",\"Vbatt\":" + String(voltage) + ",\"Charge\":" + String(bars) + ",\"skip\":" + String(skip) +  "}";
  
- 
+  SPI.begin(SCK, MISO, MOSI, SS);
+  LoRa.setPins(SS, RST, DI0);
+  if (!LoRa.begin(BAND)) {
+  //  Serial.println("Starting LoRa failed!");
+  //  while (1)
+  //    ;
+    }
+
+ //   Serial.println(String(msg));
+
+  skip=0;
+  oldtemperatureC=temperatureC;
   // send packet
   LoRa.beginPacket();
    // Send json string
   LoRa.print(msg);
   LoRa.endPacket();
   LoRa.end();
- 
-
 
   digitalWrite(25, HIGH); // turn the LED on (HIGH is the voltage level)
   delay(2); // wait for a  ms second
   digitalWrite(25, LOW); // turn the LED off by making the voltage LOW
+
+}
 
 
   bootCount++;
@@ -238,8 +260,6 @@ void setup() {
  //   pinMode(21, INPUT);
 
  adc_power_off();
-
-
 
   unsigned long CurrentTime = millis();
  unsigned long ElapsedTime = CurrentTime - StartTime;
