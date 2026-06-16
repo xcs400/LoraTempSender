@@ -116,10 +116,13 @@ struct Schedule {
     uint8_t weekDays      = 0b0111111;  // Lun-Ven bit0..bit6
     uint8_t calMode       = 0;          // 0=hebdo 1=intervalle 2=saison
     uint8_t intervalDays  = 2;
+    uint8_t intervalStartMonth = 1;
+    uint8_t intervalStartDay   = 1;
     uint8_t seasonStartMonth = 4;
     uint8_t seasonStartDay   = 1;
     uint8_t seasonEndMonth   = 10;
     uint8_t seasonEndDay     = 31;
+    char    name[24]      = "";        // nom optionnel du programme
 };
 
 // --- Vanne ---
@@ -331,6 +334,19 @@ void timeInit(){
     }
 }
 
+// Convertit (année,mois,jour) en day-of-year (0-based)
+static int monthDayToYday(int year, int month, int day){
+    const int mdaysNorm[12] = {31,28,31,30,31,30,31,31,30,31,30,31};
+    bool leap = ((year%4==0) && (year%100!=0 || year%400==0));
+    int yday = 0;
+    for(int m=1;m<month;m++){
+        if(m==2) yday += mdaysNorm[1] + (leap?1:0);
+        else yday += mdaysNorm[m-1];
+    }
+    yday += (day-1);
+    return yday;
+}
+
 // Retourne true si on est dans la saison active
 bool inSeason(const Schedule& s){
     struct tm ti;
@@ -471,7 +487,12 @@ void schedCheck(){
                     trigger = !!(s.weekDays & (1<<dow));
                     break;
                 case 1: // intervalle
-                    trigger = (s.intervalDays>0) && ((yday % s.intervalDays)==0);
+                    if(s.intervalDays>0){
+                        int startY = monthDayToYday(ti.tm_year+1900, s.intervalStartMonth, s.intervalStartDay);
+                        int daysInYear = 365 + (( (ti.tm_year+1900)%4==0 && ((ti.tm_year+1900)%100!=0 || (ti.tm_year+1900)%400==0))?1:0);
+                        int diff = (yday - startY + daysInYear) % s.intervalDays;
+                        trigger = (diff == 0);
+                    } else trigger = false;
                     break;
                 case 2: // saison
                     trigger = inSeason(s);
@@ -716,7 +737,10 @@ String schedulesToJson(){
             o["hour"]             = s.hour;
             o["minute"]           = s.minute;
             o["durationSec"]      = s.durationSec;
+            o["name"]             = s.name;
             o["weekDays"]         = s.weekDays;
+            o["intervalStartMonth"] = s.intervalStartMonth;
+            o["intervalStartDay"]   = s.intervalStartDay;
             o["calMode"]          = s.calMode;
             o["intervalDays"]     = s.intervalDays;
             o["seasonStartMonth"] = s.seasonStartMonth;
@@ -810,6 +834,11 @@ void webSetup(){
             }
             if(idx>=MAX_PROGRAMS){jsonResp(req,"{\"ok\":false}",400);return;}
             Schedule& s = valves[v].schedules[idx];
+            int origV = doc["origValve"] | -1;
+            // If moving an existing schedule to another valve, clear the old slot
+            if(origV>=0 && origV!=v && idx>=0 && idx<MAX_PROGRAMS){
+                valves[origV].schedules[idx] = Schedule();
+            }
             s.active           = doc["active"]           | true;
             s.hour             = doc["hour"]             | 6;
             s.minute           = doc["minute"]           | 0;
@@ -817,10 +846,13 @@ void webSetup(){
             s.weekDays         = doc["weekDays"]         | 0b0111111;
             s.calMode          = doc["calMode"]          | 0;
             s.intervalDays     = doc["intervalDays"]     | 2;
+            s.intervalStartMonth = doc["intervalStartMonth"] | s.intervalStartMonth;
+            s.intervalStartDay   = doc["intervalStartDay"]   | s.intervalStartDay;
             s.seasonStartMonth = doc["seasonStartMonth"] | 4;
             s.seasonStartDay   = doc["seasonStartDay"]   | 1;
             s.seasonEndMonth   = doc["seasonEndMonth"]   | 10;
             s.seasonEndDay     = doc["seasonEndDay"]     | 31;
+            if(doc.containsKey("name")) strlcpy(s.name, doc["name"], sizeof(s.name));
             schedSave();
             jsonResp(req,"{\"ok\":true}");
         }

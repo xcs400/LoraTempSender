@@ -29,6 +29,15 @@ const char WEB_HTML[] PROGMEM = R"HTMLEOF(
   --red-dim:   #3d0f0e;
   --blue:      #388bfd;
   --blue-dim:  #0d2d6e;
+    /* Couleurs par vanne (8 max) */
+    --vcol0: #1f77b4; 
+    --vcol1: #ff7f0e; 
+    --vcol2: #2ca02c; 
+    --vcol3: #d62728;
+    --vcol4: #9467bd; 
+    --vcol5: #8c564b; 
+    --vcol6: #e377c2; 
+    --vcol7: #7f7f7f;
   --radius:    10px;
   --font:      'Inter', system-ui, sans-serif;
 }
@@ -192,6 +201,8 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 .cal-day.other-month{opacity:.35}
 .cal-day .cal-dots{display:flex;justify-content:center;gap:2px;margin-top:4px;flex-wrap:wrap}
 .cal-dot{width:5px;height:5px;border-radius:50%;background:var(--green)}
+.cal-badge{display:inline-block;padding:2px 6px;border-radius:8px;font-size:.7rem;background:var(--blue-dim);color:var(--blue);margin:2px}
+.cal-badge[data-valve]{color:#fff}
 
 /* ── JOURNAL ─────────────────────────────────────────── */
 .log-list{max-height:520px;overflow-y:auto;padding:4px 0}
@@ -241,6 +252,8 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 /* ── LOADER ─────────────────────────────────────────── */
 .spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
+/* Programmes table: inactive row styling */
+.sched-row.inactive td{opacity:.6;color:var(--text-muted)}
 </style>
 </head>
 <body>
@@ -250,7 +263,7 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 <header>
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#388bfd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M12 6v6l4 2"/></svg>
   <h1>IrrigPro</h1>
-  <span class="badge">8 VANNES</span>
+  <span class="badge">4 VANNES</span>
   <div id="ws-status">
     <span id="ws-dot"></span>
     <span id="ws-label">Déconnecté</span>
@@ -274,6 +287,7 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
     <div>
       <div style="font-size:1.1rem;font-weight:700">Tableau de bord</div>
       <div style="font-size:.8rem;color:var(--text-muted)" id="uptime-label">—</div>
+      <div id="valve-legend" style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap"></div>
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-ghost btn-sm" onclick="closeAll()">Tout fermer</button>
@@ -295,11 +309,11 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
     <table class="tbl" id="sched-table">
       <thead>
         <tr>
-          <th>Vanne</th><th>Heure</th><th>Durée</th><th>Jours</th><th>Mode</th><th>Actif</th><th>Actions</th>
+          <th>Vanne</th><th>Nom</th><th>Heure</th><th>Durée</th><th>Jours</th><th>Mode</th><th>Actif</th><th>Actions</th>
         </tr>
       </thead>
       <tbody id="sched-body">
-        <tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
+        <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
       </tbody>
     </table>
   </div>
@@ -422,6 +436,10 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
         </select>
       </div>
       <div class="form-group">
+        <label>Nom programme</label>
+        <input type="text" id="sched-name" placeholder="Nom (optionnel)" />
+      </div>
+      <div class="form-group">
         <label>Heure</label>
         <input type="time" id="sched-time" value="06:00"/>
       </div>
@@ -454,7 +472,9 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
     <!-- Mode intervalle -->
     <div id="sched-interval-row" style="display:none" class="form-group">
       <label>Tous les N jours</label>
-      <input type="number" id="sched-interval-n" value="2" min="1" max="30"/>
+      <input type="number" id="sched-interval-n" value="2" min="1" max="365"/>
+      <label style="margin-top:8px">Date de départ</label>
+      <input type="date" id="sched-interval-start" />
     </div>
     <!-- Mode saison -->
     <div id="sched-season-row" style="display:none">
@@ -514,13 +534,71 @@ function weekdayBits(bits) {
   return DAY_NAMES.filter((_,i)=> bits & (1<<i)).join(' ');
 }
 
+// Vérifie si le programme `s` est actif pour la date `date` (ignore l'heure)
+function scheduleMatchesOnDate(s, date){
+  if(!s || !s.active) return false;
+  const y = date.getFullYear(), m = date.getMonth(), d = date.getDate();
+  if(s.calMode===0){ // hebdo
+    const dow = (date.getDay()+6)%7; return !!(s.weekDays & (1<<dow));
+  }
+  if(s.calMode===1){ // intervalle
+    if(!s.intervalDays || s.intervalDays<=0) return false;
+    const yday = Math.floor((Date.UTC(y,m,d) - Date.UTC(y,0,1)) / 86400000);
+    const startMonth = s.intervalStartMonth || 1;
+    const startDay   = s.intervalStartDay   || 1;
+    const startYday = Math.floor((Date.UTC(y, startMonth-1, startDay) - Date.UTC(y,0,1)) / 86400000);
+    const isLeap = ((y%4===0) && (y%100!==0 || y%400===0));
+    const daysInYear = 365 + (isLeap?1:0);
+    const diff = (yday - startYday + daysInYear) % s.intervalDays;
+    return diff === 0;
+  }
+  if(s.calMode===2){ // saison
+    const md = (m+1)*100 + d;
+    const start = (s.seasonStartMonth||1)*100 + (s.seasonStartDay||1);
+    const end   = (s.seasonEndMonth||12)*100 + (s.seasonEndDay||31);
+    return md>=start && md<=end;
+  }
+  return false;
+}
+
+// Retourne le prochain événement (objet {text,dt,sched}) pour la vanne idx ou null
+function getNextEventForValve(idx){
+  if(!schedules || !schedules.length) return null;
+  const now = new Date();
+  let best = null;
+  for(const s of schedules){
+    if(!s || !s.active) continue;
+    if(s.valve !== idx) continue;
+    // chercher jusqu'à 365 jours
+    for(let off=0; off<366; off++){
+      const cand = new Date(now.getFullYear(), now.getMonth(), now.getDate()+off);
+      if(!scheduleMatchesOnDate(s, cand)) continue;
+      const hh = s.hour || 0, mm = s.minute || 0;
+      const candDt = new Date(cand.getFullYear(), cand.getMonth(), cand.getDate(), hh, mm, 0);
+      if(candDt <= now) continue;
+      if(!best || candDt < best.dt) best = {dt:candDt, sched:s};
+      break; // pour ce programme on prend la première occurrence future
+    }
+  }
+  if(!best) return null;
+  const ms = best.dt - now;
+  const days = Math.floor(ms/86400000);
+  const hours = Math.floor((ms%86400000)/3600000);
+  const minutes = Math.floor((ms%3600000)/60000);
+  let text='';
+  if(days>0) text = `dans ${days} j${days>1?'s':''} à ${String(best.dt.getHours()).padStart(2,'0')}h${String(best.dt.getMinutes()).padStart(2,'0')}`;
+  else if(hours>0) text = `dans ${hours} h ${minutes} m`;
+  else text = `dans ${minutes} m`;
+  return {text,dt:best.dt,sched:best.sched};
+}
+
 function showPage(id, btn) {
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
   document.getElementById('page-'+id).classList.add('active');
   if(btn) btn.classList.add('active');
   if(id==='programmes') renderSchedules();
-  if(id==='calendrier') renderCalendar();
+  if(id==='calendrier') loadSchedules().then(()=>renderCalendar());
   if(id==='journal') loadLog();
   if(id==='config') loadConfig();
 }
@@ -558,7 +636,23 @@ function handleStatus(data) {
   valves = data.valves || valves;
   document.getElementById('uptime-label').textContent =
     'Uptime: ' + fmtSec(data.uptime || 0) + '  |  Heap: ' + (data.heap ? Math.round(data.heap/1024)+'kB' : '—');
+  buildSchedValveSelect();
+  renderLegend();
   renderValveCards();
+}
+
+function renderLegend(){
+  const el = document.getElementById('valve-legend');
+  if(!el) return;
+  el.innerHTML = '';
+  for(let i=0;i<valves.length;i++){
+    const name = (valves[i]&&valves[i].name)||('V'+(i+1));
+    const dot = `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:6px">
+      <span style="width:12px;height:12px;border-radius:3px;background:var(--vcol${i});display:inline-block;"></span>
+      <span style="font-size:.78rem;color:var(--text-muted)">V${i+1} ${name}</span>
+    </span>`;
+    el.innerHTML += dot;
+  }
 }
 
 // ══════════════════════════════════════════════════════════
@@ -579,16 +673,19 @@ function renderValveCards() {
       : isOpen
         ? `<span class="vc-badge badge-open">● Ouverte (${v.source})</span>`
         : `<span class="vc-badge badge-closed">◌ Fermée</span>`;
+    const nextEv = getNextEventForValve(i);
+    const nextHtml = nextEv ? ( (nextEv.sched && nextEv.sched.name ? (nextEv.sched.name+' — ') : '') + nextEv.text ) : '—';
     return `
-    <div class="valve-card ${cardCls}" id="vc-${i}">
+    <div class="valve-card ${cardCls}" id="vc-${i}" style="--vcol:var(--vcol${i}); --vcol-fg:#fff">
       <div class="vc-header">
         <span class="vc-name">${v.name||'Vanne '+(i+1)}</span>
-        <span class="vc-num">V${i+1}</span>
+        <span class="vc-num" style="background:var(--vcol);color:var(--vcol-fg)">V${i+1}</span>
       </div>
       ${badgeHtml}
       <div class="vc-remaining">${isOpen ? fmtSec(v.remainingSec) : '—'}</div>
       <div class="vc-meta">Dernier démarrage: ${fmtEpoch(v.openedAt)}<br>
-        Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
+        Total cumulé: ${fmtSec(v.totalOpenSec)}<br>
+        Prochain: ${nextHtml}</div>
       <div class="vc-actions">
         <button class="btn btn-green btn-sm" onclick="openValve(${i})">Ouvrir</button>
         <button class="btn btn-red btn-sm" onclick="closeValve(${i})">Fermer</button>
@@ -632,28 +729,32 @@ function requestStatus() {
 // PROGRAMMES
 // ══════════════════════════════════════════════════════════
 function loadSchedules() {
-  api('GET','/api/schedules').then(data=>{
+  return api('GET','/api/schedules').then(data=>{
     schedules = data.schedules || [];
     renderSchedules();
+    return schedules;
   });
 }
 
 function renderSchedules() {
   const tbody = document.getElementById('sched-body');
-  if (!schedules.length) {
-    tbody.innerHTML = '<tr><td colspan="7" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
+  if(!schedules || !schedules.length){
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
     return;
   }
   const CAL_MODES = ['Hebdo','Intervalle','Saison'];
-  tbody.innerHTML = schedules.map((s,idx)=>`
-    <tr>
+  let rows = '';
+  for(let i=0;i<schedules.length;i++){
+    const s = schedules[i];
+    if(!s) continue;
+    const rowCls = s.active ? '' : 'sched-row inactive';
+    rows += `<tr class="${rowCls}">
       <td>${(valves[s.valve]&&valves[s.valve].name)||'V'+(s.valve+1)}</td>
+      <td>${s.name || ''}</td>
       <td>${String(s.hour).padStart(2,'0')}:${String(s.minute).padStart(2,'0')}</td>
       <td>${fmtSec(s.durationSec)}</td>
       <td style="font-size:.75rem">
-        ${s.calMode==1?'Tous les '+s.intervalDays+'j':
-          s.calMode==2?'Saison':
-          weekdayBits(s.weekDays)||'—'}
+        ${s.calMode==1?'Tous les '+s.intervalDays+'j': s.calMode==2?'Saison': weekdayBits(s.weekDays)||'—'}
       </td>
       <td><span style="font-size:.75rem;color:var(--text-muted)">${CAL_MODES[s.calMode||0]}</span></td>
       <td>
@@ -663,10 +764,12 @@ function renderSchedules() {
         </label>
       </td>
       <td>
-        <button class="btn btn-ghost btn-sm" onclick="editSched(${idx})">Éditer</button>
+        <button class="btn btn-ghost btn-sm" onclick="editSched(${i})">Éditer</button>
         <button class="btn btn-red btn-sm" onclick="deleteSched(${s.valve},${s.schedIdx})">Suppr.</button>
       </td>
-    </tr>`).join('');
+    </tr>`;
+  }
+  tbody.innerHTML = rows;
 }
 
 function openSchedModal() {
@@ -674,9 +777,13 @@ function openSchedModal() {
   document.getElementById('sched-edit-valve').value = '';
   document.getElementById('sched-edit-idx').value = '';
   document.getElementById('sched-valve').value = 0;
+  document.getElementById('sched-name').value = '';
   document.getElementById('sched-time').value = '06:00';
   document.getElementById('sched-dur').value = 900;
   document.getElementById('sched-calmode').value = 0;
+  // interval start default = today
+  const today = new Date();
+  document.getElementById('sched-interval-start').value = today.toISOString().slice(0,10);
   updateSchedCalMode();
   // Reset jours
   document.querySelectorAll('.day-btn').forEach(b=>{
@@ -694,8 +801,17 @@ function editSched(flatIdx) {
   document.getElementById('sched-time').value =
     String(s.hour).padStart(2,'0')+':'+String(s.minute).padStart(2,'0');
   document.getElementById('sched-dur').value = s.durationSec;
+  document.getElementById('sched-name').value = s.name || '';
   document.getElementById('sched-calmode').value = s.calMode||0;
   document.getElementById('sched-interval-n').value = s.intervalDays||2;
+  if(s.intervalStartMonth && s.intervalStartDay){
+    const y = (new Date()).getFullYear();
+    const mm = String(s.intervalStartMonth).padStart(2,'0');
+    const dd = String(s.intervalStartDay).padStart(2,'0');
+    document.getElementById('sched-interval-start').value = `${y}-${mm}-${dd}`;
+  } else {
+    document.getElementById('sched-interval-start').value = (new Date()).toISOString().slice(0,10);
+  }
   if(s.seasonStartMonth) {
     document.getElementById('sched-season-start').value =
       String(s.seasonStartMonth).padStart(2,'0')+'-'+String(s.seasonStartDay).padStart(2,'0');
@@ -731,10 +847,18 @@ function saveSched() {
     valve: parseInt(document.getElementById('sched-valve').value),
     schedIdx: document.getElementById('sched-edit-idx').value !== ''
               ? parseInt(document.getElementById('sched-edit-idx').value) : -1,
+    origValve: (function(){ const v=document.getElementById('sched-edit-valve').value; return v!==''?parseInt(v):undefined })(),
+    name: (document.getElementById('sched-name').value||'').substr(0,23),
     hour: parseInt(time[0]), minute: parseInt(time[1]),
     durationSec: parseInt(document.getElementById('sched-dur').value),
     calMode, weekDays,
     intervalDays: parseInt(document.getElementById('sched-interval-n').value)||2,
+    intervalStartMonth: (function(){
+      const v=document.getElementById('sched-interval-start').value; if(!v) return undefined; return parseInt(v.split('-')[1]);
+    })(),
+    intervalStartDay: (function(){
+      const v=document.getElementById('sched-interval-start').value; if(!v) return undefined; return parseInt(v.split('-')[2]);
+    })(),
     seasonStartMonth:sm||1, seasonStartDay:sd||1,
     seasonEndMonth:em||12, seasonEndDay:ed||31,
     active: true
@@ -749,7 +873,10 @@ function deleteSched(valve, schedIdx) {
 }
 
 function toggleSched(valve, schedIdx, active) {
-  api('POST','/api/schedule/toggle',{valve,schedIdx,active});
+  api('POST','/api/schedule/toggle',{valve,schedIdx,active}).then(()=>{
+    loadSchedules();
+    renderCalendar();
+  });
 }
 
 // ══════════════════════════════════════════════════════════
@@ -763,44 +890,93 @@ function renderCalendar() {
   document.getElementById('cal-title').textContent = MONTH_NAMES[m]+' '+y;
   const today = new Date();
 
-  // Jours arrosés selon programmes
-  const irrigatedDays = new Set();
+  // Construire map jour -> programmes actifs (pour afficher badges Vx)
+  const dayScheds = {};
+  const daysInMonth = new Date(y,m+1,0).getDate();
   schedules.forEach(s=>{
-    if(!s.active) return;
-    const daysInMonth = new Date(y,m+1,0).getDate();
-    for(let d=1;d<=daysInMonth;d++){
+    if(!s || !s.active) return;
+    for(let d=1; d<=daysInMonth; d++){
       const date = new Date(y,m,d);
       const dow = (date.getDay()+6)%7; // 0=Lun
       let match = false;
       if(s.calMode===0) match = !!(s.weekDays & (1<<dow));
-      else if(s.calMode===1) match = true; // simplifié
-      else if(s.calMode===2) {
-        const md = m*100+d;
-        const start = s.seasonStartMonth*100+s.seasonStartDay;
-        const end   = s.seasonEndMonth*100+s.seasonEndDay;
+      else if(s.calMode===1){
+        if(s.intervalDays && s.intervalDays>0){
+          const yday = Math.floor((Date.UTC(y, m, d) - Date.UTC(y, 0, 1)) / 86400000);
+          const startMonth = s.intervalStartMonth || 1;
+          const startDay   = s.intervalStartDay   || 1;
+          const startYday = Math.floor((Date.UTC(y, startMonth-1, startDay) - Date.UTC(y,0,1)) / 86400000);
+          const isLeap = ((y%4===0) && (y%100!==0 || y%400===0));
+          const daysInYear = 365 + (isLeap?1:0);
+          const diff = (yday - startYday + daysInYear) % s.intervalDays;
+          match = (diff === 0);
+        } else match = false;
+      }
+      else if(s.calMode===2){
+        const md = (m+1)*100 + d;
+        const start = s.seasonStartMonth*100 + s.seasonStartDay;
+        const end   = s.seasonEndMonth*100 + s.seasonEndDay;
         match = md>=start && md<=end;
       }
-      if(match) irrigatedDays.add(d);
+      if(match){
+        dayScheds[d] = dayScheds[d] || [];
+        dayScheds[d].push(s);
+      }
     }
   });
 
   const firstDay = new Date(y,m,1);
   const startDow = (firstDay.getDay()+6)%7;
-  const daysInMonth = new Date(y,m+1,0).getDate();
 
   let html = DAY_NAMES.map(d=>`<div class="cal-day-name">${d}</div>`).join('');
 
   // Cases vides avant le 1er
   for(let i=0;i<startDow;i++) html += '<div class="cal-day other-month"></div>';
 
-  for(let d=1;d<=daysInMonth;d++){
+  for(let d=1; d<=daysInMonth; d++){
     const isToday = today.getFullYear()===y && today.getMonth()===m && today.getDate()===d;
-    const hasSched = irrigatedDays.has(d);
-    const dots = hasSched ? '<div class="cal-dots"><span class="cal-dot"></span></div>' : '';
-    html += `<div class="cal-day ${isToday?'today':''} ${hasSched?'has-sched':''}">${d}${dots}</div>`;
+    const scheds = dayScheds[d] || [];
+    const hasSched = scheds.length>0;
+    let badges = '';
+    if(hasSched){
+      badges = '<div class="cal-dots">';
+      for(let sd of scheds){
+        const title = ((sd.name||'') + ' ' + String(sd.hour).padStart(2,'0')+':'+String(sd.minute).padStart(2,'0') + ' ('+fmtSec(sd.durationSec)+')').replace(/"/g,'&quot;');
+        // use data-tip for custom tooltip and data-valve for coloring
+        badges += `<span class="cal-badge" data-valve="${sd.valve}" data-tip="${title}" style="background:var(--vcol${sd.valve});">V${sd.valve+1}</span>`;
+      }
+      badges += '</div>';
+    }
+    html += `<div class="cal-day ${isToday?'today':''} ${hasSched?'has-sched':''}">${d}${badges}</div>`;
   }
 
   document.getElementById('cal-grid').innerHTML = html;
+
+  // Tooltip helper (works for hover and touch)
+  const tt = document.getElementById('cal-tooltip') || (function(){
+    const d = document.createElement('div'); d.id='cal-tooltip'; d.style.position='fixed'; d.style.zIndex=300; d.style.background='rgba(0,0,0,0.85)'; d.style.color='#fff'; d.style.padding='6px 8px'; d.style.borderRadius='6px'; d.style.fontSize='0.85rem'; d.style.maxWidth='280px'; d.style.display='none'; d.style.pointerEvents='none'; document.body.appendChild(d); return d;
+  })();
+  let ttHideTimer = null;
+  function showTooltip(el, text){
+    if(!text) return;
+    tt.textContent = text;
+    tt.style.display = 'block';
+    const r = el.getBoundingClientRect();
+    let top = r.top - tt.offsetHeight - 8; if(top<8) top = r.bottom + 8;
+    let left = r.left + (r.width/2) - (tt.offsetWidth/2);
+    if(left<8) left = 8; if(left + tt.offsetWidth > window.innerWidth-8) left = window.innerWidth - tt.offsetWidth - 8;
+    tt.style.top = top + 'px'; tt.style.left = left + 'px';
+    if(ttHideTimer) clearTimeout(ttHideTimer);
+    ttHideTimer = setTimeout(()=>{ tt.style.display='none'; }, 6000);
+  }
+  function hideTooltip(){ if(tt) tt.style.display='none'; }
+  // delegated events
+  document.querySelectorAll('.cal-badge').forEach(b=>{
+    b.addEventListener('mouseenter', e=> showTooltip(b, b.dataset.tip));
+    b.addEventListener('mouseleave', e=> hideTooltip());
+    b.addEventListener('click', e=> { e.preventDefault(); showTooltip(b, b.dataset.tip); });
+    b.addEventListener('touchstart', e=> { showTooltip(b, b.dataset.tip); });
+  });
 }
 
 // ══════════════════════════════════════════════════════════
@@ -888,7 +1064,14 @@ function saveConfig() {
 // ══════════════════════════════════════════════════════════
 function buildSchedValveSelect() {
   const sel = document.getElementById('sched-valve');
-  sel.innerHTML = Array.from({length:8},(_,i)=>`<option value="${i}">Vanne ${i+1}</option>`).join('');
+  const count = (valves && valves.length) ? valves.length : 8;
+  const prev = sel.value;
+  sel.innerHTML = Array.from({length:count},(_,i)=>`<option value="${i}">Vanne ${i+1}</option>`).join('');
+  // restore previous selection if still valid
+  if(prev !== undefined && prev !== null && prev !== ''){
+    const opt = sel.querySelector(`option[value="${prev}"]`);
+    if(opt) sel.value = prev;
+  }
 }
 
 function init() {
