@@ -263,7 +263,7 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 <header>
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#388bfd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M12 6v6l4 2"/></svg>
   <h1>IrrigPro</h1>
-  <span class="badge">4 VANNES</span>
+  <span class="badge">Mon Beau jardin bien arrosé</span>
   <div id="ws-status">
     <span id="ws-dot"></span>
     <span id="ws-label">Déconnecté</span>
@@ -287,6 +287,7 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
     <div>
       <div style="font-size:1.1rem;font-weight:700">Tableau de bord</div>
       <div style="font-size:.8rem;color:var(--text-muted)" id="uptime-label">—</div>
+      <div style="font-size:.85rem;margin-top:4px;color:var(--text-muted)" id="temps-label">T1: -- °C | T2: -- °C | TRem: -- °C</div>
       <div id="valve-legend" style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap"></div>
     </div>
     <div style="display:flex;gap:8px">
@@ -306,16 +307,18 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
       <h2>Programmes d'arrosage</h2>
       <button class="btn btn-blue btn-sm" onclick="openSchedModal()">+ Ajouter</button>
     </div>
-    <table class="tbl" id="sched-table">
-      <thead>
-        <tr>
-          <th>Vanne</th><th>Nom</th><th>Heure</th><th>Durée</th><th>Jours</th><th>Mode</th><th>Actif</th><th>Actions</th>
-        </tr>
-      </thead>
-      <tbody id="sched-body">
-        <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
-      </tbody>
-    </table>
+    <div style="overflow-x: auto;">
+      <table class="tbl" id="sched-table">
+        <thead>
+          <tr>
+            <th>Vanne</th><th>Nom</th><th>Heure</th><th>Durée</th><th>Jours</th><th>Mode</th><th>Actif</th><th>Actions</th>
+          </tr>
+        </thead>
+        <tbody id="sched-body">
+          <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
+        </tbody>
+      </table>
+    </div>
   </div>
 </div>
 
@@ -412,12 +415,12 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 <!-- ══ MODAL FORÇAGE ══════════════════════════════════ -->
 <div class="modal-overlay" id="force-modal">
   <div class="modal">
-    <h3>Forcer vanne <span id="force-modal-name"></span></h3>
+    <h3>Ouvrir la vanne <span id="force-modal-name"></span></h3>
     <label>Durée (secondes)</label>
     <input type="number" id="force-duration" value="1800" min="1" max="86400"/>
     <div class="modal-actions">
       <button class="btn btn-ghost" onclick="closeModal('force-modal')">Annuler</button>
-      <button class="btn btn-orange" onclick="confirmForce()">Forcer</button>
+      <button class="btn btn-green" onclick="confirmForce()">Ouvrir</button>
     </div>
   </div>
 </div>
@@ -501,6 +504,15 @@ let sysConfig = {};
 let wsConn = null;
 let calDate = new Date();
 let forceValveIdx = -1;
+
+// Verrou anti-rebuild pendant l'édition d'un programme.
+// Tant que le modal "sched-modal" est ouvert, on ne reconstruit pas
+// le <select id="sched-valve"> au gré des messages STATUS périodiques
+// (WebSocket ~1×/s). Avant ce correctif, buildSchedValveSelect() était
+// appelée à chaque handleStatus() et pouvait perdre/réinitialiser la
+// sélection de vanne en cours d'édition, donnant l'impression que
+// "la vanne 1 revient toute seule".
+let schedModalOpen = false;
 
 const DAY_NAMES = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
 const MONTH_NAMES = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
@@ -605,6 +617,7 @@ function showPage(id, btn) {
 
 function closeModal(id) {
   document.getElementById(id).classList.remove('open');
+  if(id==='sched-modal') schedModalOpen = false;
 }
 
 // ══════════════════════════════════════════════════════════
@@ -636,7 +649,17 @@ function handleStatus(data) {
   valves = data.valves || valves;
   document.getElementById('uptime-label').textContent =
     'Uptime: ' + fmtSec(data.uptime || 0) + '  |  Heap: ' + (data.heap ? Math.round(data.heap/1024)+'kB' : '—');
-  buildSchedValveSelect();
+  
+  if (document.getElementById('temps-label')) {
+    document.getElementById('temps-label').textContent = 
+      `T1: ${data.temp1 !== undefined ? data.temp1 : '--'} °C | ` +
+      `T2: ${data.temp2 !== undefined ? data.temp2 : '--'} °C | ` +
+      `TRem: ${data.tempR !== undefined ? data.tempR : '--'} °C`;
+  }
+  // Ne reconstruit le select des vannes du modal programme QUE si ce
+  // dernier n'est pas en cours d'édition — sinon la sélection de
+  // l'utilisateur est préservée jusqu'à la fermeture du modal.
+  if(!schedModalOpen) buildSchedValveSelect();
   renderLegend();
   renderValveCards();
 }
@@ -684,12 +707,14 @@ function renderValveCards() {
       ${badgeHtml}
       <div class="vc-remaining">${isOpen ? fmtSec(v.remainingSec) : '—'}</div>
       <div class="vc-meta">Dernier démarrage: ${fmtEpoch(v.openedAt)}<br>
-        Total cumulé: ${fmtSec(v.totalOpenSec)}<br>
-        Prochain: ${nextHtml}</div>
+        Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
+      <div style="margin: 8px 0 14px; padding: 8px 12px; background: var(--surface2); border-radius: 6px; border-left: 3px solid var(--blue); font-size: .8rem;">
+        <span style="color:var(--text-muted);font-size:.75rem;display:block;margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px">Prochain événement</span>
+        <strong style="color:var(--text);">${nextHtml}</strong>
+      </div>
       <div class="vc-actions">
-        <button class="btn btn-green btn-sm" onclick="openValve(${i})">Ouvrir</button>
+        <button class="btn btn-green btn-sm" onclick="showForceModal(${i})">Ouvrir</button>
         <button class="btn btn-red btn-sm" onclick="closeValve(${i})">Fermer</button>
-        <button class="btn btn-orange btn-sm" onclick="showForceModal(${i})">Forcer</button>
       </div>
     </div>`;
   }).join('');
@@ -742,11 +767,40 @@ function renderSchedules() {
     tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
     return;
   }
+  // Seuls les programmes actifs (ou en cours d'utilisation) ont un sens à
+  // afficher comme "ligne de programme". Le backend renvoie TOUJOURS les
+  // VANNE_COUNT × MAX_PROGRAMS slots (actifs ou non) afin que le frontend
+  // puisse retrouver une ligne par sa position (valve, schedIdx). On filtre
+  // ici l'affichage sur les slots qui ont réellement été configurés au moins
+  // une fois (nom non vide, ou actif, ou horaire différent par défaut) pour
+  // éviter d'afficher des dizaines de lignes vides "Lun Mar Mer Jeu Ven".
+  const meaningful = schedules.filter(s => {
+    if (!s) return false;
+    if (s.active) return true;
+    if (s.name && s.name.length > 0) return true;
+    if (s.hour !== 6 || s.minute !== 0 || s.durationSec !== 900) return true;
+    if (s.calMode !== 0 || s.weekDays !== 63) return true;
+    return false;
+  });
+  if(!meaningful.length){
+    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
+    return;
+  }
+  // Tri stable par vanne puis par heure, pour un affichage prévisible qui
+  // ne "saute" jamais : une ligne reste à une position cohérente entre deux
+  // rendus tant que ses données (vanne/heure) ne changent pas vraiment.
+  const sorted = [...meaningful].sort((a,b)=>{
+    if(a.valve !== b.valve) return a.valve - b.valve;
+    const ta = (a.hour||0)*60 + (a.minute||0);
+    const tb = (b.hour||0)*60 + (b.minute||0);
+    return ta - tb;
+  });
   const CAL_MODES = ['Hebdo','Intervalle','Saison'];
   let rows = '';
-  for(let i=0;i<schedules.length;i++){
-    const s = schedules[i];
-    if(!s) continue;
+  for(const s of sorted){
+    // Retrouver l'index dans le tableau `schedules` plat d'origine pour
+    // editSched(), qui a besoin de l'objet exact (avec valve/schedIdx).
+    const flatIdx = schedules.indexOf(s);
     const rowCls = s.active ? '' : 'sched-row inactive';
     rows += `<tr class="${rowCls}">
       <td>${(valves[s.valve]&&valves[s.valve].name)||'V'+(s.valve+1)}</td>
@@ -764,7 +818,7 @@ function renderSchedules() {
         </label>
       </td>
       <td>
-        <button class="btn btn-ghost btn-sm" onclick="editSched(${i})">Éditer</button>
+        <button class="btn btn-ghost btn-sm" onclick="editSched(${flatIdx})">Éditer</button>
         <button class="btn btn-red btn-sm" onclick="deleteSched(${s.valve},${s.schedIdx})">Suppr.</button>
       </td>
     </tr>`;
@@ -773,9 +827,11 @@ function renderSchedules() {
 }
 
 function openSchedModal() {
+  schedModalOpen = true;
   document.getElementById('sched-modal-title').textContent = 'Nouveau programme';
   document.getElementById('sched-edit-valve').value = '';
   document.getElementById('sched-edit-idx').value = '';
+  buildSchedValveSelect();
   document.getElementById('sched-valve').value = 0;
   document.getElementById('sched-name').value = '';
   document.getElementById('sched-time').value = '06:00';
@@ -793,10 +849,14 @@ function openSchedModal() {
 }
 
 function editSched(flatIdx) {
+  schedModalOpen = true;
   const s = schedules[flatIdx];
   document.getElementById('sched-modal-title').textContent = 'Modifier programme';
   document.getElementById('sched-edit-valve').value = s.valve;
   document.getElementById('sched-edit-idx').value = s.schedIdx;
+  // Reconstruit le select AVANT d'imposer la valeur, pour être sûr que
+  // l'option correspondant à s.valve existe bel et bien dans le DOM.
+  buildSchedValveSelect();
   document.getElementById('sched-valve').value = s.valve;
   document.getElementById('sched-time').value =
     String(s.hour).padStart(2,'0')+':'+String(s.minute).padStart(2,'0');
@@ -863,8 +923,14 @@ function saveSched() {
     seasonEndMonth:em||12, seasonEndDay:ed||31,
     active: true
   };
-  api('POST','/api/schedule/save',body).then(()=>loadSchedules());
-  closeModal('sched-modal');
+  // On ferme le modal et on relâche le verrou seulement APRÈS confirmation
+  // du serveur + rechargement de la liste, pour éviter tout affichage
+  // transitoire incohérent (ancienne ligne grisée, nouvelle ligne ailleurs).
+  api('POST','/api/schedule/save',body).then(()=>{
+    return loadSchedules();
+  }).then(()=>{
+    closeModal('sched-modal');
+  });
 }
 
 function deleteSched(valve, schedIdx) {
@@ -1066,7 +1132,7 @@ function buildSchedValveSelect() {
   const sel = document.getElementById('sched-valve');
   const count = (valves && valves.length) ? valves.length : 8;
   const prev = sel.value;
-  sel.innerHTML = Array.from({length:count},(_,i)=>`<option value="${i}">Vanne ${i+1}</option>`).join('');
+  sel.innerHTML = Array.from({length:count},(_,i)=>`<option value="${i}">${(valves[i]&&valves[i].name)?('V'+(i+1)+' — '+valves[i].name):('Vanne '+(i+1))}</option>`).join('');
   // restore previous selection if still valid
   if(prev !== undefined && prev !== null && prev !== ''){
     const opt = sel.querySelector(`option[value="${prev}"]`);

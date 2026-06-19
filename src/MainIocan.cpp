@@ -1,7 +1,5 @@
 #ifdef IOCAN
 
-
-
 // ============================================================
 // MainIocan.cpp — Contrôleur d'arrosage professionnel 8 vannes
 // PlatformIO / ESP32 — RadioLib SX1262 / AsyncWebServer / OTA
@@ -30,6 +28,8 @@
 #include <Preferences.h>
 #include <time.h>
 #include <esp_task_wdt.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
 #include "WebContent.h"   // SPA HTML — seul fichier séparé
 
@@ -37,18 +37,143 @@
 // SECTION 1 — CONSTANTES & PINS
 // ============================================================
 #define NODE_ID_DEFAULT      "IRRIGATION01"
-#define SOFT_REV             "2.0"
+#define SOFT_REV             "2.1"
 #define OTA_HOSTNAME         "esp32-irrigation"
 #define OTA_PASSWORD         "irrigation2024"
 
-// Vannes — 8 sorties (adapter aux broches réelles)
+
+
+// Capteurs de température
+const int oneWireBus = 6; // GPIO6 (J3-17) pour le bus OneWire
+OneWire oneWire(oneWireBus);
+DallasTemperature sensors(&oneWire);
+
+
+// ENTREE SORTIE
 static const int VANNE_COUNT       = 4;
-static const int VANNE_PINS[VANNE_COUNT]     = {47, 46, 45, 42};
-//static const int VANNE_PINS[VANNE_COUNT]     = {47, 46, 45, 42, 41, 40, 39, 38};
+static const int VANNE_PINS[VANNE_COUNT]     = {3,     //PD0
+                                      2,     //PD1
+                                      1,     //PD2
+                                      38,    //PD3
+                                        };
+
+static const int OUT_PINS[4]= { 
+                                      39,    //PD4
+                                      40,    //PD5
+                                      41,    //PD6
+                                      42     //PD7
+                                       };
+
+static const int LEDVISU_PINS[VANNE_COUNT]   = {48, //PA0-LED 
+                                      46, //PA1-LED
+                                      45, //PA2-LED
+                                      37}; //PA3-LED
+
 
 // Entrées forçage manuel (INPUT_PULLUP actif bas)
-static const int FORCE_INPUT_PINS[VANNE_COUNT] = {4, 5, 6, 7};
-//static const int FORCE_INPUT_PINS[VANNE_COUNT] = {4, 5, 6, 7, 15, 16, 17, 18};
+#define INPUTCOUNT 8
+static const int FORCE_INPUT_PINS[INPUTCOUNT] = { 47 ,  //PB0
+                                                33,     //PB1
+                                                34,     //PB2
+                                                35,     //PB3
+                                                36,     //PB4
+                                                5,      //PB5
+                                                20      //PB6
+                                                ,26 };  //PB7
+
+
+/******************************************************************************
+ * Wi-Fi LoRa 32 (ESP32) - PINOUT
+ * Source : schéma "Wi-Fi LoRa 32 Pin Map"
+ * {}  input
+ * [] output
+ * !! Temp Sensor
+ * Header J3 (gauche)                     Header J2 (droite)
+ * ===================                    ===================
+ *
+ * J3-18: GPIO7 ADC1_CH6 T7                       J2-18 : GPIO19 | U1RTS 
+ * J3-17: GPIO6 ADC1_CH5 TOUCH6  !oneWireBusTEMP! J2-17 : GPIO20 | U1CTS              {PB6-BP}
+ * J3-16: GPIO5 ADC1_CH4 TOUCH5  {PB5-BP}         J2-16 : GPIO21 | OLED_RST
+ * J3-15: GPIO4 ADC1_CH3 TOUCH4                   J2-15 : GPIO26 | SPI_CS1            {PB7-BP}
+ * J3-14: GPIO3 ADC1_CH2 TOUCH3  [PD0-VANNE]    J2-14 : GPIO48                        [PA0-LED]
+ * J3-13: GPIO2 ADC1_CH1 TOUCH2  [PD1-VANNE]    J2-13 : GPIO47                        {PB0-BP}
+ * J3-12: GPIO1 ADC1_CH0 VBAT_RD [PD2-VANNE]    J2-12 : GPIO33 | SPIIO4               {PB1-BP}
+ * J3-11: GPIO38 FSPIWP          [PD3-VANNE]    J2-11 : GPIO34 | SPIIO5               {PB2-BP}
+ * J3-10: GPIO39 MTCK            [PD4-O1]       J2-10 : GPIO35 | FSPID  | LEDBlanche  {PB3-BP}
+ * J3-09: GPIO40 MTDO            [PD5-O2]       J2-09 : GPIO36 | SPIIO7 | VEXT_CTL    {PB4-BP}
+ * J3-08: GPIO41 MTDI            [PD6-O3]       J2-08 : GPIO0  | BOOT_SW                
+ * J3-07: GPIO42 MTMS            [PD7-O4]       J2-07 : RST
+ * J3-06: GPIO45                 [PA2-LED]      J2-06 : U0TXD  | GPIO43
+ * J3-05: GPIO46                 [PA1-LED]      J2-05 : U0RXD  | GPIO44
+ * J3-04: GPIO37                 [PA3-LED]      J2-04 : VE
+ * J3-03: 3V3                                   J2-03 : VE
+ * J3-02: 3V3                                   J2-02 : 5V
+ * J3-01: GND                                   J2-01 : GND
+ *                         USB
+ * ---------------------------------------------------------------------------
+ * OLED intégré
+ * ---------------------------------------------------------------------------
+ *
+ * OLED_SDA -> GPIO17
+ * OLED_SCL -> GPIO18
+ * OLED_RST -> GPIO21
+ *
+ * ---------------------------------------------------------------------------
+ * Module LoRa SX127x intégré
+ * ---------------------------------------------------------------------------
+ *
+ * LoRa_NSS   -> GPIO8
+ * LoRa_SCK   -> GPIO9
+ * LoRa_MOSI  -> GPIO10
+ * LoRa_MISO  -> GPIO11
+ * LoRa_RST   -> GPIO12
+ * LoRa_BUSY  -> GPIO13
+ * LoRa_DIO1  -> GPIO14
+ *
+ * ---------------------------------------------------------------------------
+ * SPI Flash / FSPI
+ * ---------------------------------------------------------------------------
+ *
+ * FSPIWP     -> GPIO38
+ * FSPID      -> GPIO35
+ * FSPIIO4    -> GPIO33
+ * FSPIIO5    -> GPIO34
+ * FSPIIO7    -> GPIO36
+ * FSPICS0    -> GPIO34
+ * FSPICS1    -> GPIO26
+ * FSPICLK    -> GPIO37
+ *
+ * ---------------------------------------------------------------------------
+ * UART
+ * ---------------------------------------------------------------------------
+ *
+ * UART0_TX   -> GPIO43
+ * UART0_RX   -> GPIO44
+ *
+ * UART1_RTS  -> GPIO19
+ * UART1_CTS  -> GPIO20
+ *
+ * ---------------------------------------------------------------------------
+ * Alimentation
+ * ---------------------------------------------------------------------------
+ *
+ * 5V         -> J2-02
+ * 3.3V       -> J3-02, J3-03
+ * GND        -> J2-01, J3-01
+ *
+ *****************************************************************************/
+
+
+
+
+float temperature1 = 0;
+float temperature2 = 0;
+float temperatureRemote = 0;
+
+// Bouton pour l'affichage (BOOT = GPIO 0)
+const int BUTTON_PIN = 0;
+int oledPage = 2; // 0=IP, 1=Temp, 2=Vanne (default)
+unsigned long lastButtonPress = 0;
 
 // LoRa SX1262 (broches selon board HELTEC / TTGO — adapter)
 #define LORA_NSS        SS
@@ -329,7 +454,7 @@ void timeInit(){
     if(getLocalTime(&ti,5000)){
         timeIsSynced = true;
         logSys("NTP synchronisé");
-    } else {
+    } else if (oledPage == 2) {
         logSys("NTP échec (sera retenté)");
     }
 }
@@ -365,6 +490,8 @@ bool inSeason(const Schedule& s){
 void valveHardClose(int idx){
     if(idx<0||idx>=VANNE_COUNT) return;
     digitalWrite(VANNE_PINS[idx], LOW);
+    // Mirror to visualization LED pin if available
+    if(idx>=0 && idx<VANNE_COUNT) digitalWrite(LEDVISU_PINS[idx], LOW);
     Valve& v = valves[idx];
     if(v.isOpen){
         unsigned long openDur = (millis() - v.lastUpdateMs)/1000;
@@ -401,6 +528,8 @@ bool valveHardOpen(int idx, CmdSource src, uint32_t durationSec){
         durationSec = MAX_VALVE_OPEN_MS/1000;
 
     digitalWrite(VANNE_PINS[idx], HIGH);
+    // Mirror to visualization LED pin
+    if(idx>=0 && idx<VANNE_COUNT) digitalWrite(LEDVISU_PINS[idx], HIGH);
     v.isOpen       = true;
     v.source       = src;
     v.priority     = prio;
@@ -451,6 +580,8 @@ void valveUpdate(){
 // Ferme toutes les vannes (sécurité boot / reset)
 void valveCloseAll(CmdSource src=CmdSource::WEB){
     for(int i=0;i<VANNE_COUNT;i++) valveHardClose(i);
+    // ensure visualization LEDs are also cleared
+    for(int i=0;i<VANNE_COUNT;i++) digitalWrite(LEDVISU_PINS[i], LOW);
     logSys("Toutes vannes fermées");
 }
 
@@ -520,19 +651,23 @@ void inputUpdate(){
     for(int i=0;i<VANNE_COUNT;i++){
         bool pressed = (digitalRead(FORCE_INPUT_PINS[i]) == LOW);
         if(pressed && !inputActive[i]){
-            // Début appui
+            // Début appui (mémoriser timestamp)
             inputPressMs[i] = now;
             inputActive[i]  = true;
         }
         else if(!pressed && inputActive[i]){
-            // Relâchement
+            // Relâchement -> vérifier debounce puis toggle l'état de la vanne
             unsigned long dur = now - inputPressMs[i];
             inputActive[i] = false;
-            if(dur >= LONG_PRESS_MS){
-                // Appui long → fermer
+            const unsigned long DEBOUNCE_MS = 50;
+            if(dur < DEBOUNCE_MS) {
+                // bruit, ignorer
+                continue;
+            }
+            // Toggle: si ouverte -> fermer, sinon ouvrir pour la durée configurée
+            if(valves[i].isOpen){
                 valveClose(i, CmdSource::PHYS_INPUT);
             } else {
-                // Appui court → ouvrir (durée config)
                 valveHardOpen(i, CmdSource::PHYS_INPUT, sysConfig.manualForceSec);
             }
         }
@@ -615,6 +750,11 @@ void loraRxProcess(){
 
         StaticJsonDocument<512> doc;
         if(deserializeJson(doc,msg) == DeserializationError::Ok){
+            const char* id = doc["id"];
+            if (id && strcmp(id, "Yaourt1") == 0) {
+                temperatureRemote = doc["TempCelsius"] | temperatureRemote;
+            }
+
             const char* type = doc["type"];
             if(type){
                 if(strcmp(type,"CMD")==0)       loraProcessCmd(doc);
@@ -660,6 +800,9 @@ String buildStatusJson(){
     doc["type"]   = "STATUS";
     doc["uptime"] = millis()/1000;
     doc["heap"]   = ESP.getFreeHeap();
+    doc["temp1"]  = temperature1;
+    doc["temp2"]  = temperature2;
+    doc["tempR"]  = temperatureRemote;
     JsonArray arr = doc.createNestedArray("valves");
     for(int i=0;i<VANNE_COUNT;i++){
         Valve& v = valves[i];
@@ -723,8 +866,29 @@ String configToJson(){
 }
 
 // Construit le JSON des programmes (flat list)
+//
+// IMPORTANT (correctif bug "V3/V4 invisibles dans les programmes") :
+// Avec VANNE_COUNT vannes × MAX_PROGRAMS slots × ~16 champs par programme,
+// l'ancien buffer StaticJsonDocument<4096> était sous-dimensionné (besoin
+// réel de l'ordre de 8-10 Ko avec VANNE_COUNT=4, et bien plus avec 8 vannes).
+// ArduinoJson ne signale pas d'erreur quand le pool mémoire est plein : les
+// objets ajoutés après saturation sont silencieusement vides ou tronqués.
+// Comme la boucle remplit V1 puis V2 puis V3 puis V4 dans cet ordre, ce sont
+// les DERNIÈRES vannes traitées (V3, V4, ...) qui se retrouvaient amputées —
+// exactement le symptôme observé : leurs programmes "n'apparaissaient pas".
+// On utilise donc un DynamicJsonDocument dimensionné dynamiquement selon
+// VANNE_COUNT et MAX_PROGRAMS, avec une marge de sécurité, et on vérifie
+// explicitement le résultat de overflowed() pour journaliser le problème
+// au lieu de le laisser passer silencieusement si jamais la taille venait
+// à manquer de nouveau (ex: noms de programmes plus longs).
 String schedulesToJson(){
-    StaticJsonDocument<4096> doc;
+    // ~220 octets par programme (slot JsonObject + 16 champs + chaîne name)
+    // est une estimation large pour ArduinoJson v6 sur ESP32 (32-bit).
+    const size_t perSchedule = 220;
+    const size_t capacity = JSON_ARRAY_SIZE(VANNE_COUNT * MAX_PROGRAMS)
+                           + (size_t)VANNE_COUNT * MAX_PROGRAMS * (JSON_OBJECT_SIZE(16) + perSchedule)
+                           + 512; // marge fixe (clé "schedules" + alignement)
+    DynamicJsonDocument doc(capacity);
     JsonArray arr = doc.createNestedArray("schedules");
     for(int v=0;v<VANNE_COUNT;v++){
         for(int p=0;p<MAX_PROGRAMS;p++){
@@ -748,6 +912,11 @@ String schedulesToJson(){
             o["seasonEndMonth"]   = s.seasonEndMonth;
             o["seasonEndDay"]     = s.seasonEndDay;
         }
+    }
+    if(doc.overflowed()){
+        // Ne devrait plus arriver avec le dimensionnement ci-dessus, mais on
+        // journalise pour diagnostic immédiat plutôt qu'une troncature muette.
+        logSys("ERREUR: buffer JSON programmes insuffisant (overflow)");
     }
     String out; serializeJson(doc,out);
     return out;
@@ -817,28 +986,50 @@ void webSetup(){
     });
 
     // ── Sauver programme POST /api/schedule/save
+    //
+    // IMPORTANT (correctif bug "changement de vanne") :
+    // Un programme est identifié de façon stable par (origValve, schedIdx) tel
+    // qu'il existait AVANT modification. Si la vanne cible (valve) diffère de
+    // origValve, on ne réutilise JAMAIS le même schedIdx sur la nouvelle vanne :
+    // on cherche un slot libre dédié sur la vanne de destination, on y copie le
+    // programme, puis on libère l'ancien slot. Cela évite d'écraser silencieusement
+    // un programme existant sur la vanne de destination et évite que la ligne
+    // "saute" à un index arbitraire dans la liste à plat retournée par /api/schedules.
     server.on("/api/schedule/save", HTTP_POST, [](AsyncWebServerRequest* req){},
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
             StaticJsonDocument<512> doc;
             if(deserializeJson(doc,data,len)){jsonResp(req,"{\"ok\":false}",400);return;}
-            int v   = doc["valve"]    | -1;
-            int idx = doc["schedIdx"] | -1;
-            if(v<0||v>=VANNE_COUNT){jsonResp(req,"{\"ok\":false}",400);return;}
-            // Chercher slot libre si idx==-1
-            if(idx<0){
+            int v      = doc["valve"]    | -1;
+            int idx    = doc["schedIdx"] | -1;
+            int origV  = doc["origValve"] | -1;
+            bool isMove = (origV>=0 && origV!=v);
+
+            if(v<0||v>=VANNE_COUNT){jsonResp(req,"{\"ok\":false,\"reason\":\"valve\"}",400);return;}
+
+            if(isMove){
+                // Déplacement vers une autre vanne : ne JAMAIS réutiliser le même
+                // schedIdx tel quel — chercher un slot libre sur la vanne cible.
+                int freeIdx = -1;
+                for(int p=0;p<MAX_PROGRAMS;p++){
+                    if(!valves[v].schedules[p].active){ freeIdx=p; break; }
+                }
+                if(freeIdx<0){
+                    jsonResp(req,"{\"ok\":false,\"reason\":\"full\"}");
+                    return;
+                }
+                idx = freeIdx;
+            } else if(idx<0){
+                // Nouveau programme sur la même vanne : chercher un slot libre
                 for(int p=0;p<MAX_PROGRAMS;p++){
                     if(!valves[v].schedules[p].active){ idx=p; break; }
                 }
                 if(idx<0){jsonResp(req,"{\"ok\":false,\"reason\":\"full\"}");return;}
             }
-            if(idx>=MAX_PROGRAMS){jsonResp(req,"{\"ok\":false}",400);return;}
+
+            if(idx<0||idx>=MAX_PROGRAMS){jsonResp(req,"{\"ok\":false}",400);return;}
+
             Schedule& s = valves[v].schedules[idx];
-            int origV = doc["origValve"] | -1;
-            // If moving an existing schedule to another valve, clear the old slot
-            if(origV>=0 && origV!=v && idx>=0 && idx<MAX_PROGRAMS){
-                valves[origV].schedules[idx] = Schedule();
-            }
             s.active           = doc["active"]           | true;
             s.hour             = doc["hour"]             | 6;
             s.minute           = doc["minute"]           | 0;
@@ -853,8 +1044,17 @@ void webSetup(){
             s.seasonEndMonth   = doc["seasonEndMonth"]   | 10;
             s.seasonEndDay     = doc["seasonEndDay"]     | 31;
             if(doc.containsKey("name")) strlcpy(s.name, doc["name"], sizeof(s.name));
+
+            // Libérer l'ancien slot UNIQUEMENT après avoir écrit le nouveau avec succès
+            if(isMove){
+                valves[origV].schedules[ (int)(doc["schedIdx"] | -1) ] = Schedule();
+            }
+
             schedSave();
-            jsonResp(req,"{\"ok\":true}");
+            // Renvoyer la position finale pour que le frontend puisse resynchroniser
+            // immédiatement la sélection en cours d'édition sans devoir deviner.
+            String resp = "{\"ok\":true,\"valve\":"+String(v)+",\"schedIdx\":"+String(idx)+"}";
+            jsonResp(req,resp);
         }
     );
 
@@ -955,29 +1155,93 @@ void webSetup(){
 
 void oledUpdate(){
     unsigned long now = millis();
-    if(now - lastOledMs < 2000) return;
+    if(now - lastOledMs < 2000 && lastOledMs != 0) return;
     lastOledMs = now;
 
     display.clear();
     display.setFont(ArialMT_Plain_10);
     display.setTextAlignment(TEXT_ALIGN_LEFT);
 
-    // Ligne 0: uptime
-    display.drawString(0,0, "Uptime: " + String(now/60000) + "min");
+    if (oledPage == 0) {
+        display.drawString(0,0, "Reseau WiFi:");
+        display.drawString(0,14, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Deconnecte");
+    } else if (oledPage == 1) {
+        display.drawString(0,0, "Temperatures:");
+        display.drawString(0,14, "Temp1: " + String(temperature1) + " C");
+        display.drawString(0,28, "Temp2: " + String(temperature2) + " C");
+        display.drawString(0,42, "TempR: " + String(temperatureRemote) + " C");
+    } else if (oledPage == 2) {
+        // Ligne 0: uptime
+        display.drawString(0,0, "Uptime: " + String(now/60000) + "min");
 
-    // Ligne 1..N: état vannes 2 par 2 (calculer dynamiquement selon VANNE_COUNT)
-    int rows = (VANNE_COUNT + 1) / 2;
-    for(int row=0; row<rows; row++){
-        int i1 = row*2;
-        int i2 = row*2 + 1;
-        String s1 = "";
-        String s2 = "";
-        if(i1 < VANNE_COUNT) s1 = String(i1+1) + (valves[i1].isOpen?":ON ":":-- ");
-        if(i2 < VANNE_COUNT) s2 = String(i2+1) + (valves[i2].isOpen?":ON":":--");
-        display.drawString(0, 12 + row*13, s1 + s2);
+        // Ligne 1..N: état vannes 2 par 2 (calculer dynamiquement selon VANNE_COUNT)
+        int rows = (VANNE_COUNT + 1) / 2;
+        for(int row=0; row<rows; row++){
+            int i1 = row*2;
+            int i2 = row*2 + 1;
+            String s1 = "";
+            String s2 = "";
+            if(i1 < VANNE_COUNT) s1 = String(i1+1) + (valves[i1].isOpen?":ON ":":-- ");
+            if(i2 < VANNE_COUNT) s2 = String(i2+1) + (valves[i2].isOpen?":ON":":--");
+            display.drawString(0, 12 + row*13, s1 + s2);
+        }
+        // Afficher l'état des entrées (FORCE_INPUT_PINS) — LOW = appuyé
+        String inStates = "Entrées: ";
+        String serialStates = "";
+        for(int i=0;i<VANNE_COUNT;i++){
+            int pin = FORCE_INPUT_PINS[i];
+            int val = digitalRead(pin);
+            inStates += String("I") + String(i+1) + ":" + String(val) + " ";
+            serialStates += String(pin) +":"+String(val) + (i+1<VANNE_COUNT?" ":"");
+        }
+        display.drawString(0,40, inStates);
+        // Log concis pour debug (affiché toutes les secondes via oledUpdate)
+        Serial.printf("[INPUTS] %s\n", serialStates.c_str());
+        // Ligne 5: LoRa info
+        display.drawString(0,52,"LoRa rx:"+String(loraRxCount)+" rssi:"+String((int)loraRssi));
+    } else if (oledPage == 3) {
+        // Compact 4-line I/O table: header + oPD + oPA + Ipx
+        // Header with column numbers
+        display.drawString(0, 0, "----0 1 2 3 4 5 6 7");
+
+        // Row oPD: PD0..PD7 (VANNE_PINS -> PD0..PD3, OUT_PINS -> PD4..PD7)
+        String rowPD = "oPD:";
+        for(int col=0; col<8; col++){
+            int val = -1;
+            if(col < 4){
+                if(col < VANNE_COUNT) val = digitalRead(VANNE_PINS[col]);
+            } else {
+                int idx = col - 4;
+                if(idx < (int)(sizeof(OUT_PINS)/sizeof(OUT_PINS[0]))) val = digitalRead(OUT_PINS[idx]);
+            }
+            if(val < 0) rowPD += "  "; else rowPD += (val==HIGH?" 1":" 0");
+        }
+        display.drawString(0, 12, rowPD);
+
+        // Row oPA: visualization LEDs (only present for first VANNE_COUNT columns)
+        String rowPA = "oPA:";
+        for(int col=0; col<8; col++){
+            if(col < VANNE_COUNT){
+                int v = digitalRead(LEDVISU_PINS[col]);
+                rowPA += (v==HIGH?" 1":" 0");
+            } else {
+                rowPA += "  ";
+            }
+        }
+        display.drawString(0, 36, rowPA);
+
+        // Row Ipx: inputs PB0..PB7 (FORCE_INPUT_PINS)
+        String rowI = "iPB :";
+        for(int col=0; col<8; col++){
+            if(col < INPUTCOUNT){
+                int v = digitalRead(FORCE_INPUT_PINS[col]);
+                rowI += (v==HIGH?" 1":" 0");
+            } else {
+                rowI += "  ";
+            }
+        }
+        display.drawString(0, 24, rowI);
     }
-    // Ligne 5: LoRa info
-    display.drawString(0,65,"LoRa rx:"+String(loraRxCount)+" rssi:"+String((int)loraRssi));
     display.display();
 }
 
@@ -1010,6 +1274,9 @@ void setup(){
     Serial.begin(115200);
     Serial.println("\n=== IrrigPro v" SOFT_REV " ===");
 
+    sensors.begin();
+    pinMode(BUTTON_PIN, INPUT_PULLUP);
+
     // ── Init OLED
     pinMode(RST_OLED, OUTPUT);
     digitalWrite(RST_OLED, LOW); delay(50);
@@ -1031,11 +1298,25 @@ void setup(){
         pinMode(VANNE_PINS[i], OUTPUT);
         digitalWrite(VANNE_PINS[i], LOW);
     }
+    // Init LEDVISU pins (mirror of valve outputs)
+    for(int i=0;i<VANNE_COUNT;i++){
+        pinMode(LEDVISU_PINS[i], OUTPUT);
+        digitalWrite(LEDVISU_PINS[i], LOW);
+    }
+    // Init generic OUT_PINS (sorties auxiliaires)
+    for(int i=0;i<(int)(sizeof(OUT_PINS)/sizeof(OUT_PINS[0])); i++){
+        pinMode(OUT_PINS[i], OUTPUT);
+        digitalWrite(OUT_PINS[i], LOW);
+        Serial.printf("[PIN INIT] OUT %d set OUTPUT LOW\n", OUT_PINS[i]);
+    }
     logSys("Boot — toutes vannes fermées");
 
-    // ── Init entrées forçage
-    for(int i=0;i<VANNE_COUNT;i++)
-        pinMode(FORCE_INPUT_PINS[i], INPUT_PULLUP);
+    // ── Init entrées forçage (toutes les broches listées)
+    for(int i=0;i<INPUTCOUNT;i++){
+        int p = FORCE_INPUT_PINS[i];
+        pinMode(p, INPUT_PULLUP);
+        Serial.printf("[PIN INIT] IN %d set INPUT_PULLUP\n", p);
+    }
 
     // ── Init LoRa
     int loraState = radio.begin(
@@ -1102,6 +1383,24 @@ void setup(){
 // ============================================================
 
 void loop(){
+    // ── Bouton pour changer de page OLED
+    if (digitalRead(BUTTON_PIN) == LOW) {
+        if (millis() - lastButtonPress > 300) { // debounce
+            oledPage = (oledPage + 1) % 4; // add dedicated IO page
+            lastButtonPress = millis();
+            lastOledMs = 0; // force refresh
+        }
+    }
+
+    // ── Lecture températures (toutes les 10s)
+    static unsigned long lastTempRead = 0;
+    if (millis() - lastTempRead > 10000) {
+        lastTempRead = millis();
+        sensors.requestTemperatures();
+        temperature1 = sensors.getTempCByIndex(0);
+        temperature2 = sensors.getTempCByIndex(1);
+    }
+
     // ── OTA
     ArduinoOTA.handle();
 
