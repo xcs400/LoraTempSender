@@ -168,8 +168,9 @@ static const int FORCE_INPUT_PINS[INPUTCOUNT] = { 47 ,  //PB0
 
 
 float temperature1 = 0;
-float temperature2 = 0;
 float temperatureRemote = 0;
+bool temp1Valid = false;
+// temperature2 removed
 
 // Bouton pour l'affichage (BOOT = GPIO 0)
 const int BUTTON_PIN = 0;
@@ -323,6 +324,9 @@ float         loraRssi = 0;
 // Temps
 unsigned long bootMs       = 0;
 bool          timeIsSynced = false;
+// Flag timestamp for first successful NTP sync (ms), 0 = never
+unsigned long ntpSyncedAtMs = 0;
+unsigned long lastNtpAttemptMs = 0;
 
 // Entrées manuelles
 unsigned long inputPressMs[VANNE_COUNT]  = {0};
@@ -466,8 +470,11 @@ void timeInit(){
     configTime(sysConfig.tzOffset, 0, sysConfig.ntpServer);
     struct tm ti;
     if(getLocalTime(&ti,5000)){
-        timeIsSynced = true;
-        logSys("NTP synchronisé");
+        if(!timeIsSynced){
+            timeIsSynced = true;
+            ntpSyncedAtMs = millis();
+            logSys("NTP synchronisé (premiere fois)");
+        }
     } else if (oledPage == 2) {
         logSys("NTP échec (sera retenté)");
     }
@@ -604,13 +611,14 @@ void valveCloseAll(CmdSource src=CmdSource::WEB){
 // ============================================================
 
 // Vérifie si un programme doit se déclencher maintenant
-// Appelé 1×/min dans loop
+// Appelé périodiquement dans loop (réduit pour précision)
 unsigned long lastSchedCheckMs = 0;
+const unsigned long SCHED_CHECK_INTERVAL_MS = 5000UL; // vérifier toutes les 5s pour réduire délai
 
 void schedCheck(){
     if(!timeIsSynced) return;
     unsigned long now = millis();
-    if(now - lastSchedCheckMs < 60000UL) return;
+    if(now - lastSchedCheckMs < SCHED_CHECK_INTERVAL_MS) return;
     lastSchedCheckMs = now;
 
     struct tm ti;
@@ -624,8 +632,17 @@ void schedCheck(){
         for(int p=0;p<MAX_PROGRAMS;p++){
             Schedule& s = valves[v].schedules[p];
             if(!s.active) continue;
-            if(s.hour!=curH || s.minute!=curM) continue;
-
+            // Trigger if current time has reached scheduled hour:minute.
+            // Allow a small window (>= scheduled time and < scheduled time + 65s)
+            if(s.hour != curH) continue;
+            // compute seconds since start of minute
+            int curSec = ti.tm_sec;
+            if(s.minute != curM && s.minute != ((curM - (curSec>65?1:0) + 60) % 60)) continue;
+            if(s.minute != curM) {
+                // If we are slightly past the minute due to check timing, allow trigger
+                if(!( (curM == s.minute && curSec >=0) || (curM == (s.minute+1)%60 && curSec < 65) )) continue;
+            }
+            
             bool trigger = false;
             switch(s.calMode){
                 case 0: // hebdomadaire
@@ -680,7 +697,9 @@ void inputUpdate(){
             }
             // Toggle: si ouverte -> fermer, sinon ouvrir pour la durée configurée
             if(valves[i].isOpen){
-                valveClose(i, CmdSource::PHYS_INPUT);
+                // Si bouton OFF: forcer la fermeture même si la vanne était forcée par Web/Prog
+                valveHardClose(i);
+                logAdd(i, "Fermée — bouton OFF (annule forçage)");
             } else {
                 valveHardOpen(i, CmdSource::PHYS_INPUT, sysConfig.manualForceSec);
             }
@@ -777,8 +796,13 @@ void loraRxProcess(){
                     if(epoch>0){
                         struct timeval tv = {epoch,0};
                         settimeofday(&tv,nullptr);
-                        timeIsSynced = true;
-                        logSys("Heure synchronisée via LoRa");
+                        if(!timeIsSynced){
+                            timeIsSynced = true;
+                            ntpSyncedAtMs = millis();
+                            logSys("Heure synchronisée via LoRa (premiere fois)");
+                        } else {
+                            logSys("Heure synchronisée via LoRa");
+                        }
                     }
                 }
             }
@@ -815,8 +839,10 @@ String buildStatusJson(){
     doc["uptime"] = millis()/1000;
     doc["heap"]   = ESP.getFreeHeap();
     doc["temp1"]  = temperature1;
-    doc["temp2"]  = temperature2;
     doc["tempR"]  = temperatureRemote;
+    // add current local time for UI
+    time_t nowt = nowEpoch();
+    if(nowt) doc["time"] = (long)nowt;
     JsonArray arr = doc.createNestedArray("valves");
     for(int i=0;i<VANNE_COUNT;i++){
         Valve& v = valves[i];
@@ -827,6 +853,29 @@ String buildStatusJson(){
         o["remainingSec"]= v.remainingSec;
         o["openedAt"]    = (long)v.openedAt;
         o["totalOpenSec"]= v.totalOpenSec;
+    }
+    
+    // ── Entrées/Sorties pour la page web E/S (similaire à OLED page 3)
+    JsonArray ioOut = doc.createNestedArray("ioOut");
+    for(int col=0; col<8; col++){
+        if(col < 4){
+            if(col < VANNE_COUNT) ioOut.add(digitalRead(VANNE_PINS[col]));
+            else ioOut.add(-1);
+        } else {
+            int idx = col - 4;
+            if(idx < (int)(sizeof(OUT_PINS)/sizeof(OUT_PINS[0]))) ioOut.add(digitalRead(OUT_PINS[idx]));
+            else ioOut.add(-1);
+        }
+    }
+    JsonArray ioLed = doc.createNestedArray("ioLed");
+    for(int col=0; col<8; col++){
+        if(col < VANNE_COUNT) ioLed.add(digitalRead(LEDVISU_PINS[col]));
+        else ioLed.add(-1);
+    }
+    JsonArray ioIn = doc.createNestedArray("ioIn");
+    for(int col=0; col<8; col++){
+        if(col < VANNE_COUNT) ioIn.add(digitalRead(FORCE_INPUT_PINS[col]));
+        else ioIn.add(-1);
     }
     String out; serializeJson(doc,out);
     return out;
@@ -969,7 +1018,9 @@ void webSetup(){
             if(deserializeJson(doc,data,len)){jsonResp(req,"{\"ok\":false}",400);return;}
             int idx = doc["valve"] | -1;
             if(idx<0||idx>=VANNE_COUNT){jsonResp(req,"{\"ok\":false}",400);return;}
-            valveClose(idx, CmdSource::WEB);
+            // Fermer impérativement la vanne même si elle était forcée par une source
+            valveHardClose(idx);
+            logAdd(idx, "Fermée via Web (annule forçage)");
             jsonResp(req,"{\"ok\":true}");
         }
     );
@@ -1176,22 +1227,45 @@ void oledUpdate(){
     display.setFont(ArialMT_Plain_10);
     display.setTextAlignment(TEXT_ALIGN_LEFT);
 
-    // ── Page spéciale portail captif
-    if (captivePortalActive) {
-        display.drawString(0,  0, "!! WiFi FAIL !!");
-        display.drawString(0, 14, "AP: IrrigPro-Setup");
-        display.drawString(0, 28, "-> 192.168.4.1");
-        display.drawString(0, 42, "Config WiFi requise");
-        display.display();
-        return;
-    }
     if (oledPage == 0) {
-        display.drawString(0,0, "-Reseau WiFi:");
-        display.drawString(0,14, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Deconnecte");
+        if (captivePortalActive) {
+            display.drawString(0,  0, "!! WiFi FAIL !!");
+            display.drawString(0, 14, "AP: IrrigPro-Setup");
+            display.drawString(0, 28, "-> 192.168.4.1");
+            display.drawString(0, 42, "Config WiFi requise");
+        } else {
+            display.drawString(0,0, "-Reseau WiFi:");
+            display.drawString(0,14, WiFi.status() == WL_CONNECTED ? WiFi.localIP().toString() : "Deconnecte");
+            // Afficher date et heure si synchronisé
+            struct tm ti;
+            if(getLocalTime(&ti,5) && timeIsSynced){
+                char dateBuf[24];
+                char timeBuf[16];
+                strftime(dateBuf, sizeof(dateBuf), "%Y-%m-%d", &ti);
+                strftime(timeBuf, sizeof(timeBuf), "%H:%M:%S", &ti);
+                display.drawString(0,28, String(dateBuf));
+                display.drawString(0,40, String("Heure: ") + String(timeBuf));
+                // restore visualization LEDs to reflect valve states
+                for(int i=0;i<VANNE_COUNT;i++){
+                    digitalWrite(LEDVISU_PINS[i], valves[i].isOpen ? HIGH : LOW);
+                }
+                // show temporary confirmation message after first sync
+                if(ntpSyncedAtMs && millis() - ntpSyncedAtMs < 5000){
+                    display.drawString(0,52, "NTP OK — vannes auto actives");
+                }
+            } else {
+                display.drawString(0,28, "Heure: inconnue (NTP non sync)");
+                // Clignoter LEDs de visualisation comme alarme (ne pas activer/fermer vannes)
+                bool blink = ((millis() / 500) & 1) == 0;
+                for(int i=0;i<VANNE_COUNT;i++){
+                    digitalWrite(LEDVISU_PINS[i], blink ? HIGH : LOW);
+                }
+            }
+        }
     } else if (oledPage == 1) {
         display.drawString(0,0, "Temperatures:");
         display.drawString(0,14, "Temp1: " + String(temperature1) + " C");
-        display.drawString(0,28, "Temp2: " + String(temperature2) + " C");
+        // Temp2 removed
         display.drawString(0,42, "TempR: " + String(temperatureRemote) + " C");
     } else if (oledPage == 2) {
         // Ligne 0: uptime
@@ -1208,18 +1282,9 @@ void oledUpdate(){
             if(i2 < VANNE_COUNT) s2 = String(i2+1) + (valves[i2].isOpen?":ON":":--");
             display.drawString(0, 12 + row*13, s1 + s2);
         }
-        // Afficher l'état des entrées (FORCE_INPUT_PINS) — LOW = appuyé
-        String inStates = "Entrées: ";
-        String serialStates = "";
-        for(int i=0;i<VANNE_COUNT;i++){
-            int pin = FORCE_INPUT_PINS[i];
-            int val = digitalRead(pin);
-            inStates += String("I") + String(i+1) + ":" + String(val) + " ";
-            serialStates += String(pin) +":"+String(val) + (i+1<VANNE_COUNT?" ":"");
-        }
-        display.drawString(0,40, inStates);
-        // Log concis pour debug (affiché toutes les secondes via oledUpdate)
-        Serial.printf("[INPUTS] %s\n", serialStates.c_str());
+        // Afficher températures à la place des entrées
+        String t1 = (isnan(temperature1) ? String("T1: -- °C") : String("T1:")+String(temperature1,2)+" °C");
+        display.drawString(0,40, t1);
         // Ligne 5: LoRa info
         display.drawString(0,52,"LoRa rx:"+String(loraRxCount)+" rssi:"+String((int)loraRssi));
     } else if (oledPage == 3) {
@@ -1585,20 +1650,16 @@ void setup(){
             display.display();
             delay(3000);
         }
+        // ── OTA
+        otaSetup();
+        // ── Web
+        webSetup();
     } else {
         Serial.println("\nWiFi FAIL — lancement portail captif");
         logSys("WiFi FAIL — portail captif actif");
         startCaptivePortal();
-        // En mode portail captif : NE PAS démarrer OTA, webSetup, ni le watchdog
-        // Le loop() prend le relais avec dnsServer.processNextRequest()
-        return;
+        // Ne pas démarrer otaSetup() et webSetup() en mode AP
     }
-
-    // ── OTA
-    otaSetup();
-
-    // ── Web
-    webSetup();
 
     // ── Watchdog
     esp_task_wdt_init(60, true);
@@ -1632,29 +1693,32 @@ void loop(){
         lastTempRead = millis();
         sensors.requestTemperatures();
         temperature1 = sensors.getTempCByIndex(0);
-        temperature2 = sensors.getTempCByIndex(1);
+        // Considerer valeurs <= -100 comme capteur déconnecté (-127 typique)
+        bool v1 = !(isnan(temperature1) || temperature1 <= -100.0);
+        if(v1 != temp1Valid){
+            temp1Valid = v1;
+            if(!temp1Valid) logSys("Temp1: capteur absent ou erreur");
+            else { char b[40]; snprintf(b,40, "Temp1: %.2f C", temperature1); logSys(b); }
+        } else if(temp1Valid){
+            // log occasional stable reading (every 6th read ~1min) to avoid spam
+            static int cnt1 = 0; cnt1 = (cnt1+1)%6; if(cnt1==0){ char b[40]; snprintf(b,40, "Temp1: %.2f C", temperature1); logSys(b); }
+        }
     }
 
-    // ── Portail captif actif : traiter uniquement DNS + WDT, pas le reste
+    // ── Portail captif
     if (captivePortalActive) {
         if (pendingRestart) {
             if (millis() - pendingRestartMs > 2000) {
                 Serial.println("[CaptivePortal] Redémarrage de l'ESP...");
                 ESP.restart();
             }
+            return; // Bloquer l'irrigation uniquement pendant le redémarrage (les 2 secondes de délai)
         }
         dnsServer.processNextRequest();
-        unsigned long now2 = millis();
-        if(now2 - lastWdtMs >= 5000){ lastWdtMs = now2; esp_task_wdt_reset(); }
-        
-        if (!pendingRestart) {
-            oledUpdate();
-        }
-        return;
     }
 
     // ── OTA
-    ArduinoOTA.handle();
+    if (!captivePortalActive) ArduinoOTA.handle();
 
     // ── LoRa RX
     loraRxProcess();
@@ -1726,6 +1790,16 @@ void loop(){
             lastWifiReconnectMs = now;
             Serial.println("Tentative périodique de reconnexion WiFi...");
             WiFi.begin(sysConfig.ssid, sysConfig.wifiPass);
+        }
+    }
+
+    // Réessayer NTP périodiquement tant que non synchronisé
+    if(WiFi.status() == WL_CONNECTED && !timeIsSynced){
+        const unsigned long NTP_RETRY_MS = 60000UL; // 60s
+        if(now - lastNtpAttemptMs >= NTP_RETRY_MS){
+            lastNtpAttemptMs = now;
+            Serial.println("Tentative NTP (retry)...");
+            timeInit();
         }
     }
 }

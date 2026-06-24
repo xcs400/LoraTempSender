@@ -88,17 +88,22 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   gap:16px
 }
 .valve-card{
-  background:var(--surface);border:1px solid var(--border);
+  /* darker surface with stronger tint */
+  background:color-mix(in srgb, var(--vcol) 16%, var(--surface));
+  /* full saturated border using valve color for emphasis */
+  border:2px solid var(--vcol);
   border-radius:var(--radius);padding:18px;
-  transition:border-color .2s,box-shadow .2s;position:relative;overflow:hidden
+  transition:border-color .2s,box-shadow .2s;position:relative;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.35)
 }
 .valve-card::before{
-  content:'';position:absolute;top:0;left:0;right:0;height:3px;background:var(--border);
-  transition:background .2s
+  content:'';position:absolute;top:0;left:0;right:0;height:3px;
+  background:color-mix(in srgb, var(--vcol) 30%, transparent);
+  transition:background .2s, height .2s;
 }
-.valve-card.open::before{background:var(--green)}
-.valve-card.forced::before{background:var(--orange)}
-.valve-card.alarm::before{background:var(--red)}
+.valve-card.open::before, .valve-card.forced::before, .valve-card.alarm::before {
+  background:var(--vcol);
+  height: 4px;
+}
 
 .valve-card .vc-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
 .valve-card .vc-name{font-weight:600;font-size:.95rem}
@@ -115,7 +120,11 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 .badge-forced{background:var(--orange-dim);color:var(--orange)}
 .badge-alarm{background:var(--red-dim);color:var(--red)}
 
-.valve-card .vc-remaining{font-size:1.4rem;font-weight:700;font-variant-numeric:tabular-nums;min-height:34px}
+.valve-card .vc-remaining{font-size:1.4rem;font-weight:700;font-variant-numeric:tabular-nums;min-height:34px;color:var(--text)}
+/* make remaining time red when valve is open/forced/alarm */
+.valve-card.open .vc-remaining,
+.valve-card.forced .vc-remaining,
+.valve-card.alarm .vc-remaining{ color: var(--red); }
 .valve-card .vc-meta{font-size:.75rem;color:var(--text-muted);margin:6px 0 14px}
 .valve-card .vc-actions{display:flex;gap:8px;flex-wrap:wrap}
 
@@ -277,6 +286,7 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   <button onclick="showPage('calendrier',this)">Calendrier</button>
   <button onclick="showPage('journal',this)">Journal</button>
   <button onclick="showPage('config',this)">Configuration</button>
+  <button onclick="showPage('io',this)">Entr&eacute;es/Sorties</button>
 </nav>
 
 <main>
@@ -288,7 +298,6 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
       <div style="font-size:1.1rem;font-weight:700">Tableau de bord</div>
       <div style="font-size:.8rem;color:var(--text-muted)" id="uptime-label">—</div>
       <div style="font-size:.85rem;margin-top:4px;color:var(--text-muted)" id="temps-label">T1: -- °C | T2: -- °C | TRem: -- °C</div>
-      <div id="valve-legend" style="margin-top:6px;display:flex;gap:8px;flex-wrap:wrap"></div>
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-ghost btn-sm" onclick="closeAll()">Tout fermer</button>
@@ -332,6 +341,34 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
     </div>
     <div class="cal-grid" id="cal-grid">
       <!-- généré JS -->
+    </div>
+  </div>
+</div>
+
+<!-- ══ PAGE E/S ═════════════════════════════════════ -->
+<div id="page-io" class="page">
+  <div class="card">
+    <div class="card-header">
+      <h2>Entr&eacute;es / Sorties Mat&eacute;rielles</h2>
+    </div>
+    <div style="overflow-x: auto; padding: 16px;">
+      <table class="tbl" style="font-family: monospace; text-align: center; width:100%; max-width:600px; margin:0 auto">
+        <thead>
+          <tr>
+            <th style="text-align:left; width:60px">Pin</th>
+            <th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th>
+          </tr>
+        </thead>
+        <tbody id="io-body">
+          <tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px">En attente des donn&eacute;es...</td></tr>
+        </tbody>
+      </table>
+      <div style="margin-top: 24px; font-size: 0.85rem; color: var(--text-muted); max-width:600px; margin-left:auto; margin-right:auto; padding:12px; background:var(--surface2); border-radius:6px">
+        <strong style="color:var(--text)">L&eacute;gende :</strong><br>
+        <div style="margin-top:6px"><strong>oPD</strong> : Sorties Puissance (0-3: Vannes, 4-7: Sorties auxiliaires)</div>
+        <div><strong>oPA</strong> : Sorties LEDs visualisation (0-3: État des vannes)</div>
+        <div><strong>In</strong> : Entr&eacute;es for&ccedil;age manuel (Boutons poussoirs)</div>
+      </div>
     </div>
   </div>
 </div>
@@ -555,10 +592,17 @@ function scheduleMatchesOnDate(s, date){
   }
   if(s.calMode===1){ // intervalle
     if(!s.intervalDays || s.intervalDays<=0) return false;
-    const yday = Math.floor((Date.UTC(y,m,d) - Date.UTC(y,0,1)) / 86400000);
+    // compute day-of-year in local time to avoid UTC timezone shifts
+    function ydayLocal(dt){
+      const start = new Date(dt.getFullYear(),0,1);
+      const diff = Math.floor((dt - start) / 86400000);
+      return diff;
+    }
+    const yday = ydayLocal(date);
     const startMonth = s.intervalStartMonth || 1;
     const startDay   = s.intervalStartDay   || 1;
-    const startYday = Math.floor((Date.UTC(y, startMonth-1, startDay) - Date.UTC(y,0,1)) / 86400000);
+    const startDate = new Date(y, startMonth-1, startDay);
+    const startYday = ydayLocal(startDate);
     const isLeap = ((y%4===0) && (y%100!==0 || y%400===0));
     const daysInYear = 365 + (isLeap?1:0);
     const diff = (yday - startYday + daysInYear) % s.intervalDays;
@@ -647,8 +691,14 @@ function connectWS() {
 function handleStatus(data) {
   // data: {type, uptime, valves:[{name,state,source,remainingSec,openedAt,totalOpenSec},...]}
   valves = data.valves || valves;
+  // Show uptime and current time (use data.time if provided)
+  let timeStr = '—';
+  if(data.time){
+    const d = new Date(data.time * 1000);
+    timeStr = d.toLocaleString('fr-FR',{hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  }
   document.getElementById('uptime-label').textContent =
-    'Uptime: ' + fmtSec(data.uptime || 0) + '  |  Heap: ' + (data.heap ? Math.round(data.heap/1024)+'kB' : '—');
+    'Uptime: ' + fmtSec(data.uptime || 0) + '  |  Heure: ' + timeStr;
   
   if (document.getElementById('temps-label')) {
     document.getElementById('temps-label').textContent = 
@@ -660,23 +710,25 @@ function handleStatus(data) {
   // dernier n'est pas en cours d'édition — sinon la sélection de
   // l'utilisateur est préservée jusqu'à la fermeture du modal.
   if(!schedModalOpen) buildSchedValveSelect();
-  renderLegend();
   renderValveCards();
-}
-
-function renderLegend(){
-  const el = document.getElementById('valve-legend');
-  if(!el) return;
-  el.innerHTML = '';
-  for(let i=0;i<valves.length;i++){
-    const name = (valves[i]&&valves[i].name)||('V'+(i+1));
-    const dot = `<span style="display:inline-flex;align-items:center;gap:6px;margin-right:6px">
-      <span style="width:12px;height:12px;border-radius:3px;background:var(--vcol${i});display:inline-block;"></span>
-      <span style="font-size:.78rem;color:var(--text-muted)">V${i+1} ${name}</span>
-    </span>`;
-    el.innerHTML += dot;
+  
+  if (data.ioOut && data.ioLed && data.ioIn) {
+    const buildRow = (label, arr) => {
+      let r = `<tr><td style="text-align:left; font-weight:bold">${label}</td>`;
+      for(let i=0; i<8; i++) {
+        const val = arr[i];
+        if(val < 0) r += `<td style="color:var(--text-muted)">--</td>`;
+        else r += `<td><span style="display:inline-block;width:24px;height:24px;line-height:24px;border-radius:4px;background:${val===1?'var(--green)':'var(--surface2)'};color:${val===1?'#fff':''}">${val}</span></td>`;
+      }
+      return r + `</tr>`;
+    };
+    const html = buildRow('oPD', data.ioOut) + buildRow('oPA', data.ioLed) + buildRow('In', data.ioIn);
+    const tbody = document.getElementById('io-body');
+    if(tbody) tbody.innerHTML = html;
   }
 }
+
+
 
 // ══════════════════════════════════════════════════════════
 // DASHBOARD — CARTES VANNES
