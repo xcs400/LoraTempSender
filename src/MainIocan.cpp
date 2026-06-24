@@ -51,24 +51,24 @@ DallasTemperature sensors(&oneWire);
 
 
 // ENTREE SORTIE
-static const int VANNE_COUNT       = 4;
-static const int VANNE_PINS[VANNE_COUNT]     = {3,     //PD0
+static const int VANNE_COUNT       = 5;
+static const int VANNE_PINS[5]     = {3,     //PD0
                                       2,     //PD1
                                       1,     //PD2
                                       38,    //PD3
+                                      39,    //PD4
                                         };
 
-static const int OUT_PINS[4]= { 
-                                      39,    //PD4
-                                      40,    //PD5
+static const int OUT_PINS[2]= { 
                                       41,    //PD6
                                       42     //PD7
                                        };
 
-static const int LEDVISU_PINS[VANNE_COUNT]   = {48, //PA0-LED 
+static const int LEDVISU_PINS[5]   = {48, //PA0-LED 
                                       46, //PA1-LED
                                       45, //PA2-LED
-                                      37}; //PA3-LED
+                                      37,//PA3-LED
+                                      40 }; //Pd5-LED
 
 
 // Entrées forçage manuel (INPUT_PULLUP actif bas)
@@ -115,8 +115,8 @@ static const int FORCE_INPUT_PINS[INPUTCOUNT] = { 47 ,  //PB0
  * J3-13: GPIO2 ADC1_CH1 TOUCH2  [PD1-VANNE]    J2-13 : GPIO47                        {PB0-BP}
  * J3-12: GPIO1 ADC1_CH0 VBAT_RD [PD2-VANNE]    J2-12 : GPIO33 | SPIIO4               {PB1-BP}
  * J3-11: GPIO38 FSPIWP          [PD3-VANNE]    J2-11 : GPIO34 | SPIIO5               {PB2-BP}
- * J3-10: GPIO39 MTCK            [PD4-O1]       J2-10 : GPIO35 | FSPID  | LEDBlanche  {PB3-BP}
- * J3-09: GPIO40 MTDO            [PD5-O2]       J2-09 : GPIO36 | SPIIO7 | VEXT_CTL    {PB4-BP}
+ * J3-10: GPIO39 MTCK            [PD4-VANNE]    J2-10 : GPIO35 | FSPID  | LEDBlanche  {PB3-BP}
+ * J3-09: GPIO40 MTDO            [PD5-LED]       J2-09 : GPIO36 | SPIIO7 | VEXT_CTL    {PB4-BP}
  * J3-08: GPIO41 MTDI            [PD6-O3]       J2-08 : GPIO0  | BOOT_SW                
  * J3-07: GPIO42 MTMS            [PD7-O4]       J2-07 : RST
  * J3-06: GPIO45                 [PA2-LED]      J2-06 : U0TXD  | GPIO43
@@ -329,6 +329,28 @@ unsigned long persistedPulseCount = 0;
 // Seuil de sauvegarde en litres
 #define SAVE_LITRES_STEP 100.0f
 
+// ── Consommation par vanne (compteur partagé en amont)
+// On conserve pour chaque vanne :
+//  - un total cumulé de pulses attribués
+//  - un cumul journalier + index du jour (yyyymmdd)
+//  - un petit historique (14 jours) pour le tableau UI
+#define CONS_HISTORY_DAYS 14
+struct DayStat {
+    uint16_t ymd;       // ex: 20260624
+    uint32_t pulses;    // pulses attribués ce jour-là
+    float    litres;    // = pulses / PULSES_PER_LITRE
+};
+struct ValveCons {
+    unsigned long pulsesTotal = 0;   // total cumulé (persisté)
+    uint16_t todayYmd = 0;
+    uint32_t todayPulses = 0;
+    uint16_t todayIdx = 0;           // index d'écriture dans history (anneau)
+    DayStat history[CONS_HISTORY_DAYS];
+};
+ValveCons valveCons[VANNE_COUNT];
+// Dernier total pulses global connu après distribution (pour calculer delta à venir)
+static unsigned long lastDistributedTotal = 0;
+
 // Journal circulaire
 LogEntry  logBuf[LOG_MAX];
 uint16_t  logHead  = 0;
@@ -467,6 +489,117 @@ void pulseSave(){
     prefs.begin("irrigcfg", false);
     prefs.putULong("pulseCnt", persistedPulseCount);
     prefs.end();
+}
+
+// ── Date du jour au format YYYYMMDD (0 si pas sync NTP)
+static uint16_t todayYMD(){
+    struct tm ti;
+    if(!getLocalTime(&ti,5)) return 0;
+    return (uint16_t)((ti.tm_year+1900)*10000 + (ti.tm_mon+1)*100 + ti.tm_mday);
+}
+
+// ── Consommation par vanne — chargement / sauvegarde NVS
+void valveConsLoad(){
+    prefs.begin("irrigcfg", false);
+    for(int v=0;v<VANNE_COUNT;v++){
+        char key[24];
+        // Total cumulé
+        snprintf(key,sizeof(key),"v%d_pc",v);
+        valveCons[v].pulsesTotal = prefs.getULong(key, 0UL);
+        // Index jour courant + pulses du jour
+        snprintf(key,sizeof(key),"v%d_td",v);
+        valveCons[v].todayYmd = prefs.getUShort(key, 0);
+        snprintf(key,sizeof(key),"v%d_tp",v);
+        valveCons[v].todayPulses = prefs.getUInt(key, 0);
+        // Historique : on stocke chaque entrée (ymd + pulses) en binaire
+        for(int d=0;d<CONS_HISTORY_DAYS;d++){
+            snprintf(key,sizeof(key),"v%d_h%d",v,d);
+            DayStat ds;
+            if(prefs.getBytes(key, &ds, sizeof(DayStat)) != sizeof(DayStat)){
+                ds.ymd = 0; ds.pulses = 0; ds.litres = 0;
+            }
+            valveCons[v].history[d] = ds;
+        }
+    }
+    prefs.end();
+    // Recalcule l'index d'écriture anneau (première case libre, ou plus ancienne si plein)
+    for(int v=0;v<VANNE_COUNT;v++){
+        uint16_t idx = 0;
+        for(int d=0;d<CONS_HISTORY_DAYS;d++){
+            if(valveCons[v].history[d].ymd == 0){ idx = d; break; }
+            idx = (uint16_t)((d+1) % CONS_HISTORY_DAYS);
+        }
+        valveCons[v].todayIdx = idx;
+    }
+}
+
+void valveConsSaveOne(int v){
+    prefs.begin("irrigcfg", false);
+    char key[24];
+    snprintf(key,sizeof(key),"v%d_pc",v);
+    prefs.putULong(key, valveCons[v].pulsesTotal);
+    snprintf(key,sizeof(key),"v%d_td",v);
+    prefs.putUShort(key, valveCons[v].todayYmd);
+    snprintf(key,sizeof(key),"v%d_tp",v);
+    prefs.putUInt(key, valveCons[v].todayPulses);
+    for(int d=0;d<CONS_HISTORY_DAYS;d++){
+        snprintf(key,sizeof(key),"v%d_h%d",v,d);
+        prefs.putBytes(key, &valveCons[v].history[d], sizeof(DayStat));
+    }
+    prefs.end();
+}
+
+// ── Distribution simple : à chaque delta de pulses global,
+//    on attribue delta / nbVannesOuvertes à chaque vanne ouverte.
+//    Si aucune vanne n'est ouverte, on n'attribue rien (les pulses restent
+//    dans le compteur global mais ne sont pas comptés par vanne). Cela reflète
+//    la réalité physique : un compteur en amont "voit" aussi des fuites / arrêts
+//    manuels, etc. — quand la calibration sera faite, on ajustera ce calcul.
+void pulseDistribute(unsigned long totalPulsesGlobal){
+    if(totalPulsesGlobal < lastDistributedTotal){
+        // Compteur régressé (RAZ via Web) : on resynchronise sans attribution
+        lastDistributedTotal = totalPulsesGlobal;
+        return;
+    }
+    unsigned long delta = totalPulsesGlobal - lastDistributedTotal;
+    if(delta == 0) return;
+    // Compte le nombre de vannes ouvertes
+    int openCount = 0;
+    for(int i=0;i<VANNE_COUNT;i++) if(valves[i].isOpen) openCount++;
+    if(openCount == 0){
+        // Personne pour recevoir les pulses ; on les "perd" pour le suivi par vanne.
+        lastDistributedTotal = totalPulsesGlobal;
+        return;
+    }
+    unsigned long perValve = delta / (unsigned long)openCount;
+    unsigned long reste    = delta - perValve * (unsigned long)openCount;
+    uint16_t today = todayYMD();
+
+    for(int i=0;i<VANNE_COUNT;i++){
+        if(!valves[i].isOpen) continue;
+        // Reset du compteur journalier si on est sur un nouveau jour
+        if(today != valveCons[i].todayYmd){
+            // Clôture éventuelle du jour précédent dans l'historique
+            if(valveCons[i].todayYmd != 0 && valveCons[i].todayPulses > 0){
+                DayStat ds;
+                ds.ymd = valveCons[i].todayYmd;
+                ds.pulses = valveCons[i].todayPulses;
+                ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
+                valveCons[i].history[valveCons[i].todayIdx % CONS_HISTORY_DAYS] = ds;
+                valveCons[i].todayIdx = (uint16_t)((valveCons[i].todayIdx + 1) % CONS_HISTORY_DAYS);
+            }
+            valveCons[i].todayYmd = today;
+            valveCons[i].todayPulses = 0;
+        }
+        unsigned long share = perValve;
+        // distribue le reste aux premières vannes ouvertes (1 pulse chacune)
+        if(reste > 0){ share += 1; reste--; }
+        valveCons[i].pulsesTotal += share;
+        valveCons[i].todayPulses += share;
+    }
+    lastDistributedTotal = totalPulsesGlobal;
+    // Sauvegarde NVS (peu coûteux : une_pref put par vanne)
+    for(int i=0;i<VANNE_COUNT;i++) if(valves[i].isOpen) valveConsSaveOne(i);
 }
 
 // Sauvegarde/chargement des programmes
@@ -876,6 +1009,7 @@ String buildStatusJson(){
     time_t nowt = nowEpoch();
     if(nowt) doc["time"] = (long)nowt;
     JsonArray arr = doc.createNestedArray("valves");
+    uint16_t today = todayYMD();
     for(int i=0;i<VANNE_COUNT;i++){
         Valve& v = valves[i];
         JsonObject o = arr.createNestedObject();
@@ -885,6 +1019,15 @@ String buildStatusJson(){
         o["remainingSec"]= v.remainingSec;
         o["openedAt"]    = (long)v.openedAt;
         o["totalOpenSec"]= v.totalOpenSec;
+        // ── Conso par vanne (litres aujourd'hui + total cumulé)
+        float litresToday = (valveCons[i].todayYmd == today)
+                          ? (float)valveCons[i].todayPulses / PULSES_PER_LITRE
+                          : 0.0f;
+        float litresTotal = (float)valveCons[i].pulsesTotal / PULSES_PER_LITRE;
+        o["litresToday"] = litresToday;
+        o["litresTotal"] = litresTotal;
+        o["pulsesToday"] = (valveCons[i].todayYmd == today) ? (long)valveCons[i].todayPulses : 0;
+        o["pulsesTotal"] = (long)valveCons[i].pulsesTotal;
     }
     
     // ── Entrées/Sorties pour la page web E/S (similaire à OLED page 3)
@@ -1112,8 +1255,59 @@ void webSetup(){
         noInterrupts(); pulseCount = 0; interrupts();
         persistedPulseCount = 0;
         pulseSave();
+        // Reset aussi le suivi par vanne
+        for(int v=0;v<VANNE_COUNT;v++){
+            valveCons[v].pulsesTotal = 0;
+            valveCons[v].todayPulses = 0;
+            valveCons[v].todayYmd = todayYMD();
+            valveCons[v].todayIdx = 0;
+            for(int d=0;d<CONS_HISTORY_DAYS;d++){
+                valveCons[v].history[d].ymd = 0;
+                valveCons[v].history[d].pulses = 0;
+                valveCons[v].history[d].litres = 0;
+            }
+            valveConsSaveOne(v);
+        }
+        lastDistributedTotal = 0;
         req->send(200, "application/json", String("{\"ok\":true}"));
-        logSys("Compteur impulsions remis a zero via Web");
+        logSys("Compteur impulsions + suivi par vanne remis a zero");
+    });
+
+    // ── Consommation par vanne (GET /api/consumption)
+    server.on("/api/consumption", HTTP_GET, [](AsyncWebServerRequest* req){
+        DynamicJsonDocument doc(2048);
+        JsonArray arr = doc.createNestedArray("valves");
+        uint16_t today = todayYMD();
+        for(int v=0;v<VANNE_COUNT;v++){
+            // Si on a changé de jour depuis le dernier check, on capture l'ancien jour dans l'historique
+            // (déjà géré côté runtime par pulseDistribute, mais on aligne ici pour l'affichage immédiat)
+            float litresTotal = (float)valveCons[v].pulsesTotal / PULSES_PER_LITRE;
+            float litresToday = (valveCons[v].todayYmd == today)
+                              ? (float)valveCons[v].todayPulses / PULSES_PER_LITRE
+                              : 0.0f;
+            JsonObject o = arr.createNestedObject();
+            o["valve"]            = v;
+            o["name"]             = valves[v].name;
+            o["pulsesTotal"]      = valveCons[v].pulsesTotal;
+            o["litresTotal"]      = litresTotal;
+            o["todayYmd"]         = valveCons[v].todayYmd;
+            o["pulsesToday"]      = valveCons[v].todayPulses;
+            o["litresToday"]      = litresToday;
+            JsonArray hist = o.createNestedArray("history");
+            // On parcourt l'historique par ordre chronologique inverse (le plus récent d'abord)
+            int start = (valveCons[v].todayIdx - 1 + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;
+            for(int k=0;k<CONS_HISTORY_DAYS;k++){
+                int idx = (start - k + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;
+                const DayStat& ds = valveCons[v].history[idx];
+                if(ds.ymd == 0) continue;
+                JsonObject h = hist.createNestedObject();
+                h["ymd"] = ds.ymd;
+                h["pulses"] = ds.pulses;
+                h["litres"] = ds.litres;
+            }
+        }
+        String out; serializeJson(doc, out);
+        req->send(200, "application/json", out);
     });
 
     // ── Fermer tout POST /api/valve/closeall
@@ -1753,6 +1947,13 @@ void setup(){
 
     // Charger compteur persistant
     pulseLoad();
+    valveConsLoad();
+    // Aligne la distribution sur le total connu au boot (persistant + runtime courant)
+    {
+        unsigned long cnt;
+        noInterrupts(); cnt = pulseCount; interrupts();
+        lastDistributedTotal = persistedPulseCount + cnt;
+    }
 
     // ── Watchdog
     esp_task_wdt_init(60, true);
@@ -1827,6 +2028,8 @@ void loop(){
         unsigned long cnt;
         noInterrupts(); cnt = pulseCount; interrupts();
         unsigned long totalPulses = persistedPulseCount + cnt;
+        // Distribue les pulses aux vannes ouvertes (1/N chacune)
+        pulseDistribute(totalPulses);
         float totalLitres = (float)totalPulses / PULSES_PER_LITRE;
         static unsigned long lastSavedStep = 0;
         unsigned long step = (unsigned long)(floor(totalLitres / SAVE_LITRES_STEP));

@@ -302,7 +302,6 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-ghost btn-sm" onclick="closeAll()">Tout fermer</button>
-      <button class="btn btn-ghost btn-sm" onclick="api('POST','/api/lora/status')">Sync LoRa</button>
     </div>
   </div>
   <div class="valve-grid" id="valve-grid">
@@ -424,6 +423,10 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
       <div class="config-row">
         <div><label>ID Nœud</label><input id="cfg-nodeid" type="text"></div>
       </div>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-ghost btn-sm" onclick="api('POST','/api/lora/status').then(()=>alert('Sync LoRa envoyée'))">Sync LoRa</button>
+        <span style="font-size:.78rem;color:var(--text-muted)">Force l'émission immédiate d'un message STATUS vers les autres nœuds.</span>
+      </div>
     </div>
 
     <div class="config-section">
@@ -444,6 +447,32 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
         <div style="font-size:1rem">Total: <span id="pulse-count">—</span> pulses (<span id="pulse-litres">—</span> L)</div>
         <button class="btn btn-ghost btn-sm" onclick="refreshPulse()">Actualiser</button>
         <button class="btn btn-red btn-sm" onclick="if(confirm('Remettre le compteur à zéro ?')) resetPulse()">RAZ</button>
+      </div>
+    </div>
+
+    <div class="config-section">
+      <h3>Consommation par vanne</h3>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">
+        Division simple du compteur global par le nombre de vannes ouvertes (calibration à venir).
+      </div>
+      <div style="display:flex;gap:8px;margin-bottom:10px">
+        <button class="btn btn-ghost btn-sm" onclick="refreshConsumption()">Actualiser</button>
+      </div>
+      <div style="overflow-x:auto">
+        <table class="tbl" id="cons-table">
+          <thead>
+            <tr>
+              <th>Vanne</th>
+              <th>Nom</th>
+              <th>Aujourd'hui (L)</th>
+              <th>Total (L)</th>
+              <th>Détails 14 j</th>
+            </tr>
+          </thead>
+          <tbody id="cons-body">
+            <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:18px">Chargement…</td></tr>
+          </tbody>
+        </table>
       </div>
     </div>
 
@@ -781,6 +810,14 @@ function renderValveCards() {
       <div class="vc-remaining">${isOpen ? fmtSec(v.remainingSec) : '—'}</div>
       <div class="vc-meta">Dernier démarrage: ${fmtEpoch(v.openedAt)}<br>
         Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
+      <div style="margin: 4px 0 10px; display:flex; gap:8px; flex-wrap:wrap;">
+        <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue)">
+          💧 Aujourd'hui: <strong>${(v.litresToday||0).toFixed(2)} L</strong>
+        </span>
+        <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--surface2);color:var(--text-muted)">
+          Total: <strong style="color:var(--text)">${(v.litresTotal||0).toFixed(2)} L</strong>
+        </span>
+      </div>
       <div style="margin: 8px 0 14px; padding: 8px 12px; background: var(--surface2); border-radius: 6px; border-left: 3px solid var(--blue); font-size: .8rem;">
         <span style="color:var(--text-muted);font-size:.75rem;display:block;margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px">Prochain événement</span>
         <strong style="color:var(--text);">${nextHtml}</strong>
@@ -1178,7 +1215,9 @@ function loadConfig() {
 
 function saveConfig() {
   const valveNames = [];
-  for(let i=0;i<8;i++){
+  const nameCount = (window.sysConfig && sysConfig.valveNames && sysConfig.valveNames.length)
+                   ? sysConfig.valveNames.length : 8;
+  for(let i=0;i<nameCount;i++){
     const el=document.getElementById('vname-'+i);
     valveNames.push(el?el.value:'Vanne '+(i+1));
   }
@@ -1207,7 +1246,33 @@ function refreshPulse(){
 }
 
 function resetPulse(){
-  api('POST','/api/pulse/reset').then(r=>{ refreshPulse(); alert('Compteur remis à zéro'); });
+  api('POST','/api/pulse/reset').then(r=>{ refreshPulse(); refreshConsumption(); alert('Compteur + suivi par vanne remis à zéro'); });
+}
+
+function fmtYMD(v){
+  if(!v || v<10000000) return '—';
+  const s = String(v);
+  return s.substring(6,8)+'/'+s.substring(4,6);
+}
+
+function refreshConsumption(){
+  const tbody = document.getElementById('cons-body');
+  if(!tbody) return;
+  api('GET','/api/consumption').then(d=>{
+    if(!d || !d.valves){ tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:18px">Pas de données</td></tr>'; return; }
+    tbody.innerHTML = d.valves.map(v=>{
+      const detail = (v.history && v.history.length)
+        ? v.history.slice().reverse().map(h=>`<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:4px;background:var(--surface2);color:var(--text);font-size:.72rem">${fmtYMD(h.ymd)}: <strong>${(h.litres||0).toFixed(1)} L</strong></span>`).join('')
+        : '<span style="color:var(--text-muted)">—</span>';
+      return `<tr>
+        <td><strong>V${v.valve+1}</strong></td>
+        <td>${v.name||'Vanne '+(v.valve+1)}</td>
+        <td style="color:var(--blue);font-weight:600">${(v.litresToday||0).toFixed(2)}</td>
+        <td>${(v.litresTotal||0).toFixed(2)}</td>
+        <td>${detail}</td>
+      </tr>`;
+    }).join('');
+  });
 }
 
 // ══════════════════════════════════════════════════════════
@@ -1230,9 +1295,12 @@ function init() {
   connectWS();
   requestStatus();
   refreshPulse();
+  refreshConsumption();
   loadSchedules();
   // Actualisation auto toutes les 10s si WS déconnecté
   setInterval(()=>{ if(!wsConn||wsConn.readyState!==1) requestStatus(); }, 10000);
+  // La conso par vanne change lentement, on rafraîchit toutes les 30 s
+  setInterval(refreshConsumption, 30000);
 }
 
 init();
