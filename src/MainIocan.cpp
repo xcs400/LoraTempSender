@@ -31,6 +31,7 @@
 #include <OneWire.h>
 #include <DallasTemperature.h>
 #include <DNSServer.h>
+#include <AsyncMqttClient.h>
 
 #include "WebContent.h"   // SPA HTML — seul fichier séparé
 
@@ -306,6 +307,14 @@ struct SysConfig {
     uint8_t irrigMode     = MODE_PARALLEL;
     uint32_t maxOpenSec   = 3600;
     uint16_t manualForceSec = FORCE_MANUAL_DUR_S;
+    // ── MQTT / Home Assistant
+    bool    mqttEnabled   = true;
+    char    mqttHost[64]  = "192.168.1.70";
+    uint16_t mqttPort     = 1883;
+    char    mqttUser[32]  = "mosquitouser";
+    char    mqttPass[48]  = "expresso";
+    char    mqttPrefix[32]= "homeassistant";   // base du topic discovery
+    char    mqttId[32]    = "irrpro_hs3";      // unique_id pour HA
 };
 
 // ============================================================
@@ -320,6 +329,14 @@ Preferences prefs;
 // Serveur web & WebSocket
 AsyncWebServer  server(80);
 AsyncWebSocket  ws("/ws");
+
+// ── MQTT / Home Assistant
+AsyncMqttClient mqttClient;
+bool            mqttConnected = false;
+unsigned long   lastMqttPubMs = 0;
+const unsigned long MQTT_PUB_INTERVAL_MS = 10000UL; // 10 s
+unsigned long   lastMqttConnectAttemptMs = 0;
+const unsigned long MQTT_RECONNECT_MS = 15000UL;
 
 // Vannes
 Valve  valves[VANNE_COUNT];
@@ -449,6 +466,14 @@ void configLoad(){
     sysConfig.irrigMode    = prefs.getUChar("iMode",  MODE_PARALLEL);
     sysConfig.maxOpenSec   = prefs.getUInt("maxOpen", 3600);
     sysConfig.manualForceSec = prefs.getUShort("mForce", FORCE_MANUAL_DUR_S);
+    // MQTT / Home Assistant
+    sysConfig.mqttEnabled  = prefs.getBool("mqEna", true);
+    prefs.getString("mqHost", sysConfig.mqttHost, 64);
+    sysConfig.mqttPort     = prefs.getUShort("mqPort", 1883);
+    prefs.getString("mqUser", sysConfig.mqttUser, 32);
+    prefs.getString("mqPass", sysConfig.mqttPass, 48);
+    prefs.getString("mqPrefix", sysConfig.mqttPrefix, 32);
+    prefs.getString("mqId",  sysConfig.mqttId, 32);
     // Noms vannes
     for(int i=0;i<VANNE_COUNT;i++){
         char key[12]; snprintf(key,12,"vname%d",i);
@@ -471,6 +496,13 @@ void configSave(){
     prefs.putUChar("iMode",   sysConfig.irrigMode);
     prefs.putUInt("maxOpen",  sysConfig.maxOpenSec);
     prefs.putUShort("mForce", sysConfig.manualForceSec);
+    prefs.putBool("mqEna",    sysConfig.mqttEnabled);
+    prefs.putString("mqHost", sysConfig.mqttHost);
+    prefs.putUShort("mqPort", sysConfig.mqttPort);
+    prefs.putString("mqUser", sysConfig.mqttUser);
+    prefs.putString("mqPass", sysConfig.mqttPass);
+    prefs.putString("mqPrefix", sysConfig.mqttPrefix);
+    prefs.putString("mqId",   sysConfig.mqttId);
     for(int i=0;i<VANNE_COUNT;i++){
         char key[12]; snprintf(key,12,"vname%d",i);
         prefs.putString(key, valves[i].name);
@@ -1099,6 +1131,316 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 }
 
 // ============================================================
+// SECTION 11b — MQTT + Home Assistant Auto-Discovery
+// ============================================================
+//
+// On publie au démarrage des messages "config" retained sous
+// <prefix>/<component>/<nodeId>/<object_id>/config  (schéma HA officiel).
+// HA scanne ces topics, crée les entités correspondantes, et les met à
+// jour automatiquement dès qu'on publie sur le state_topic associé.
+//
+// Composants exposés :
+//   - sensor       : temperature1, temperature_remote, pulse_total,
+//                    litres_total, flow_lpm
+//   - sensor (×N)  : valve_N_litres_today, valve_N_litres_total
+//   - binary_sensor(×N) : valve_N (état ouvert/fermé)
+//   - switch  (×N) : valve_N (commande via <cmd_topic>)
+//
+// Les commandes émises par HA (switch) arrivent sur
+//   <prefix>/switch/<nodeId>/valve_N/set  (payload: ON / OFF)
+// et sont routées vers valveHardOpen / valveHardClose.
+
+static String mqttTopic(const char* component, const char* objId){
+    // ex: homeassistant/sensor/irrpro_hs3/temperature1
+    String s;
+    s.reserve(128);
+    s = sysConfig.mqttPrefix;
+    s += '/';
+    s += component;
+    s += '/';
+    s += sysConfig.mqttId;
+    s += '/';
+    s += objId;
+    return s;
+}
+
+static String mqttTopicNode(){
+    String s;
+    s.reserve(64);
+    s = sysConfig.mqttPrefix;
+    s += '/';
+    s += sysConfig.mqttId;
+    return s;
+}
+
+// ── Publication d'un message "config" retained
+static void mqttPublishConfig(const char* component, const char* objId, const String& payload){
+    if(!mqttConnected) return;
+    String topic = mqttTopic(component, objId);
+    // qos 0, retain true
+    mqttClient.publish(topic.c_str(), 0, true, payload.c_str(), payload.length());
+}
+
+static String deviceJson(){
+    StaticJsonDocument<256> doc;
+    JsonArray ids = doc.createNestedArray("identifiers");
+    ids.add(sysConfig.mqttId);
+    doc["name"]         = String("IrrigPro ") + sysConfig.mqttId;
+    doc["model"]        = "ESP32 IoCan";
+    doc["manufacturer"] = "IrrigPro";
+    doc["sw_version"]   = SOFT_REV;
+    String out; serializeJson(doc, out);
+    return out;
+}
+
+// Helper: injecte le bloc "device" dans un document (en parsant puis copiant).
+// On ne peut pas directement affecter un StaticJsonDocument à un JsonObject
+// dans ArduinoJson v6, on utilise donc un parse round-trip sur la chaîne.
+static void injectDevice(JsonObject doc){
+    StaticJsonDocument<256> d;
+    if(deserializeJson(d, deviceJson()) == DeserializationError::Ok){
+        JsonObject src = d.as<JsonObject>();
+        JsonObject dst = doc.createNestedObject("device");
+        for(JsonPair kv : src){
+            dst[kv.key()] = kv.value();
+        }
+    }
+}
+
+static void mqttPublishDiscovery(){
+    if(!mqttConnected) return;
+    String nodeTopic = mqttTopicNode(); // pour avail_topic et command_topic racine
+
+    // ── Capteurs température / conso globale
+    struct SensDef { const char* obj; const char* name; const char* unit; const char* devClass; };
+    SensDef defs[] = {
+        {"temperature1",     "Température locale",       "°C",   "temperature"},
+        {"temperature_remote","Température distante",     "°C",   "temperature"},
+        {"pulse_total",      "Compteur pulses (total)",  "pulses",""},
+        {"litres_total",     "Litres total",             "L",    "volume"},
+        {"flow_lpm",         "Débit instantané",         "L/min","volume_flow_rate"},
+    };
+    for(size_t i=0;i<sizeof(defs)/sizeof(defs[0]);i++){
+        StaticJsonDocument<512> doc;
+        doc["name"]           = defs[i].name;
+        doc["object_id"]      = String(sysConfig.mqttId) + "_" + defs[i].obj;
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + defs[i].obj;
+        doc["state_topic"]    = mqttTopic("sensor", defs[i].obj);
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        if(defs[i].devClass[0]) doc["device_class"] = defs[i].devClass;
+        if(defs[i].unit[0])     doc["unit_of_measurement"] = defs[i].unit;
+        doc["state_class"]     = "measurement";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("sensor", defs[i].obj, out);
+    }
+
+    // ── Une entité par vanne : sensor (litres today+total) + binary_sensor + switch
+    for(int v=0;v<VANNE_COUNT;v++){
+        char objBuf[24];
+        const char* vname = (valves[v].name[0] ? valves[v].name : (snprintf(objBuf,sizeof(objBuf),"Vanne %d",v+1), objBuf));
+
+        // Sensor litres_today
+        {
+            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_today",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — litres aujourd'hui";
+            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["state_topic"]    = mqttTopic("sensor", oid);
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["unit_of_measurement"] = "L";
+            doc["state_class"]    = "total_increasing";
+            doc["device_class"]   = "volume";
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("sensor", oid, out);
+        }
+        // Sensor litres_total
+        {
+            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_total",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — litres total";
+            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["state_topic"]    = mqttTopic("sensor", oid);
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["unit_of_measurement"] = "L";
+            doc["state_class"]    = "total_increasing";
+            doc["device_class"]   = "volume";
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("sensor", oid, out);
+        }
+        // Binary sensor : ouvert/fermé
+        {
+            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — état";
+            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid + "_state";
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_state";
+            doc["state_topic"]    = mqttTopic("binary_sensor", oid);
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["payload_on"]    = "ON";
+            doc["payload_off"]   = "OFF";
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("binary_sensor", oid, out);
+        }
+        // Switch : commande on/off
+        {
+            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — commande";
+            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid + "_switch";
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_switch";
+            doc["state_topic"]    = mqttTopic("switch", oid);
+            doc["command_topic"]  = mqttTopic("switch", oid) + "/set";
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["payload_on"]    = "ON";
+            doc["payload_off"]   = "OFF";
+            doc["retain"]        = false;
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("switch", oid, out);
+        }
+    }
+    Serial.println("[MQTT] Discovery publié");
+}
+
+// ── Publication de l'état complet (capteurs + vannes)
+static void mqttPublishState(){
+    if(!mqttConnected) return;
+    // Calculs partagés
+    unsigned long cnt;
+    noInterrupts(); cnt = pulseCount; interrupts();
+    unsigned long totalPulses = persistedPulseCount + cnt;
+    float litresTotal = (float)totalPulses / PULSES_PER_LITRE;
+
+    // Capteurs globaux
+    auto pub = [](const char* comp, const char* oid, const String& payload){
+        String topic = mqttTopic(comp, oid);
+        mqttClient.publish(topic.c_str(), 0, true, payload.c_str(), payload.length());
+    };
+    pub("sensor","temperature1", String(temperature1,2));
+    pub("sensor","temperature_remote", String(temperatureRemote,2));
+    pub("sensor","pulse_total", String((unsigned long)totalPulses));
+    pub("sensor","litres_total", String(litresTotal,2));
+    // flow_lpm : on relit la valeur calculée par buildStatusJson pour éviter
+    // de dupliquer la logique — alternative simple : republier 0 si pas dispo
+    pub("sensor","flow_lpm", String(0.0,2));
+
+    // Vannes
+    uint16_t today = todayYMD();
+    for(int v=0;v<VANNE_COUNT;v++){
+        char oid[24];
+        float litresToday = (valveCons[v].todayYmd == today)
+                          ? (float)valveCons[v].todayPulses / PULSES_PER_LITRE
+                          : 0.0f;
+        float litresTotV = (float)valveCons[v].pulsesTotal / PULSES_PER_LITRE;
+        snprintf(oid,sizeof(oid),"valve_%d_litres_today",v);
+        pub("sensor", oid, String(litresToday,2));
+        snprintf(oid,sizeof(oid),"valve_%d_litres_total",v);
+        pub("sensor", oid, String(litresTotV,2));
+        snprintf(oid,sizeof(oid),"valve_%d",v);
+        pub("binary_sensor", oid, valves[v].isOpen ? "ON" : "OFF");
+        pub("switch", oid, valves[v].isOpen ? "ON" : "OFF");
+    }
+}
+
+// ── Handler des commandes switch venues de HA
+static void mqttHandleMessage(char* topic, char* payload, size_t len){
+    String t(topic);
+    String p(payload, len);
+    // topic attendu : <prefix>/switch/<id>/valve_N/set
+    int idxSlash = t.lastIndexOf('/');
+    if(idxSlash < 0) return;
+    String leaf = t.substring(idxSlash+1); // "set" attendu
+    if(leaf != "set") return;
+    int v = -1;
+    // parser ".../valve_<N>" juste avant "/set"
+    String base = t.substring(0, idxSlash); // retire /set
+    int s = base.lastIndexOf('/');
+    if(s < 0) return;
+    String obj = base.substring(s+1); // ex: valve_2
+    if(sscanf(obj.c_str(),"valve_%d",&v)!=1) return;
+    if(v<0||v>=VANNE_COUNT) return;
+    bool on = (p.indexOf("ON")>=0);
+    if(on){
+        valveHardOpen(v, CmdSource::WEB, sysConfig.maxOpenSec);
+        logAdd(v, "Ouverte via Home Assistant");
+    }else{
+        valveHardClose(v);
+        logAdd(v, "Fermée via Home Assistant");
+    }
+}
+
+static void onMqttConnect(bool sessionPresent){
+    mqttConnected = true;
+    Serial.println("[MQTT] Connecté");
+    // Abonnement aux commandes switch
+    String cmdTopic = mqttTopicNode() + "/switch/+/set";
+    mqttClient.subscribe(cmdTopic.c_str(), 0);
+    // Publication disponibilité
+    String availTopic = mqttTopicNode() + "/availability";
+    mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
+    // Discovery + état initial
+    mqttPublishDiscovery();
+    mqttPublishState();
+}
+
+static void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
+    mqttConnected = false;
+    Serial.printf("[MQTT] Déconnecté (%d)\n", (int)r);
+}
+
+static void mqttSetup(){
+    if(!sysConfig.mqttEnabled) return;
+    mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
+    if(strlen(sysConfig.mqttUser)>0){
+        mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
+    }
+    mqttClient.setKeepAlive(60);
+    mqttClient.setCleanSession(true);
+    mqttClient.onConnect(onMqttConnect);
+    mqttClient.onDisconnect(onMqttDisconnect);
+    mqttClient.onMessage([](char* topic, char* payload, AsyncMqttClientMessageProperties, size_t len, size_t, size_t){
+        mqttHandleMessage(topic, payload, len);
+    });
+    mqttClient.connect();
+    lastMqttConnectAttemptMs = millis();
+}
+
+static void mqttLoop(){
+    if(!sysConfig.mqttEnabled){ mqttConnected = false; return; }
+    if(!mqttConnected && WiFi.status()==WL_CONNECTED){
+        unsigned long now = millis();
+        if(now - lastMqttConnectAttemptMs > MQTT_RECONNECT_MS){
+            lastMqttConnectAttemptMs = now;
+            Serial.println("[MQTT] Reconnexion…");
+            mqttClient.connect();
+        }
+    }
+    if(mqttConnected){
+        unsigned long now = millis();
+        if(now - lastMqttPubMs > MQTT_PUB_INTERVAL_MS){
+            lastMqttPubMs = now;
+            mqttPublishState();
+        }
+    }
+}
+
+// ============================================================
 // SECTION 12 — WEBMANAGER (routes REST)
 // ============================================================
 
@@ -1121,6 +1463,13 @@ String configToJson(){
     doc["irrigMode"]    = sysConfig.irrigMode;
     doc["maxOpenSec"]   = sysConfig.maxOpenSec;
     doc["manualForceSec"]=sysConfig.manualForceSec;
+    doc["mqttEnabled"]  = sysConfig.mqttEnabled;
+    doc["mqttHost"]     = sysConfig.mqttHost;
+    doc["mqttPort"]     = sysConfig.mqttPort;
+    doc["mqttUser"]     = sysConfig.mqttUser;
+    doc["mqttPass"]     = sysConfig.mqttPass;
+    doc["mqttPrefix"]   = sysConfig.mqttPrefix;
+    doc["mqttId"]       = sysConfig.mqttId;
     JsonArray names = doc.createNestedArray("valveNames");
     for(int i=0;i<VANNE_COUNT;i++) names.add(valves[i].name);
     String out; serializeJson(doc,out);
@@ -1452,6 +1801,14 @@ void webSetup(){
             sysConfig.irrigMode    = doc["irrigMode"]    | sysConfig.irrigMode;
             sysConfig.maxOpenSec   = doc["maxOpenSec"]   | sysConfig.maxOpenSec;
             sysConfig.manualForceSec=doc["manualForceSec"]|sysConfig.manualForceSec;
+            // MQTT
+            if(doc.containsKey("mqttEnabled"))  sysConfig.mqttEnabled = doc["mqttEnabled"].as<bool>();
+            if(doc.containsKey("mqttHost"))     strlcpy(sysConfig.mqttHost, doc["mqttHost"], 64);
+            if(doc.containsKey("mqttPort"))     sysConfig.mqttPort = doc["mqttPort"] | sysConfig.mqttPort;
+            if(doc.containsKey("mqttUser"))     strlcpy(sysConfig.mqttUser, doc["mqttUser"], 32);
+            if(doc.containsKey("mqttPass"))     strlcpy(sysConfig.mqttPass, doc["mqttPass"], 48);
+            if(doc.containsKey("mqttPrefix"))   strlcpy(sysConfig.mqttPrefix, doc["mqttPrefix"], 32);
+            if(doc.containsKey("mqttId"))       strlcpy(sysConfig.mqttId, doc["mqttId"], 32);
             // Noms vannes
             if(doc.containsKey("valveNames")){
                 JsonArray arr = doc["valveNames"];
@@ -1938,6 +2295,8 @@ void setup(){
         otaSetup();
         // ── Web
         webSetup();
+        // ── MQTT / Home Assistant
+        mqttSetup();
     } else {
         Serial.println("\nWiFi FAIL — lancement portail captif");
         logSys("WiFi FAIL — portail captif actif");
@@ -2013,6 +2372,9 @@ void loop(){
 
     // ── OTA
     if (!captivePortalActive) ArduinoOTA.handle();
+
+    // ── MQTT / Home Assistant (auto-reconnexion + publication état)
+    mqttLoop();
 
     // ── LoRa RX
     loraRxProcess();

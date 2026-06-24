@@ -476,6 +476,30 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
       </div>
     </div>
 
+    <div class="config-section">
+      <h3>Home Assistant (MQTT)</h3>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">
+        Découverte automatique des capteurs + vannes dans Home Assistant.
+        Les switchs sont commandables depuis HA (un clic = ouverture / fermeture).
+      </div>
+      <div class="toggle-row">
+        <label>Activer MQTT</label>
+        <label class="toggle"><input type="checkbox" id="cfg-mqena"><span class="toggle-slider"></span></label>
+      </div>
+      <div class="config-row" style="margin-top:12px">
+        <div><label>Broker (host)</label><input id="cfg-mqhost" type="text"/></div>
+        <div><label>Port</label><input id="cfg-mqport" type="number"/></div>
+      </div>
+      <div class="config-row">
+        <div><label>Utilisateur</label><input id="cfg-mquser" type="text"/></div>
+        <div><label>Mot de passe</label><input id="cfg-mqpass" type="password"/></div>
+      </div>
+      <div class="config-row">
+        <div><label>Préfixe topic (défaut: homeassistant)</label><input id="cfg-mqprefix" type="text"/></div>
+        <div><label>ID nœud MQTT (unique_id HA)</label><input id="cfg-mqid" type="text"/></div>
+      </div>
+    </div>
+
     <div style="display:flex;gap:10px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:18px">
       <button class="btn btn-ghost" onclick="loadConfig()">Annuler</button>
       <button class="btn btn-blue" onclick="saveConfig()">Sauvegarder</button>
@@ -1204,6 +1228,14 @@ function loadConfig() {
     document.getElementById('cfg-seq').checked   = cfg.irrigMode===1;
     document.getElementById('cfg-maxopen').value = cfg.maxOpenSec||3600;
     document.getElementById('cfg-forcedu').value = cfg.manualForceSec||1800;
+    // MQTT
+    document.getElementById('cfg-mqena').checked  = cfg.mqttEnabled !== false;
+    document.getElementById('cfg-mqhost').value  = cfg.mqttHost||'192.168.1.70';
+    document.getElementById('cfg-mqport').value  = cfg.mqttPort||1883;
+    document.getElementById('cfg-mquser').value  = cfg.mqttUser||'';
+    document.getElementById('cfg-mqpass').value  = '';
+    document.getElementById('cfg-mqprefix').value= cfg.mqttPrefix||'homeassistant';
+    document.getElementById('cfg-mqid').value    = cfg.mqttId||'irrpro_hs3';
     // Noms vannes
     const grid = document.getElementById('valve-names-grid');
     grid.innerHTML = (cfg.valveNames||[]).map((n,i)=>
@@ -1232,9 +1264,16 @@ function saveConfig() {
     irrigMode: document.getElementById('cfg-seq').checked?1:0,
     maxOpenSec: parseInt(document.getElementById('cfg-maxopen').value),
     manualForceSec: parseInt(document.getElementById('cfg-forcedu').value),
+    mqttEnabled: document.getElementById('cfg-mqena').checked,
+    mqttHost: document.getElementById('cfg-mqhost').value,
+    mqttPort: parseInt(document.getElementById('cfg-mqport').value),
+    mqttUser: document.getElementById('cfg-mquser').value,
+    mqttPass: document.getElementById('cfg-mqpass').value||undefined,
+    mqttPrefix: document.getElementById('cfg-mqprefix').value,
+    mqttId: document.getElementById('cfg-mqid').value,
     valveNames
   };
-  api('POST','/api/config',body).then(()=>alert('Configuration sauvegardée'));
+  api('POST','/api/config',body).then(()=>alert('Configuration sauvegardée. Redémarrage recommandé pour appliquer MQTT.'));
 }
 
 function refreshPulse(){
