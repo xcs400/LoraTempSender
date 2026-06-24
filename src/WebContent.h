@@ -297,7 +297,8 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
     <div>
       <div style="font-size:1.1rem;font-weight:700">Tableau de bord</div>
       <div style="font-size:.8rem;color:var(--text-muted)" id="uptime-label">—</div>
-      <div style="font-size:.85rem;margin-top:4px;color:var(--text-muted)" id="temps-label">T1: -- °C | T2: -- °C | TRem: -- °C</div>
+      <div style="font-size:.85rem;margin-top:4px;color:var(--text-muted)" id="temps-label">T1: -- °C | TRem: -- °C</div>
+      <div style="font-size:.85rem;margin-top:6px;color:var(--text-muted)" id="flow-label">Litres: -- L | Débit: -- L/min</div>
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-ghost btn-sm" onclick="closeAll()">Tout fermer</button>
@@ -434,6 +435,15 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
       <div class="config-row" style="margin-top:12px">
         <div><label>Durée max ouverture (s)</label><input id="cfg-maxopen" type="number"></div>
         <div><label>Durée forçage manuel (s)</label><input id="cfg-forcedu" type="number"></div>
+      </div>
+    </div>
+
+    <div class="config-section">
+      <h3>Compteur d'impulsions</h3>
+      <div style="display:flex;gap:12px;align-items:center;">
+        <div style="font-size:1rem">Total: <span id="pulse-count">—</span> pulses (<span id="pulse-litres">—</span> L)</div>
+        <button class="btn btn-ghost btn-sm" onclick="refreshPulse()">Actualiser</button>
+        <button class="btn btn-red btn-sm" onclick="if(confirm('Remettre le compteur à zéro ?')) resetPulse()">RAZ</button>
       </div>
     </div>
 
@@ -701,10 +711,14 @@ function handleStatus(data) {
     'Uptime: ' + fmtSec(data.uptime || 0) + '  |  Heure: ' + timeStr;
   
   if (document.getElementById('temps-label')) {
-    document.getElementById('temps-label').textContent = 
+    document.getElementById('temps-label').textContent =
       `T1: ${data.temp1 !== undefined ? data.temp1 : '--'} °C | ` +
-      `T2: ${data.temp2 !== undefined ? data.temp2 : '--'} °C | ` +
       `TRem: ${data.tempR !== undefined ? data.tempR : '--'} °C`;
+  }
+  if (document.getElementById('flow-label')) {
+    const litres = data.litres !== undefined ? Number(data.litres).toFixed(2) : '--';
+    const flow = data.flow_lpm !== undefined ? Number(data.flow_lpm).toFixed(2) : '--';
+    document.getElementById('flow-label').textContent = `Litres: ${litres} L | Débit: ${flow} L/min`;
   }
   // Ne reconstruit le select des vannes du modal programme QUE si ce
   // dernier n'est pas en cours d'édition — sinon la sélection de
@@ -725,6 +739,13 @@ function handleStatus(data) {
     const html = buildRow('oPD', data.ioOut) + buildRow('oPA', data.ioLed) + buildRow('In', data.ioIn);
     const tbody = document.getElementById('io-body');
     if(tbody) tbody.innerHTML = html;
+  }
+  // Pulse info via WS (if present)
+  if(data.pulses !== undefined){
+    const p = data.pulses || 0;
+    const l = data.litres || 0;
+    const elP = document.getElementById('pulse-count'); if(elP) elP.textContent = p;
+    const elL = document.getElementById('pulse-litres'); if(elL) elL.textContent = l.toFixed(2);
   }
 }
 
@@ -1177,6 +1198,18 @@ function saveConfig() {
   api('POST','/api/config',body).then(()=>alert('Configuration sauvegardée'));
 }
 
+function refreshPulse(){
+  api('GET','/api/pulse').then(d=>{
+    if(!d) return;
+    document.getElementById('pulse-count').textContent = d.pulses;
+    document.getElementById('pulse-litres').textContent = (d.litres||0).toFixed(2);
+  });
+}
+
+function resetPulse(){
+  api('POST','/api/pulse/reset').then(r=>{ refreshPulse(); alert('Compteur remis à zéro'); });
+}
+
 // ══════════════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════════════
@@ -1196,6 +1229,7 @@ function init() {
   buildSchedValveSelect();
   connectWS();
   requestStatus();
+  refreshPulse();
   loadSchedules();
   // Actualisation auto toutes les 10s si WS déconnecté
   setInterval(()=>{ if(!wsConn||wsConn.readyState!==1) requestStatus(); }, 10000);

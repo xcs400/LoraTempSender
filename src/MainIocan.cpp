@@ -82,6 +82,21 @@ static const int FORCE_INPUT_PINS[INPUTCOUNT] = { 47 ,  //PB0
                                                 20      //PB6
                                                 ,26 };  //PB7
 
+                                                // === Compteur d'impulsions (flow meter) connecté sur FORCE_INPUT_PINS[7]
+                                                // ISR matériel avec anti-rebond basique (microsecondes)
+                                                volatile unsigned long pulseCount = 0;
+                                                volatile unsigned long lastPulseUs = 0;
+                                                #define PULSE_DEBOUNCE_US 2000UL  // 2ms debounce
+                                                #define PULSES_PER_LITRE 450.0f   // constante par défaut (ajuster selon capteur)
+
+                                                // ISR dédiée (doit être IRAM pour ESP32)
+                                                void IRAM_ATTR pulse_isr(){
+                                                    unsigned long nowUs = micros();
+                                                    if(nowUs - lastPulseUs < PULSE_DEBOUNCE_US) return;
+                                                    lastPulseUs = nowUs;
+                                                    pulseCount++;
+                                                }
+
 
 /******************************************************************************
  * Wi-Fi LoRa 32 (ESP32) - PINOUT
@@ -309,6 +324,10 @@ AsyncWebSocket  ws("/ws");
 // Vannes
 Valve  valves[VANNE_COUNT];
 SysConfig sysConfig;
+// Persisted pulse counter (pulses saved to NVS)
+unsigned long persistedPulseCount = 0;
+// Seuil de sauvegarde en litres
+#define SAVE_LITRES_STEP 100.0f
 
 // Journal circulaire
 LogEntry  logBuf[LOG_MAX];
@@ -434,6 +453,19 @@ void configSave(){
         char key[12]; snprintf(key,12,"vname%d",i);
         prefs.putString(key, valves[i].name);
     }
+    prefs.end();
+}
+
+// Charger et sauvegarder le compteur d'impulsions persisté
+void pulseLoad(){
+    prefs.begin("irrigcfg", false);
+    persistedPulseCount = prefs.getULong("pulseCnt", 0UL);
+    prefs.end();
+}
+
+void pulseSave(){
+    prefs.begin("irrigcfg", false);
+    prefs.putULong("pulseCnt", persistedPulseCount);
     prefs.end();
 }
 
@@ -839,7 +871,7 @@ String buildStatusJson(){
     doc["uptime"] = millis()/1000;
     doc["heap"]   = ESP.getFreeHeap();
     doc["temp1"]  = temperature1;
-    doc["tempR"]  = temperatureRemote;
+    // tempR removed from STATUS to simplify dashboard (TRem kept elsewhere if needed)
     // add current local time for UI
     time_t nowt = nowEpoch();
     if(nowt) doc["time"] = (long)nowt;
@@ -877,6 +909,30 @@ String buildStatusJson(){
         if(col < VANNE_COUNT) ioIn.add(digitalRead(FORCE_INPUT_PINS[col]));
         else ioIn.add(-1);
     }
+    // Pulse counter (persisted + current) and instantaneous flow
+    unsigned long cnt;
+    noInterrupts(); cnt = pulseCount; interrupts();
+    unsigned long totalPulses = persistedPulseCount + cnt;
+    doc["pulses"] = totalPulses;
+    float litresTotal = (float)totalPulses / PULSES_PER_LITRE;
+    doc["litres"] = litresTotal;
+    // compute simple instantaneous flow (L/min) using delta since last WS status
+    static unsigned long lastPulseSnapshot = 0;
+    static unsigned long lastPulseMs = 0;
+    unsigned long nowMs = millis();
+    float flowLpm = 0.0f;
+    if(lastPulseMs == 0){ lastPulseSnapshot = totalPulses; lastPulseMs = nowMs; }
+    unsigned long deltaP = 0;
+    unsigned long deltaMs = nowMs - lastPulseMs;
+    if(totalPulses >= lastPulseSnapshot) deltaP = totalPulses - lastPulseSnapshot;
+    if(deltaMs > 0){
+        float litresDelta = (float)deltaP / PULSES_PER_LITRE;
+        flowLpm = litresDelta * (60000.0f / (float)deltaMs);
+    }
+    // update snapshot every broadcast to have moving window
+    lastPulseSnapshot = totalPulses;
+    lastPulseMs = nowMs;
+    doc["flow_lpm"] = flowLpm;
     String out; serializeJson(doc,out);
     return out;
 }
@@ -1038,6 +1094,27 @@ void webSetup(){
             jsonResp(req,"{\"ok\":true}");
         }
     );
+
+    // ── Compteur d'impulsions (GET /api/pulse)
+    server.on("/api/pulse", HTTP_GET, [](AsyncWebServerRequest* req){
+        // Lecture atomique
+        unsigned long cnt;
+        noInterrupts(); cnt = pulseCount; interrupts();
+        char buf[128];
+        float litres = (float)cnt / PULSES_PER_LITRE;
+        snprintf(buf, sizeof(buf), "{\"pulses\":%lu,\"litres\":%.3f,\"pulses_per_litre\":%.1f}", cnt, litres, (double)PULSES_PER_LITRE);
+        req->send(200, "application/json", String(buf));
+    });
+
+    // ── Reset compteur POST /api/pulse/reset
+    server.on("/api/pulse/reset", HTTP_POST, [](AsyncWebServerRequest* req){
+        // reset persisted and runtime counters
+        noInterrupts(); pulseCount = 0; interrupts();
+        persistedPulseCount = 0;
+        pulseSave();
+        req->send(200, "application/json", String("{\"ok\":true}"));
+        logSys("Compteur impulsions remis a zero via Web");
+    });
 
     // ── Fermer tout POST /api/valve/closeall
     server.on("/api/valve/closeall", HTTP_POST, [](AsyncWebServerRequest* req){
@@ -1265,8 +1342,7 @@ void oledUpdate(){
     } else if (oledPage == 1) {
         display.drawString(0,0, "Temperatures:");
         display.drawString(0,14, "Temp1: " + String(temperature1) + " C");
-        // Temp2 removed
-        display.drawString(0,42, "TempR: " + String(temperatureRemote) + " C");
+        // Temp2 removed; no longer display TempR on OLED (freed for pulse info below)
     } else if (oledPage == 2) {
         // Ligne 0: uptime
         display.drawString(0,0, "Uptime: " + String(now/60000) + "min");
@@ -1329,6 +1405,11 @@ void oledUpdate(){
             }
         }
         display.drawString(0, 24, rowI);
+        // Ligne supplémentaire: compteur d'impulsions (connecté sur PB7)
+        unsigned long cnt;
+        noInterrupts(); cnt = pulseCount; interrupts();
+        float litres = (float)cnt / PULSES_PER_LITRE;
+        display.drawString(0, 48, String("Pulse:") + String(cnt) + " L:" + String(litres,3));
     }
     display.display();
 }
@@ -1613,6 +1694,15 @@ void setup(){
         Serial.printf("[PIN INIT] IN %d set INPUT_PULLUP\n", p);
     }
 
+    // ── Attacher interruption matérielle pour le compteur d'impulsions sur PB7 (index 7)
+    // Détecte front descendant (capteur en pull-up) et anti-rebond simple
+    {
+        int pulsePin = FORCE_INPUT_PINS[7];
+        // ISR
+        attachInterrupt(digitalPinToInterrupt(pulsePin), pulse_isr, FALLING);
+        Serial.printf("[PULSE] Interrupt attached on pin %d\n", pulsePin);
+    }
+
     // ── Init LoRa
     int loraState = radio.begin(
         sysConfig.loraFreq, LORA_BW, LORA_SF, LORA_CR,
@@ -1660,6 +1750,9 @@ void setup(){
         startCaptivePortal();
         // Ne pas démarrer otaSetup() et webSetup() en mode AP
     }
+
+    // Charger compteur persistant
+    pulseLoad();
 
     // ── Watchdog
     esp_task_wdt_init(60, true);
@@ -1728,6 +1821,25 @@ void loop(){
 
     // ── Entrées forçage manuel
     inputUpdate();
+
+    // ── Vérifier si on doit sauvegarder le compteur (tous les N litres)
+    {
+        unsigned long cnt;
+        noInterrupts(); cnt = pulseCount; interrupts();
+        unsigned long totalPulses = persistedPulseCount + cnt;
+        float totalLitres = (float)totalPulses / PULSES_PER_LITRE;
+        static unsigned long lastSavedStep = 0;
+        unsigned long step = (unsigned long)(floor(totalLitres / SAVE_LITRES_STEP));
+        if(step > lastSavedStep){
+            // sauvegarder le nombre de pulses correspondant à step * SAVE_LITRES_STEP
+            unsigned long pulsesToSave = (unsigned long)(step * SAVE_LITRES_STEP * PULSES_PER_LITRE);
+            persistedPulseCount = pulsesToSave;
+            pulseSave();
+            lastSavedStep = step;
+            char b[80]; snprintf(b,80, "Pulse sauvegardees: %lu (%.1f L)", persistedPulseCount, (double)persistedPulseCount / PULSES_PER_LITRE);
+            logSys(b);
+        }
+    }
 
     // ── Timers vannes (fermeture auto)
     valveUpdate();
