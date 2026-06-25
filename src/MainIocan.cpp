@@ -375,6 +375,12 @@ struct ValveCons {
     uint32_t todayPulses = 0;
     uint16_t todayIdx = 0;           // index d'écriture dans history (anneau)
     DayStat history[CONS_HISTORY_DAYS];
+    // ── Calibration débit (voir SECTION 7b — FLOWCALIBRATIONMANAGER)
+    // Coefficient relatif de débit de cette vanne, mesuré seule pendant la
+    // calibration (pulses/seconde bruts, PAS normalisé). Défaut = 1.0, ce
+    // qui revient au comportement précédent (répartition égale) tant
+    // qu'aucune calibration n'a été effectuée.
+    float flowCoeff = 1.0f;
 };
 ValveCons valveCons[VANNE_COUNT];
 // Dernier total pulses global connu après distribution (pour calculer delta à venir)
@@ -411,6 +417,11 @@ unsigned long lastWdtMs = 0;
 
 // Portail captif
 bool          captivePortalActive = false;
+// Indique si le scan WiFi est utilisable pendant le portail captif actuel
+// (mode AP_STA confirmé fonctionnel). Si false, le formulaire reste
+// utilisable (saisie manuelle du SSID) mais la liste déroulante de réseaux
+// détectés ne sera jamais peuplée — voir startCaptivePortal() v2.
+bool          captivePortalScanAvailable = false;
 DNSServer     dnsServer;
 AsyncWebServer captiveServer(80);
 // Captive portal timers/settings
@@ -456,6 +467,39 @@ float computeFlowLpm(unsigned long totalPulses){
     flowLastMs = nowMs;
     return flowLpm;
 }
+
+// ============================================================
+// SECTION 3c — FLOWCALIBRATIONMANAGER : état & types
+// ============================================================
+//
+// Machine à états VIVANT CÔTÉ SERVEUR, indépendamment de toute connexion
+// web : une fois lancée, la calibration continue même si l'utilisateur
+// ferme l'onglet ou recharge la page. L'UI n'est qu'un observateur qui
+// interroge périodiquement /api/calibration/status (ou reçoit l'état via
+// WebSocket) — elle ne porte aucun état de la calibration elle-même.
+//
+// Séquence : pour chaque vanne (dans l'ordre 0..VANNE_COUNT-1), on ouvre
+// SEULE cette vanne pendant calibDurationSec secondes, on mesure le delta
+// de pulses sur cette fenêtre, on ferme, puis on passe à la vanne
+// suivante. À la fin, on calcule flowCoeff = pulses/seconde pour chaque
+// vanne et on persiste (voir calibFinish()).
+//
+// Sécurité : refuse de démarrer si UNE SEULE vanne est déjà ouverte
+// (peu importe la source — WEB, programme, forçage manuel, LoRa), pour
+// éviter de fausser la mesure ou de couper un arrosage en cours sans
+// confirmation explicite de l'utilisateur.
+enum class CalibPhase : uint8_t { IDLE=0, RUNNING=1, DONE=2, ABORTED=3, FAILED=4 };
+
+struct CalibState {
+    CalibPhase phase = CalibPhase::IDLE;
+    int        currentValve = -1;       // vanne en cours de mesure (-1 = aucune)
+    uint16_t   durationSec  = 60;        // durée de mesure par vanne, configurable UI
+    unsigned long phaseStartMs = 0;      // millis() du début de la mesure en cours
+    unsigned long pulseSnapshotAtStart = 0; // total pulses au début de la mesure en cours
+    float      resultCoeff[VANNE_COUNT] = {0}; // pulses/seconde mesurés par vanne (résultat brut)
+    char       failReason[48] = "";      // raison d'échec/abandon, pour affichage UI
+};
+CalibState calibState;
 
 // ============================================================
 // SECTION 4 — LOGGERMANAGER (interne)
@@ -591,6 +635,10 @@ void valveConsLoad(){
         valveCons[v].todayYmd = prefs.getUShort(key, 0);
         snprintf(key,sizeof(key),"v%d_tp",v);
         valveCons[v].todayPulses = prefs.getUInt(key, 0);
+        // Coefficient de calibration débit (défaut 1.0 = répartition égale,
+        // comportement identique à avant toute calibration)
+        snprintf(key,sizeof(key),"v%d_fc",v);
+        valveCons[v].flowCoeff = prefs.getFloat(key, 1.0f);
         // Historique : on stocke chaque entrée (ymd + pulses) en binaire
         for(int d=0;d<CONS_HISTORY_DAYS;d++){
             snprintf(key,sizeof(key),"v%d_h%d",v,d);
@@ -629,12 +677,44 @@ void valveConsSaveOne(int v){
     prefs.end();
 }
 
-// ── Distribution simple : à chaque delta de pulses global,
-//    on attribue delta / nbVannesOuvertes à chaque vanne ouverte.
+// Sauvegarde dédiée du coefficient de calibration débit, séparée de
+// valveConsSaveOne() car celle-ci est appelée à haute fréquence (à chaque
+// distribution de pulses, potentiellement plusieurs fois par seconde) —
+// inutile de réécrire flowCoeff en NVS à ce rythme alors qu'il ne change
+// qu'à la fin d'une calibration explicite.
+void valveConsSaveFlowCoeff(int v){
+    prefs.begin("irrigcfg", false);
+    char key[24];
+    snprintf(key,sizeof(key),"v%d_fc",v);
+    prefs.putFloat(key, valveCons[v].flowCoeff);
+    prefs.end();
+}
+
+// ── Distribution au prorata des coefficients de calibration : à chaque
+//    delta de pulses global, on attribue à chaque vanne ouverte une part
+//    proportionnelle à son flowCoeff (mesuré seule pendant la calibration,
+//    voir SECTION 7b — FLOWCALIBRATIONMANAGER), au lieu d'une part égale.
+//    Si aucune calibration n'a jamais été faite, tous les flowCoeff valent
+//    1.0 par défaut, ce qui redonne exactement l'ancien comportement
+//    (répartition égale).
+//
+//    LIMITE PHYSIQUE CONNUE (documentée pour l'utilisateur dans l'UI) :
+//    les coefficients sont mesurés vanne par vanne, SEULE ouverte. Quand
+//    plusieurs vannes sont ouvertes simultanément, la perte de charge
+//    partagée sur la canalisation principale réduit le débit réel de
+//    chaque ligne par rapport à sa mesure "seule" — et cette réduction
+//    n'est pas forcément identique pour toutes les lignes. La répartition
+//    au prorata reste donc une approximation : elle est nettement plus
+//    juste qu'une répartition égale (corrige le biais "toutes les vannes
+//    débitent pareil"), mais ne capture pas l'interaction hydraulique
+//    entre vannes simultanément ouvertes. Le bilan global (somme des parts
+//    = pulses réellement comptés) reste exact dans tous les cas — seule la
+//    clé de répartition entre vannes simultanées est approximative.
+//
 //    Si aucune vanne n'est ouverte, on n'attribue rien (les pulses restent
 //    dans le compteur global mais ne sont pas comptés par vanne). Cela reflète
 //    la réalité physique : un compteur en amont "voit" aussi des fuites / arrêts
-//    manuels, etc. — quand la calibration sera faite, on ajustera ce calcul.
+//    manuels, etc.
 void pulseDistribute(unsigned long totalPulsesGlobal){
     if(totalPulsesGlobal < lastDistributedTotal){
         // Compteur régressé (RAZ via Web) : on resynchronise sans attribution
@@ -643,17 +723,49 @@ void pulseDistribute(unsigned long totalPulsesGlobal){
     }
     unsigned long delta = totalPulsesGlobal - lastDistributedTotal;
     if(delta == 0) return;
-    // Compte le nombre de vannes ouvertes
+    // Calcule la somme des coefficients des vannes ouvertes (dénominateur
+    // de la répartition proportionnelle).
+    float coeffSum = 0.0f;
     int openCount = 0;
-    for(int i=0;i<VANNE_COUNT;i++) if(valves[i].isOpen) openCount++;
-    if(openCount == 0){
+    for(int i=0;i<VANNE_COUNT;i++){
+        if(!valves[i].isOpen) continue;
+        openCount++;
+        // Garde-fou : un coefficient nul ou négatif (corruption NVS,
+        // valeur jamais initialisée) ne doit jamais annuler la répartition
+        // pour cette vanne — on retombe sur 1.0 dans ce cas précis.
+        float c = valveCons[i].flowCoeff;
+        coeffSum += (c > 0.0f) ? c : 1.0f;
+    }
+    if(openCount == 0 || coeffSum <= 0.0f){
         // Personne pour recevoir les pulses ; on les "perd" pour le suivi par vanne.
         lastDistributedTotal = totalPulsesGlobal;
         return;
     }
-    unsigned long perValve = delta / (unsigned long)openCount;
-    unsigned long reste    = delta - perValve * (unsigned long)openCount;
     uint16_t today = todayYMD();
+
+    // Première passe : calcule la part flottante de chaque vanne ouverte,
+    // arrondit à l'entier inférieur, et accumule l'erreur d'arrondi.
+    unsigned long assignedSum = 0;
+    unsigned long shares[VANNE_COUNT];
+    for(int i=0;i<VANNE_COUNT;i++){
+        if(!valves[i].isOpen){ shares[i] = 0; continue; }
+        float c = valveCons[i].flowCoeff;
+        if(c <= 0.0f) c = 1.0f;
+        float exact = (float)delta * (c / coeffSum);
+        unsigned long share = (unsigned long)exact; // troncature
+        shares[i] = share;
+        assignedSum += share;
+    }
+    // Deuxième passe : distribue le reliquat d'arrondi (delta - assignedSum)
+    // 1 pulse à la fois aux premières vannes ouvertes, de façon déterministe,
+    // pour garantir que la somme des parts égale EXACTEMENT delta (pas de
+    // pulse perdu ni dupliqué par l'arrondi).
+    unsigned long reste = delta - assignedSum;
+    for(int i=0;i<VANNE_COUNT && reste>0;i++){
+        if(!valves[i].isOpen) continue;
+        shares[i] += 1;
+        reste--;
+    }
 
     for(int i=0;i<VANNE_COUNT;i++){
         if(!valves[i].isOpen) continue;
@@ -671,11 +783,8 @@ void pulseDistribute(unsigned long totalPulsesGlobal){
             valveCons[i].todayYmd = today;
             valveCons[i].todayPulses = 0;
         }
-        unsigned long share = perValve;
-        // distribue le reste aux premières vannes ouvertes (1 pulse chacune)
-        if(reste > 0){ share += 1; reste--; }
-        valveCons[i].pulsesTotal += share;
-        valveCons[i].todayPulses += share;
+        valveCons[i].pulsesTotal += shares[i];
+        valveCons[i].todayPulses += shares[i];
     }
     lastDistributedTotal = totalPulsesGlobal;
     // Sauvegarde NVS (peu coûteux : une_pref put par vanne)
@@ -778,6 +887,18 @@ void valveHardClose(int idx){
 // Retourne false si refusé (priorité inférieure)
 bool valveHardOpen(int idx, CmdSource src, uint32_t durationSec){
     if(idx<0||idx>=VANNE_COUNT) return false;
+    // SÉCURITÉ CALIBRATION : tant qu'une calibration est en cours (RUNNING),
+    // seule l'ouverture de la vanne actuellement mesurée (calibTick()) est
+    // autorisée. Toute autre tentative d'ouverture — programme, forçage
+    // manuel, web, LoRa — est refusée, pour ne jamais avoir deux vannes
+    // ouvertes simultanément pendant une mesure (ce qui fausserait le
+    // calcul du coefficient de débit). Cette garde est volontairement
+    // placée au niveau le plus bas (valveHardOpen) pour couvrir TOUTES
+    // les voies d'ouverture sans avoir à dupliquer la vérification dans
+    // schedCheck(), inputUpdate(), loraProcessCmd(), les routes REST, etc.
+    if(calibState.phase == CalibPhase::RUNNING && idx != calibState.currentValve){
+        return false;
+    }
     int prio = srcPrio(src);
     Valve& v = valves[idx];
     // Refuser si déjà ouverte avec priorité supérieure ou égale (sauf même source)
@@ -849,6 +970,185 @@ void valveCloseAll(CmdSource src=CmdSource::WEB){
     // ensure visualization LEDs are also cleared
     for(int i=0;i<VANNE_COUNT;i++) digitalWrite(LEDVISU_PINS[i], LOW);
     logSys("Toutes vannes fermées");
+}
+
+// ============================================================
+// SECTION 7b — FLOWCALIBRATIONMANAGER (logique métier)
+// ============================================================
+//
+// Voir la déclaration de CalibState (SECTION 3c) pour le contexte général.
+// Ces fonctions implémentent la machine à états : calibStart() l'amorce,
+// calibTick() (appelée depuis loop(), sans delay()) la fait avancer pas à
+// pas, calibAbort() permet une annulation manuelle à tout moment.
+
+// Récupère le compteur de pulses total courant (persisté + runtime),
+// utilisé à plusieurs endroits du fichier — on le factorise ici pour la
+// calibration plutôt que de dupliquer noInterrupts()/interrupts().
+static unsigned long calibReadTotalPulses(){
+    unsigned long cnt;
+    noInterrupts(); cnt = pulseCount; interrupts();
+    return persistedPulseCount + cnt;
+}
+
+// Démarre une calibration. Retourne false (avec failReason rempli) si les
+// conditions de sécurité ne sont pas remplies — notamment si UNE SEULE
+// vanne est déjà ouverte, peu importe la source (sécurité max demandée :
+// on ne ferme jamais automatiquement une vanne active pour calibrer).
+bool calibStart(uint16_t durationSec){
+    if(calibState.phase == CalibPhase::RUNNING){
+        strlcpy(calibState.failReason, "Calibration déjà en cours", sizeof(calibState.failReason));
+        return false;
+    }
+    for(int i=0;i<VANNE_COUNT;i++){
+        if(valves[i].isOpen){
+            snprintf(calibState.failReason, sizeof(calibState.failReason),
+                      "Vanne %d déjà ouverte — fermez tout avant calibration", i+1);
+            return false;
+        }
+    }
+    if(durationSec < 5) durationSec = 5;       // garde-fou : mesure trop courte = bruit
+    if(durationSec > 1800) durationSec = 1800; // garde-fou : 30 min max par vanne
+
+    calibState.phase = CalibPhase::RUNNING;
+    calibState.durationSec = durationSec;
+    calibState.currentValve = 0;
+    calibState.phaseStartMs = millis();
+    calibState.pulseSnapshotAtStart = calibReadTotalPulses();
+    for(int i=0;i<VANNE_COUNT;i++) calibState.resultCoeff[i] = 0.0f;
+    calibState.failReason[0] = '\0';
+
+    // Ouvre la première vanne, SEULE, à pleine durée (cappée par la
+    // sécurité absolue MAX_VALVE_OPEN_MS via valveHardOpen). On utilise
+    // CmdSource::WEB (priorité la plus haute) pour garantir qu'aucune
+    // source concurrente ne puisse interrompre la mesure en cours.
+    valveHardOpen(0, CmdSource::WEB, durationSec);
+    char msg[80];
+    snprintf(msg, sizeof(msg), "Calibration débit démarrée (%us/vanne)", durationSec);
+    logSys(msg);
+    return true;
+}
+
+// Annule une calibration en cours. Ferme la vanne actuellement ouverte par
+// la calibration et restaure l'état IDLE. Les coefficients déjà mesurés
+// pour les vannes précédentes dans cette session NE SONT PAS appliqués
+// (on ne persiste qu'à la fin complète, voir calibFinish()) — une
+// calibration interrompue n'altère donc jamais les coefficients existants.
+void calibAbort(){
+    if(calibState.phase != CalibPhase::RUNNING) return;
+    if(calibState.currentValve >= 0 && calibState.currentValve < VANNE_COUNT){
+        valveHardClose(calibState.currentValve);
+    }
+    calibState.phase = CalibPhase::ABORTED;
+    calibState.currentValve = -1;
+    logSys("Calibration débit annulée par l'utilisateur");
+}
+
+// Finalise une calibration terminée avec succès : calcule flowCoeff
+// (pulses/seconde mesurés, valeur relative — pas besoin de normaliser
+// puisque pulseDistribute() utilise déjà un ratio coeff_i / somme(coeff))
+// pour chaque vanne et persiste en NVS.
+static void calibFinish(){
+    char msg[120];
+    for(int i=0;i<VANNE_COUNT;i++){
+        float pps = calibState.resultCoeff[i]; // déjà en pulses/seconde, voir calibTick()
+        if(pps <= 0.0f){
+            // Mesure nulle ou négative (vanne sans débit, capteur déconnecté,
+            // ou erreur) : on NE remplace PAS le coefficient existant par 0,
+            // ce qui exclurait définitivement cette vanne de toute future
+            // répartition. On conserve l'ancienne valeur (ou 1.0 par défaut
+            // si jamais calibrée) et on le journalise pour que l'utilisateur
+            // puisse investiguer (vanne bouchée ? capteur mal câblé ?).
+            snprintf(msg, sizeof(msg),
+                "Calibration V%d: débit mesuré nul — coefficient conservé (vérifier la vanne)", i+1);
+            logSys(msg);
+            continue;
+        }
+        valveCons[i].flowCoeff = pps;
+        valveConsSaveFlowCoeff(i);
+        snprintf(msg, sizeof(msg), "Calibration V%d: %.3f pulses/s mesurés", i+1, pps);
+        logSys(msg);
+    }
+    calibState.phase = CalibPhase::DONE;
+    calibState.currentValve = -1;
+    logSys("Calibration débit terminée — coefficients mis à jour");
+}
+
+// Avance la machine à états de calibration. Appelée à chaque tour de
+// loop(), sans delay() — suit le même style non-bloquant que le reste du
+// firmware (valveUpdate(), schedCheck(), etc.).
+void calibTick(){
+    if(calibState.phase != CalibPhase::RUNNING) return;
+    int v = calibState.currentValve;
+    if(v < 0 || v >= VANNE_COUNT){
+        // État incohérent (ne devrait jamais arriver) : on abandonne proprement
+        // plutôt que de lire hors limites.
+        strlcpy(calibState.failReason, "État de calibration incohérent", sizeof(calibState.failReason));
+        calibState.phase = CalibPhase::FAILED;
+        valveCloseAll(CmdSource::WEB);
+        return;
+    }
+    unsigned long elapsedMs = millis() - calibState.phaseStartMs;
+    if(elapsedMs < (unsigned long)calibState.durationSec * 1000UL) return; // mesure en cours, rien à faire
+
+    // Fenêtre de mesure de cette vanne terminée : calcule le débit mesuré
+    // et ferme la vanne.
+    unsigned long totalNow = calibReadTotalPulses();
+    unsigned long deltaPulses = (totalNow >= calibState.pulseSnapshotAtStart)
+                               ? (totalNow - calibState.pulseSnapshotAtStart) : 0;
+    float pps = (float)deltaPulses / (float)calibState.durationSec;
+    calibState.resultCoeff[v] = pps;
+    valveHardClose(v);
+
+    char msg[80];
+    snprintf(msg, sizeof(msg), "Calibration V%d terminée: %lu pulses en %us", v+1, deltaPulses, calibState.durationSec);
+    logSys(msg);
+
+    int nextV = v + 1;
+    if(nextV >= VANNE_COUNT){
+        // Toutes les vannes ont été mesurées : finalise.
+        calibFinish();
+        return;
+    }
+    // Passe à la vanne suivante : ouvre SEULE, redémarre le chrono de mesure.
+    calibState.currentValve = nextV;
+    calibState.phaseStartMs = millis();
+    calibState.pulseSnapshotAtStart = calibReadTotalPulses();
+    valveHardOpen(nextV, CmdSource::WEB, calibState.durationSec);
+}
+
+// Construit le JSON d'état de calibration pour /api/calibration/status et
+// pour l'inclusion dans buildStatusJson() (affichage live sans recharger
+// la page, même après reconnexion WebSocket suite à un reload).
+String calibStatusJson(){
+    StaticJsonDocument<512> doc;
+    const char* phaseStr = "idle";
+    switch(calibState.phase){
+        case CalibPhase::RUNNING: phaseStr = "running"; break;
+        case CalibPhase::DONE:    phaseStr = "done";     break;
+        case CalibPhase::ABORTED: phaseStr = "aborted";  break;
+        case CalibPhase::FAILED:  phaseStr = "failed";   break;
+        default:                  phaseStr = "idle";     break;
+    }
+    doc["phase"] = phaseStr;
+    doc["currentValve"] = calibState.currentValve;
+    doc["durationSec"] = calibState.durationSec;
+    if(calibState.phase == CalibPhase::RUNNING){
+        unsigned long elapsedMs = millis() - calibState.phaseStartMs;
+        unsigned long remainMs = ((unsigned long)calibState.durationSec*1000UL > elapsedMs)
+                                ? ((unsigned long)calibState.durationSec*1000UL - elapsedMs) : 0;
+        doc["remainingSec"] = remainMs/1000UL;
+        unsigned long totalNow = calibReadTotalPulses();
+        unsigned long deltaPulses = (totalNow >= calibState.pulseSnapshotAtStart)
+                                   ? (totalNow - calibState.pulseSnapshotAtStart) : 0;
+        doc["livePulses"] = deltaPulses;
+    }
+    if(calibState.failReason[0]) doc["failReason"] = calibState.failReason;
+    JsonArray res = doc.createNestedArray("results");
+    for(int i=0;i<VANNE_COUNT;i++) res.add(calibState.resultCoeff[i]);
+    JsonArray coeffs = doc.createNestedArray("flowCoeffs");
+    for(int i=0;i<VANNE_COUNT;i++) coeffs.add(valveCons[i].flowCoeff);
+    String out; serializeJson(doc, out);
+    return out;
 }
 
 // ============================================================
@@ -946,7 +1246,8 @@ void inputUpdate(){
                 valveHardClose(i);
                 logAdd(i, "Fermée — bouton OFF (annule forçage)");
             } else {
-                valveHardOpen(i, CmdSource::PHYS_INPUT, sysConfig.manualForceSec);
+                bool ok = valveHardOpen(i, CmdSource::PHYS_INPUT, sysConfig.manualForceSec);
+                if(!ok) logAdd(i, "Forçage bouton ignoré (calibration en cours ou priorité supérieure)");
             }
         }
     }
@@ -1153,6 +1454,21 @@ String buildStatusJson(){
     // sache si la liaison Home Assistant fonctionne sans avoir à consulter
     // les logs série.
     doc["mqttConnected"] = mqttConnected;
+    // AMÉLIORATION (calibration débit) : résumé léger de l'état de
+    // calibration pour que l'UI puisse suivre la progression en direct via
+    // WebSocket, y compris après un reload de page (l'état vit côté
+    // firmware, pas côté navigateur — voir SECTION 7b). On ne renvoie ici
+    // qu'un résumé ; le détail complet (résultats par vanne, coefficients)
+    // est disponible via GET /api/calibration/status.
+    if(calibState.phase == CalibPhase::RUNNING){
+        JsonObject calib = doc.createNestedObject("calib");
+        calib["phase"] = "running";
+        calib["currentValve"] = calibState.currentValve;
+        unsigned long elapsedMs = millis() - calibState.phaseStartMs;
+        unsigned long totalMs = (unsigned long)calibState.durationSec*1000UL;
+        unsigned long remainMs = (totalMs > elapsedMs) ? (totalMs - elapsedMs) : 0;
+        calib["remainingSec"] = remainMs/1000UL;
+    }
     String out; serializeJson(doc,out);
     return out;
 }
@@ -1728,6 +2044,10 @@ void webSetup(){
             o["todayYmd"]         = valveCons[v].todayYmd;
             o["pulsesToday"]      = valveCons[v].todayPulses;
             o["litresToday"]      = litresToday;
+            // Coefficient de calibration débit actuel (pulses/seconde mesurés
+            // seul, ou 1.0 par défaut si jamais calibré) — utile pour que
+            // l'UI affiche les coefficients courants même hors calibration.
+            o["flowCoeff"]        = valveCons[v].flowCoeff;
             JsonArray hist = o.createNestedArray("history");
             // On parcourt l'historique par ordre chronologique inverse (le plus récent d'abord)
             int start = (valveCons[v].todayIdx - 1 + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;
@@ -1743,6 +2063,45 @@ void webSetup(){
         }
         String out; serializeJson(doc, out);
         req->send(200, "application/json", out);
+    });
+
+    // ── Calibration débit : démarrer POST /api/calibration/start {durationSec}
+    //
+    // Sécurité : calibStart() refuse si une vanne est déjà ouverte (peu
+    // importe la source) — pas de fermeture automatique, conformément au
+    // choix de sécurité maximale. La réponse {ok:false, reason:"..."} permet
+    // à l'UI d'afficher le message d'erreur exact à l'utilisateur.
+    server.on("/api/calibration/start", HTTP_POST, [](AsyncWebServerRequest* req){},
+        nullptr,
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+            StaticJsonDocument<128> doc;
+            uint16_t durationSec = 60;
+            if(len>0 && !deserializeJson(doc,data,len)){
+                durationSec = doc["durationSec"] | 60;
+            }
+            bool ok = calibStart(durationSec);
+            if(ok){
+                jsonResp(req, "{\"ok\":true}");
+            } else {
+                String resp = "{\"ok\":false,\"reason\":\"" + String(calibState.failReason) + "\"}";
+                jsonResp(req, resp, 409); // 409 Conflict : état actuel incompatible
+            }
+        }
+    );
+
+    // ── Calibration débit : annuler POST /api/calibration/abort
+    server.on("/api/calibration/abort", HTTP_POST, [](AsyncWebServerRequest* req){
+        calibAbort();
+        jsonResp(req, "{\"ok\":true}");
+    });
+
+    // ── Calibration débit : statut GET /api/calibration/status
+    // Utilisé par l'UI pour suivre la progression en polling (en complément
+    // du résumé léger inclus dans le STATUS WebSocket), et pour retrouver
+    // l'état exact après un reload de page puisque la calibration vit
+    // entièrement côté firmware.
+    server.on("/api/calibration/status", HTTP_GET, [](AsyncWebServerRequest* req){
+        jsonResp(req, calibStatusJson());
     });
 
     // ── Fermer tout POST /api/valve/closeall
@@ -2150,46 +2509,129 @@ static const char CAPTIVE_HTML_2[] PROGMEM = R"CPEOF(
 void startCaptivePortal() {
     captivePortalActive = true;
 
-    // Passer en mode mixte AP_STA pour pouvoir scanner les réseaux
-    WiFi.disconnect(); // ne pas passer 'true' sinon ça coupe la radio!
-    delay(200);
-    WiFi.mode(WIFI_AP_STA);
-    WiFi.softAP("IrrigPro-Setup");   // pas de mot de passe = accès libre
-    delay(500);
-
-    // Lancer un scan asynchrone des réseaux WiFi en arrière-plan
-    Serial.println("[CaptivePortal] Lancement du scan WiFi...");
-    WiFi.scanNetworks(true);
+    // CORRECTIF v2 (bug "AP n'apparaît plus" persistant malgré le cycle
+    // WIFI_OFF -> WIFI_AP_STA -> softAP() de la première tentative) :
+    //
+    // Le retry précédent partait de l'hypothèse "driver pas encore stabilisé
+    // après l'échec STA, il faut juste attendre plus longtemps". Mais le
+    // même échec ("set AP config failed") se reproduisait de façon
+    // strictement identique sur les deux tentatives malgré le reset complet
+    // entre les deux — ce qui élimine l'hypothèse d'un simple problème de
+    // timing. La cause la plus probable, documentée sur ESP32-S3 (fragilité
+    // du driver RF en mode mixte AP_STA après un échec de connexion STA,
+    // contrairement à l'ESP32 classique où le même code fonctionne) :
+    // démarrer DIRECTEMENT en WIFI_AP_STA est ce qui échoue, pas le délai
+    // avant.
+    //
+    // Fix v2 : on démarre l'AP en mode WIFI_AP PUR (sans STA mélangé), on
+    // vérifie que softAPIP() renvoie bien une adresse non-nulle (softAP()
+    // peut renvoyer "succès" sans configuration IP correcte selon certains
+    // retours terrain), et on ne bascule en WIFI_AP_STA (pour permettre le
+    // scan WiFi depuis le portail) QU'APRÈS avoir confirmé que l'AP pur
+    // fonctionne. Si même le mode AP pur échoue, le scan est simplement
+    // désactivé pour cette session (le portail reste utilisable pour saisir
+    // un SSID manuellement, voir le champ texte du formulaire).
+    WiFi.disconnect(true);
+    WiFi.mode(WIFI_OFF);
+    delay(300);
 
     IPAddress apIP(192, 168, 4, 1);
-    WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+
+    bool apOk = false;
+    bool scanAvailable = false;
+    for(int attempt=0; attempt<2 && !apOk; attempt++){
+        WiFi.mode(WIFI_AP);          // AP PUR — pas de mode mixte sur cette tentative
+        delay(300);
+        WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+        bool callOk = WiFi.softAP("IrrigPro-Setup");
+        delay(300); // laisser le temps à l'event AP_START de se propager avant de lire l'IP
+        IPAddress gotIP = WiFi.softAPIP();
+        apOk = callOk && (gotIP != IPAddress(0,0,0,0));
+        if(!apOk){
+            Serial.printf("[CaptivePortal] Tentative %d échouée (callOk=%d, ip=%s)\n",
+                          attempt+1, callOk, gotIP.toString().c_str());
+            WiFi.mode(WIFI_OFF);
+            delay(500);
+        }
+    }
+
+    if(apOk){
+        Serial.println("[CaptivePortal] AP pur (WIFI_AP) démarré avec succès");
+        // L'AP fonctionne en mode pur : on tente maintenant la bascule vers
+        // AP_STA pour permettre le scan WiFi depuis le portail. Si CETTE
+        // transition spécifique re-casse l'AP (comportement observé sur
+        // certains S3), on revient immédiatement en AP pur plutôt que de
+        // laisser le portail dans un état cassé.
+        WiFi.mode(WIFI_AP_STA);
+        delay(300);
+        IPAddress checkIP = WiFi.softAPIP();
+        if(checkIP != IPAddress(0,0,0,0)){
+            scanAvailable = true;
+            Serial.println("[CaptivePortal] Bascule AP_STA OK — scan WiFi disponible");
+        } else {
+            Serial.println("[CaptivePortal] Bascule AP_STA a cassé l'AP — retour en WIFI_AP pur (sans scan)");
+            WiFi.mode(WIFI_AP);
+            delay(300);
+            WiFi.softAPConfig(apIP, apIP, IPAddress(255, 255, 255, 0));
+            WiFi.softAP("IrrigPro-Setup");
+            delay(300);
+            scanAvailable = false;
+        }
+    } else {
+        Serial.println("[CaptivePortal] ERREUR: AP pur a échoué après 2 tentatives — portail inaccessible");
+        logSys("ERREUR: démarrage AP portail captif a échoué (2 tentatives, AP pur)");
+    }
+
+    // Lancer un scan asynchrone des réseaux WiFi en arrière-plan, UNIQUEMENT
+    // si la bascule AP_STA a réussi (sinon WiFi.scanNetworks() exigerait
+    // le mode STA actif, absent en WIFI_AP pur, et échouerait silencieusement
+    // ou pire, redéclencherait l'instabilité qu'on vient d'éviter).
+    captivePortalScanAvailable = scanAvailable;
+    if(scanAvailable){
+        Serial.println("[CaptivePortal] Lancement du scan WiFi...");
+        WiFi.scanNetworks(true);
+    } else {
+        Serial.println("[CaptivePortal] Scan WiFi désactivé pour cette session (AP_STA indisponible)");
+    }
 
     // DNS : renvoyer toutes les requêtes vers l'IP de l'AP (portail captif)
     dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
     dnsServer.start(53, "*", apIP);
 
-    Serial.println("[CaptivePortal] AP: IrrigPro-Setup  IP: 192.168.4.1");
-    logSys("Portail captif actif — SSID: IrrigPro-Setup");
+    Serial.print("[CaptivePortal] AP: IrrigPro-Setup  IP: "); Serial.println(WiFi.softAPIP().toString());
+    logSys(apOk ? "Portail captif actif — SSID: IrrigPro-Setup"
+                : "Portail captif démarré MAIS AP radio indisponible (voir log série)");
 
     // Affichage OLED
     display.clear();
     display.setFont(ArialMT_Plain_10);
-    display.drawString(0, 0,  "WiFi: ECHEC config!");
-    display.drawString(0, 14, "AP: IrrigPro-Setup");
-    display.drawString(0, 28, "-> 192.168.4.1");
-    display.drawString(0, 42, "Configurer le WiFi");
+    if(apOk){
+        display.drawString(0, 0,  "WiFi: ECHEC config!");
+        display.drawString(0, 14, "AP: IrrigPro-Setup");
+        display.drawString(0, 28, "-> 192.168.4.1");
+        display.drawString(0, 42, "Configurer le WiFi");
+    } else {
+        display.drawString(0, 0,  "WiFi: ECHEC config!");
+        display.drawString(0, 14, "AP: ECHEC demarrage");
+        display.drawString(0, 28, "Voir port serie");
+        display.drawString(0, 42, "Redemarrage conseille");
+    }
     display.display();
 
     // Servir la page de config sur le serveur dédié (port 80)
     auto servePortal = [](AsyncWebServerRequest* req) {
         String options = "";
-        int n = WiFi.scanComplete();
-        Serial.printf("[CaptivePortal] GET / -> scanComplete=%d\n", n);
-        if (n == WIFI_SCAN_FAILED) {
-            options = "<option value=\"\">Recherche en cours...</option>";
-        } else if (n > 0) {
-            for (int i = 0; i < n; ++i) {
-                options += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+        if(!captivePortalScanAvailable){
+            options = "<option value=\"\">Scan indisponible — saisir le r&eacute;seau ci-dessous</option>";
+        } else {
+            int n = WiFi.scanComplete();
+            Serial.printf("[CaptivePortal] GET / -> scanComplete=%d\n", n);
+            if (n == WIFI_SCAN_FAILED) {
+                options = "<option value=\"\">Recherche en cours...</option>";
+            } else if (n > 0) {
+                for (int i = 0; i < n; ++i) {
+                    options += "<option value=\"" + WiFi.SSID(i) + "\">" + WiFi.SSID(i) + " (" + String(WiFi.RSSI(i)) + " dBm)</option>";
+                }
             }
         }
         
@@ -2199,6 +2641,11 @@ void startCaptivePortal() {
 
     captiveServer.on("/scan", HTTP_GET, [](AsyncWebServerRequest* req) {
         String options = "";
+        if(!captivePortalScanAvailable){
+            options = "<option value=\"\">Scan indisponible — saisir le r&eacute;seau ci-dessous</option>";
+            req->send(200, "text/html", options);
+            return;
+        }
         int n = WiFi.scanComplete();
         Serial.printf("[CaptivePortal] GET /scan -> scanComplete=%d\n", n);
         if (n == WIFI_SCAN_RUNNING) {
@@ -2495,6 +2942,9 @@ void loop(){
     // ── Timers vannes (fermeture auto)
     valveUpdate();
 
+    // ── Machine à états de calibration débit (avance pas à pas, non-bloquant)
+    calibTick();
+
     // ── Vérification programmes (1×/min)
     schedCheck();
 
@@ -2520,11 +2970,20 @@ void loop(){
         lastWifiCheckMs = now;
         if(WiFi.status() != WL_CONNECTED){
             if(!captivePortalActive){
+                // CORRECTIF (bug latent, même famille que "AP n'apparaît plus") :
+                // ce bloc se contentait d'appeler WiFi.softAP(sysConfig.nodeId)
+                // sans jamais démarrer captiveServer (routes /, /save, /scan).
+                // Même quand softAP() réussissait, le SSID pouvait apparaître
+                // mais RIEN ne répondait derrière (page blanche / timeout) —
+                // et le SSID utilisé (sysConfig.nodeId) différait en plus de
+                // celui du portail au boot ("IrrigPro-Setup"), ce qui aurait
+                // dérouté l'utilisateur. On réutilise startCaptivePortal(),
+                // qui contient désormais la séquence softAP sécurisée
+                // (reset propre du driver, vérification du retour, retry)
+                // ET démarre réellement le serveur HTTP du portail.
                 Serial.println("WiFi perdu — démarrage portail captif (1min)");
-                WiFi.softAP(sysConfig.nodeId); // démarre l'AP pour configuration
-                captivePortalActive = true;
+                startCaptivePortal();
                 captivePortalStartMs = now;
-                Serial.print("AP IP: "); Serial.println(WiFi.softAPIP().toString());
             } else {
                 // Portail actif : vérifier timeout
                 if(now - captivePortalStartMs >= CAPTIVE_PORTAL_TIMEOUT_MS){
