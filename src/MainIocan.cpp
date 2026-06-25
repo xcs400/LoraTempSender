@@ -1218,9 +1218,21 @@ static String mqttTopicNode(){
 }
 
 // ── Publication d'un message "config" retained
+//
+// CORRECTIF CRITIQUE (entités absentes de Home Assistant) :
+// Le schéma MQTT Discovery de HA exige que le JSON de description soit
+// publié sur <prefix>/<component>/<node>/<objId>/config — un topic DISTINCT
+// du state_topic (<prefix>/<component>/<node>/<objId>). L'ancienne version
+// publiait le JSON de config sur le MÊME topic que mqttPublishState() utilise
+// pour la valeur (mqttTopic() sans suffixe). Résultat : le JSON discovery
+// était immédiatement écrasé par la prochaine valeur numérique publiée
+// (10s plus tard), donc HA ne voyait jamais de payload "config" valide et
+// ne créait aucune entité, malgré l'arrivée correcte des valeurs sur les
+// topics — exactement le symptôme observé (valeurs visibles dans
+// l'explorateur MQTT, mais 0 entité dans Settings → Devices & Services).
 static void mqttPublishConfig(const char* component, const char* objId, const String& payload){
     if(!mqttConnected) return;
-    String topic = mqttTopic(component, objId);
+    String topic = mqttTopic(component, objId) + "/config";
     // qos 0, retain true
     mqttClient.publish(topic.c_str(), 0, true, payload.c_str(), payload.length());
 }
@@ -1266,8 +1278,11 @@ static void mqttPublishDiscovery(){
     };
     for(size_t i=0;i<sizeof(defs)/sizeof(defs[0]);i++){
         StaticJsonDocument<512> doc;
+        // CORRECTIF (dépréciation HA 2026.4) : "object_id" pour fixer l'entity_id
+        // est déprécié par Home Assistant ; le remplacement officiel est
+        // "default_entity_id" avec le préfixe de plateforme inclus (ex: "sensor.xxx").
         doc["name"]           = defs[i].name;
-        doc["object_id"]      = String(sysConfig.mqttId) + "_" + defs[i].obj;
+        doc["default_entity_id"] = "sensor." + String(sysConfig.mqttId) + "_" + defs[i].obj;
         doc["unique_id"]      = String(sysConfig.mqttId) + "_" + defs[i].obj;
         doc["state_topic"]    = mqttTopic("sensor", defs[i].obj);
         doc["availability_topic"] = nodeTopic + "/availability";
@@ -1291,7 +1306,7 @@ static void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_today",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — litres aujourd'hui";
-            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["default_entity_id"] = "sensor." + String(sysConfig.mqttId) + "_" + oid;
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
             doc["state_topic"]    = mqttTopic("sensor", oid);
             doc["availability_topic"] = nodeTopic + "/availability";
@@ -1309,7 +1324,7 @@ static void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_total",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — litres total";
-            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["default_entity_id"] = "sensor." + String(sysConfig.mqttId) + "_" + oid;
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
             doc["state_topic"]    = mqttTopic("sensor", oid);
             doc["availability_topic"] = nodeTopic + "/availability";
@@ -1327,7 +1342,7 @@ static void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — état";
-            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid + "_state";
+            doc["default_entity_id"] = "binary_sensor." + String(sysConfig.mqttId) + "_" + oid + "_state";
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_state";
             doc["state_topic"]    = mqttTopic("binary_sensor", oid);
             doc["availability_topic"] = nodeTopic + "/availability";
@@ -1344,7 +1359,7 @@ static void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — commande";
-            doc["object_id"]      = String(sysConfig.mqttId) + "_" + oid + "_switch";
+            doc["default_entity_id"] = "switch." + String(sysConfig.mqttId) + "_" + oid + "_switch";
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_switch";
             doc["state_topic"]    = mqttTopic("switch", oid);
             doc["command_topic"]  = mqttTopic("switch", oid) + "/set";
