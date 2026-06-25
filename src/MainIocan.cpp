@@ -643,11 +643,18 @@ static bool nvsSelfTestAndRecover(){
         ESP.restart();
         return false; // jamais atteint
     }
-    test.putString("probe", "ok");
-    String back = test.getString("probe", "");
+    // Le probe sur "nvsselftest" peut très bien réussir même si le
+    // namespace "irrigcfg" est cassé (chaque namespace a son propre
+    // état dans NVS, et un namespace fragmenté n'empêche pas les autres
+    // de fonctionner). Donc on reteste sur le namespace métier directement
+    // — c'est seulement si irriguous lui-même ne peut pas écrire qu'on
+    // considère la partition comme inutilisable.
+    test.begin("irrigcfg", false);
+    test.putString("probe_cfg", "ok");
+    String backCfg = test.getString("probe_cfg", "");
     test.end();
-    if(back != "ok"){
-        Serial.println("[NVS] put/get probe a échoué → erase + reboot");
+    if(backCfg != "ok"){
+        Serial.println("[NVS] put/get probe sur irriguous a échoué → erase + reboot");
         nvs_flash_erase();
         delay(200);
         ESP.restart();
@@ -1912,6 +1919,31 @@ static void mqttSetup(){
         mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
     }
 
+    // ── Test TCP brut avant de laisser AsyncMqttClient tenter sa chance.
+    // Si même un client TCP standard ne peut pas joindre le port, alors
+    // AsyncMqttClient n'a aucune chance non plus et on évite de flooder
+    // les logs avec des TCP_DISCONNECTED en boucle. À l'inverse, si le
+    // port répond ici mais qu'AsyncMqttClient échoue quand même, on
+    // saura que le problème vient de la lib asynchrone et pas du réseau.
+    Serial.printf("[MQTT] Test TCP brut vers %s:%u...\n",
+                  brokerIp.toString().c_str(), (unsigned)sysConfig.mqttPort);
+    {
+        WiFiClient probe;
+        probe.setTimeout(2000);
+        bool tcpOk = probe.connect(brokerIp, sysConfig.mqttPort);
+        if(tcpOk){
+            Serial.println("[MQTT] Test TCP OK — broker joignable");
+            probe.stop();
+        } else {
+            Serial.println("[MQTT] Test TCP ÉCHEC — broker injoignable depuis l'ESP32");
+            Serial.println("[MQTT] Causes possibles: VLAN séparé, isolation AP, route manquante");
+            Serial.println("[MQTT] Connexion MQTT abandonnée — pas de retry pendant 60s");
+            // On bloque les retries pendant 60s pour éviter le spam
+            lastMqttConnectAttemptMs = millis() + 45000UL;
+            return;
+        }
+    }
+
     if(strlen(sysConfig.mqttUser)>0){
         mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
     }
@@ -1930,12 +1962,36 @@ static void mqttSetup(){
     mqttClient.onMessage([](char* topic, char* payload, AsyncMqttClientMessageProperties, size_t len, size_t, size_t){
         mqttHandleMessage(topic, payload, len);
     });
-    // Petit délai avant connect() : sur ESP32-S3, AsyncMqttClient a besoin
-    // que la pile TCP interne soit stabilisée après setServer(), sinon le
-    // premier connect() peut échouer silencieusement (TCP_DISCONNECTED)
-    // même si tous les paramètres sont bons. 200 ms est suffisant.
-    delay(200);
-    mqttClient.connect();
+    // Sur ESP32-S3, AsyncMqttClient partage la pile AsyncTCP avec le
+    // AsyncWebServer. Si on lance connect() immédiatement après avoir
+    // enregistré tous les handlers, la connexion TCP sortante peut
+    // être refusée silencieusement par la pile partagée. Test TCP brut
+    // préalable réussi ci-dessus, mais AsyncMqttClient utilise un
+    // canal asynchrone différent. On retente plusieurs fois avec délai
+    // croissant pour donner à la pile le temps de se stabiliser.
+    Serial.printf("[MQTT] WiFi status=%d, RSSI=%d, heap=%u — lancement connect()\n",
+                  (int)WiFi.status(), WiFi.RSSI(), (unsigned)ESP.getFreeHeap());
+    for(int attempt=0; attempt<3; attempt++){
+        if(attempt > 0){
+            Serial.printf("[MQTT] Retry connect() #%d après %d ms\n",
+                          attempt+1, 500 * attempt);
+            delay(500 * attempt);
+        }
+        mqttClient.connect();
+        // Laisse au client 1500 ms pour établir le socket TCP et recevoir
+        // le CONNACK. Si ça n'aboutit pas, on retente.
+        for(int wait=0; wait<30; wait++){
+            if(mqttConnected) break;
+            delay(50);
+        }
+        if(mqttConnected){
+            Serial.printf("[MQTT] ✓ Connecté dès la tentative #%d\n", attempt+1);
+            break;
+        }
+    }
+    if(!mqttConnected){
+        Serial.println("[MQTT] ✗ Toutes les tentatives échouées — mqttLoop() retentera périodiquement");
+    }
     lastMqttConnectAttemptMs = millis();
 }
 
@@ -3035,6 +3091,14 @@ void setup(){
         otaSetup();
         // ── Web
         webSetup();
+        // Délai avant MQTT : sur ESP32-S3, AsyncMqttClient partage la pile
+        // TCP (AsyncTCP) avec AsyncWebServer. Si on lance MQTT immédiatement
+        // après webSetup(), la pile TCP peut ne pas être encore stabilisée
+        // et le premier connect() échoue en TCP_DISCONNECTED. 1 seconde
+        // laisse le temps au serveur web de terminer ses initialisations
+        // internes (handlers, ws, etc.) avant qu'on ouvre une nouvelle
+        // connexion TCP sortante.
+        delay(1000);
         // ── MQTT / Home Assistant
         mqttSetup();
     } else {
