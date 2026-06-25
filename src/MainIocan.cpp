@@ -268,7 +268,7 @@ struct Schedule {
     uint8_t hour          = 6;
     uint8_t minute        = 0;
     uint16_t durationSec  = 900;
-    uint8_t weekDays      = 0b0111111;  // Lun-Ven bit0..bit6
+    uint8_t weekDays      = 0b0111111;  // CORRECTIF commentaire : 6 bits actifs = Lun à Sam (pas Lun-Ven)
     uint8_t calMode       = 0;          // 0=hebdo 1=intervalle 2=saison
     uint8_t intervalDays  = 2;
     uint8_t intervalStartMonth = 1;
@@ -1084,7 +1084,13 @@ String buildStatusJson(){
     doc["uptime"] = millis()/1000;
     doc["heap"]   = ESP.getFreeHeap();
     doc["temp1"]  = temperature1;
-    // tempR removed from STATUS to simplify dashboard (TRem kept elsewhere if needed)
+    // CORRECTIF (bug "TRem: -- °C" permanent) : ce champ avait été retiré
+    // du STATUS lors d'un refactor précédent, mais le frontend (WebContent.h,
+    // handleStatus()) lit toujours data.tempR pour l'afficher sur le dashboard.
+    // Sans ce champ, la température distante reçue par LoRa n'était jamais
+    // visible dans l'UI, même quand temperatureRemote contenait une valeur
+    // valide. On le réintègre pour rétablir l'affichage.
+    doc["tempR"]  = temperatureRemote;
     // add current local time for UI
     time_t nowt = nowEpoch();
     if(nowt) doc["time"] = (long)nowt;
@@ -1142,6 +1148,11 @@ String buildStatusJson(){
     // CORRECTIF : calcul de débit désormais partagé avec MQTT via computeFlowLpm()
     // (auparavant dupliqué ici avec des statics locales invisibles depuis mqttPublishState()).
     doc["flow_lpm"] = computeFlowLpm(totalPulses);
+    // AMÉLIORATION : expose l'état de connexion MQTT pour affichage d'un badge
+    // dans l'UI (à côté du badge WebSocket existant), pour que l'utilisateur
+    // sache si la liaison Home Assistant fonctionne sans avoir à consulter
+    // les logs série.
+    doc["mqttConnected"] = mqttConnected;
     String out; serializeJson(doc,out);
     return out;
 }

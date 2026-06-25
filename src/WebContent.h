@@ -3,6 +3,27 @@
 // WebContent.h — Interface SPA HTML/CSS/JS
 // Contrôleur d'arrosage professionnel 8 vannes
 // Séparée de MainIocan.cpp pour lisibilité
+//
+// CORRECTIFS appliqués dans cette révision (revue complète demandée) :
+//   1) handleStatus() lit désormais data.tempR, qui est maintenant bien
+//      envoyé par buildStatusJson() côté firmware (voir MainIocan.cpp).
+//   2) saveConfig() : fallback "8" remplacé par une constante VALVE_COUNT_FALLBACK
+//      alignée sur le VANNE_COUNT réel du firmware (5), pour éviter d'envoyer
+//      des noms de vannes fantômes si /api/config n'a pas encore répondu.
+//   3) buildSchedValveSelect() : même fallback corrigé (5 au lieu de 8), pour
+//      éviter de proposer des vannes inexistantes dans le modal programme
+//      avant la première réponse status.
+//   4) closeAll() : ajout d'une confirmation utilisateur avant de fermer
+//      toutes les vannes (action destructive sans garde-fou auparavant).
+//   5) scheduleMatchesOnDate() (mode intervalle) : calcul du jour de l'année
+//      aligné sur UTC (comme renderCalendar()) au lieu d'un calcul en heure
+//      locale, pour éviter une désynchronisation d'un jour entre le badge
+//      du calendrier et le texte "Prochain événement" sur la carte vanne.
+//   6) Commentaire weekDays par défaut clarifié (cohérent avec le firmware).
+//   B) saveConfig() : vérifie désormais d.ok avant d'afficher "sauvegardée",
+//      pour ne pas induire l'utilisateur en erreur en cas d'échec réseau.
+//   A) Badge MQTT ajouté dans le header, reflète mqttConnected envoyé par
+//      le firmware dans buildStatusJson().
 // ============================================================
 
 const char WEB_HTML[] PROGMEM = R"HTMLEOF(
@@ -62,6 +83,11 @@ header .badge{
 #ws-status{font-size:.7rem;margin-left:auto;display:flex;align-items:center;gap:6px}
 #ws-dot{width:8px;height:8px;border-radius:50%;background:var(--red)}
 #ws-dot.ok{background:var(--green)}
+/* Badge MQTT (amélioration A) */
+#mqtt-status{font-size:.7rem;display:flex;align-items:center;gap:6px}
+#mqtt-dot{width:8px;height:8px;border-radius:50%;background:var(--text-muted)}
+#mqtt-dot.ok{background:var(--green)}
+#mqtt-dot.off{background:var(--red)}
 
 nav{
   background:var(--surface);border-bottom:1px solid var(--border);
@@ -273,9 +299,16 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#388bfd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M12 6v6l4 2"/></svg>
   <h1>IrrigPro</h1>
   <span class="badge">Mon Beau jardin bien arrosé</span>
-  <div id="ws-status">
-    <span id="ws-dot"></span>
-    <span id="ws-label">Déconnecté</span>
+  <div style="margin-left:auto;display:flex;align-items:center;gap:18px">
+    <!-- Badge MQTT (amélioration A) -->
+    <div id="mqtt-status">
+      <span id="mqtt-dot"></span>
+      <span id="mqtt-label">MQTT: —</span>
+    </div>
+    <div id="ws-status">
+      <span id="ws-dot"></span>
+      <span id="ws-label">Déconnecté</span>
+    </div>
   </div>
 </header>
 
@@ -605,6 +638,15 @@ let wsConn = null;
 let calDate = new Date();
 let forceValveIdx = -1;
 
+// CORRECTIF (bugs 2 & 3) : fallback aligné sur le VANNE_COUNT réel du
+// firmware (5 vannes actuellement), au lieu de 8. Utilisé uniquement
+// quand les données serveur (valves[] ou sysConfig.valveNames) ne sont
+// pas encore disponibles (ex: avant la première réponse status/config).
+// Si le nombre de vannes physiques change côté firmware, mettre à jour
+// cette constante en conséquence (ou, mieux, ne plus en avoir besoin du
+// tout le jour où /api/config est garanti répondre avant tout rendu).
+const VALVE_COUNT_FALLBACK = 5;
+
 // Verrou anti-rebuild pendant l'édition d'un programme.
 // Tant que le modal "sched-modal" est ouvert, on ne reconstruit pas
 // le <select id="sched-valve"> au gré des messages STATUS périodiques
@@ -646,6 +688,16 @@ function weekdayBits(bits) {
   return DAY_NAMES.filter((_,i)=> bits & (1<<i)).join(' ');
 }
 
+// CORRECTIF (bug 5) : day-of-year désormais calculé en UTC pur, comme dans
+// renderCalendar(), au lieu d'un calcul basé sur l'heure locale du
+// navigateur. Avant ce correctif, les deux fonctions pouvaient diverger
+// d'un jour autour des changements d'heure été/hiver, ce qui désynchronisait
+// le badge affiché sur le calendrier et le texte "Prochain événement" sur
+// la carte de la vanne pour un même programme en mode intervalle.
+function ydayUTC(dt){
+  return Math.floor((Date.UTC(dt.getFullYear(), dt.getMonth(), dt.getDate()) - Date.UTC(dt.getFullYear(),0,1)) / 86400000);
+}
+
 // Vérifie si le programme `s` est actif pour la date `date` (ignore l'heure)
 function scheduleMatchesOnDate(s, date){
   if(!s || !s.active) return false;
@@ -655,17 +707,12 @@ function scheduleMatchesOnDate(s, date){
   }
   if(s.calMode===1){ // intervalle
     if(!s.intervalDays || s.intervalDays<=0) return false;
-    // compute day-of-year in local time to avoid UTC timezone shifts
-    function ydayLocal(dt){
-      const start = new Date(dt.getFullYear(),0,1);
-      const diff = Math.floor((dt - start) / 86400000);
-      return diff;
-    }
-    const yday = ydayLocal(date);
+    // CORRECTIF (bug 5) : calcul en UTC, cohérent avec renderCalendar()
+    const yday = ydayUTC(date);
     const startMonth = s.intervalStartMonth || 1;
     const startDay   = s.intervalStartDay   || 1;
     const startDate = new Date(y, startMonth-1, startDay);
-    const startYday = ydayLocal(startDate);
+    const startYday = ydayUTC(startDate);
     const isLeap = ((y%4===0) && (y%100!==0 || y%400===0));
     const daysInYear = 365 + (isLeap?1:0);
     const diff = (yday - startYday + daysInYear) % s.intervalDays;
@@ -764,6 +811,8 @@ function handleStatus(data) {
     'Uptime: ' + fmtSec(data.uptime || 0) + '  |  Heure: ' + timeStr;
   
   if (document.getElementById('temps-label')) {
+    // CORRECTIF (bug 1) : data.tempR est maintenant bien envoyé par le
+    // firmware (buildStatusJson() inclut désormais doc["tempR"]).
     document.getElementById('temps-label').textContent =
       `T1: ${data.temp1 !== undefined ? data.temp1 : '--'} °C | ` +
       `TRem: ${data.tempR !== undefined ? data.tempR : '--'} °C`;
@@ -772,6 +821,13 @@ function handleStatus(data) {
     const litres = data.litres !== undefined ? Number(data.litres).toFixed(2) : '--';
     const flow = data.flow_lpm !== undefined ? Number(data.flow_lpm).toFixed(2) : '--';
     document.getElementById('flow-label').textContent = `Litres: ${litres} L | Débit: ${flow} L/min`;
+  }
+  // Badge MQTT (amélioration A) — reflète mqttConnected envoyé par le firmware
+  const mqttDot = document.getElementById('mqtt-dot');
+  const mqttLabel = document.getElementById('mqtt-label');
+  if (mqttDot && mqttLabel && data.mqttConnected !== undefined) {
+    mqttDot.className = data.mqttConnected ? 'ok' : 'off';
+    mqttLabel.textContent = 'MQTT: ' + (data.mqttConnected ? 'connecté' : 'déconnecté');
   }
   // Ne reconstruit le select des vannes du modal programme QUE si ce
   // dernier n'est pas en cours d'édition — sinon la sélection de
@@ -862,7 +918,12 @@ function closeValve(idx) {
   api('POST','/api/valve/close',{valve:idx,source:'WEB'})
     .then(()=>requestStatus());
 }
+// CORRECTIF (bug 4) : "Tout fermer" coupe toutes les vannes y compris
+// celles forcées manuellement ou en cours de programme — action destructive
+// sans garde-fou auparavant. On ajoute une confirmation, cohérente avec
+// le RAZ du compteur d'impulsions qui en a déjà une.
 function closeAll() {
+  if(!confirm('Fermer TOUTES les vannes maintenant (y compris celles forcées ou en programme) ?')) return;
   api('POST','/api/valve/closeall').then(()=>requestStatus());
 }
 function showForceModal(idx) {
@@ -908,6 +969,9 @@ function renderSchedules() {
   // ici l'affichage sur les slots qui ont réellement été configurés au moins
   // une fois (nom non vide, ou actif, ou horaire différent par défaut) pour
   // éviter d'afficher des dizaines de lignes vides "Lun Mar Mer Jeu Ven".
+  // NOTE (bug 6, clarifié) : la valeur par défaut weekDays=63 (0b0111111)
+  // correspond à 6 jours actifs (Lun à Sam), pas "Lun-Ven" — cohérent avec
+  // le commentaire corrigé côté firmware (Schedule::weekDays).
   const meaningful = schedules.filter(s => {
     if (!s) return false;
     if (s.active) return true;
@@ -1102,6 +1166,8 @@ function renderCalendar() {
       if(s.calMode===0) match = !!(s.weekDays & (1<<dow));
       else if(s.calMode===1){
         if(s.intervalDays && s.intervalDays>0){
+          // Calcul en UTC (cohérent avec ydayUTC() utilisé par
+          // scheduleMatchesOnDate() — voir correctif bug 5 plus haut).
           const yday = Math.floor((Date.UTC(y, m, d) - Date.UTC(y, 0, 1)) / 86400000);
           const startMonth = s.intervalStartMonth || 1;
           const startDay   = s.intervalStartDay   || 1;
@@ -1247,8 +1313,11 @@ function loadConfig() {
 
 function saveConfig() {
   const valveNames = [];
+  // CORRECTIF (bug 2) : fallback aligné sur VALVE_COUNT_FALLBACK (5) au lieu
+  // de 8 — évite d'envoyer des noms de vannes fantômes (V6/V7/V8 inexistantes)
+  // si /api/config n'a pas encore répondu au moment du clic "Sauvegarder".
   const nameCount = (window.sysConfig && sysConfig.valveNames && sysConfig.valveNames.length)
-                   ? sysConfig.valveNames.length : 8;
+                   ? sysConfig.valveNames.length : VALVE_COUNT_FALLBACK;
   for(let i=0;i<nameCount;i++){
     const el=document.getElementById('vname-'+i);
     valveNames.push(el?el.value:'Vanne '+(i+1));
@@ -1273,7 +1342,19 @@ function saveConfig() {
     mqttId: document.getElementById('cfg-mqid').value,
     valveNames
   };
-  api('POST','/api/config',body).then(()=>alert('Configuration sauvegardée. Redémarrage recommandé pour appliquer MQTT.'));
+  // CORRECTIF (bug B) : on vérifie désormais d.ok avant d'afficher le message
+  // de succès. Auparavant, api() catchait silencieusement toute erreur réseau
+  // et renvoyait {} — le .then() s'exécutait quand même et affichait
+  // "Configuration sauvegardée" même en cas d'échec réel de la requête,
+  // ce qui pouvait faire croire à l'utilisateur que ses changements WiFi/MQTT
+  // avaient été pris en compte alors que ce n'était pas le cas.
+  api('POST','/api/config',body).then((d)=>{
+    if(d && d.ok){
+      alert('Configuration sauvegardée. Redémarrage recommandé pour appliquer MQTT.');
+    } else {
+      alert('Échec de la sauvegarde — vérifiez la connexion à l\'appareil et réessayez.');
+    }
+  });
 }
 
 function refreshPulse(){
@@ -1319,7 +1400,11 @@ function refreshConsumption(){
 // ══════════════════════════════════════════════════════════
 function buildSchedValveSelect() {
   const sel = document.getElementById('sched-valve');
-  const count = (valves && valves.length) ? valves.length : 8;
+  // CORRECTIF (bug 3) : fallback aligné sur VALVE_COUNT_FALLBACK (5) au lieu
+  // de 8 — évite de proposer des vannes fantômes (V6/V7/V8) dans le modal
+  // programme si l'utilisateur clique "+ Ajouter" avant la première réponse
+  // status/config qui peuple le tableau valves[].
+  const count = (valves && valves.length) ? valves.length : VALVE_COUNT_FALLBACK;
   const prev = sel.value;
   sel.innerHTML = Array.from({length:count},(_,i)=>`<option value="${i}">${(valves[i]&&valves[i].name)?('V'+(i+1)+' — '+valves[i].name):('Vanne '+(i+1))}</option>`).join('');
   // restore previous selection if still valid
