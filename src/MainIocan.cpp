@@ -14,6 +14,18 @@
 //   - ManualOverrideManager : entrées physiques courtes/longues
 //   - LoRaManager     : trames STATUS / CMD / TIME_SYNC
 //   - WebManager      : AsyncWebServer + WebSocket REST
+//
+// CORRECTIFS MQTT (cette révision) :
+//   1) onMqttConnect() s'abonnait à un topic différent de celui publié
+//      dans la discovery (mqttTopicNode() vs mqttTopic()) -> les commandes
+//      envoyées depuis Home Assistant n'atteignaient jamais l'ESP32.
+//      Corrigé : abonnement calculé exactement comme le command_topic publié.
+//   2) flow_lpm republiait toujours 0.0 côté MQTT (calcul dupliqué non
+//      partagé). Corrigé : calcul de débit extrait dans computeFlowLpm(),
+//      partagé entre buildStatusJson() (WebSocket) et mqttPublishState().
+//   3) Ajout d'un Last Will Testament (LWT) sur le topic availability,
+//      pour que Home Assistant détecte une perte de connexion brutale
+//      (crash / coupure WiFi) et pas seulement une déconnexion propre.
 // ============================================================
 
 #include <Arduino.h>
@@ -39,7 +51,7 @@
 // SECTION 1 — CONSTANTES & PINS
 // ============================================================
 #define NODE_ID_DEFAULT      "IRRIGATION01"
-#define SOFT_REV             "2.1"
+#define SOFT_REV             "2.2"
 #define OTA_HOSTNAME         "esp32-irrigation"
 #define OTA_PASSWORD         "irrigation2024"
 
@@ -408,6 +420,42 @@ unsigned long lastWifiReconnectMs = 0;
 const unsigned long WIFI_RECONNECT_INTERVAL_MS = 30000UL; // 30 seconds
 bool          pendingRestart = false;   // demande de restart après sauvegarde portail
 unsigned long pendingRestartMs = 0;     // timestamp de la demande
+
+// ============================================================
+// SECTION 3b — DEBITMETRE PARTAGE (WebSocket + MQTT)
+// ============================================================
+//
+// CORRECTIF : auparavant le calcul de débit instantané (L/min) vivait
+// dans des variables `static` locales à buildStatusJson(), donc invisible
+// depuis mqttPublishState() qui republiait toujours 0.0 pour flow_lpm.
+// On extrait le calcul ici, dans une fonction partagée par les deux
+// consommateurs (WebSocket et MQTT). Comme les deux peuvent être appelés
+// à des fréquences différentes, chaque appel consomme le delta de pulses
+// depuis le dernier appel (par n'importe quel appelant) — la valeur reste
+// représentative du débit moyen récent, juste avec un pas de temps non
+// strictement régulier si WS et MQTT s'entrelacent.
+static unsigned long flowLastPulseSnapshot = 0;
+static unsigned long flowLastMs = 0;
+
+float computeFlowLpm(unsigned long totalPulses){
+    unsigned long nowMs = millis();
+    if(flowLastMs == 0){
+        // Premier appel : pas encore de fenêtre de mesure -> 0, on amorce juste le snapshot
+        flowLastPulseSnapshot = totalPulses;
+        flowLastMs = nowMs;
+        return 0.0f;
+    }
+    unsigned long deltaMs = nowMs - flowLastMs;
+    float flowLpm = 0.0f;
+    if(deltaMs > 0 && totalPulses >= flowLastPulseSnapshot){
+        unsigned long deltaP = totalPulses - flowLastPulseSnapshot;
+        float litresDelta = (float)deltaP / PULSES_PER_LITRE;
+        flowLpm = litresDelta * (60000.0f / (float)deltaMs);
+    }
+    flowLastPulseSnapshot = totalPulses;
+    flowLastMs = nowMs;
+    return flowLpm;
+}
 
 // ============================================================
 // SECTION 4 — LOGGERMANAGER (interne)
@@ -1091,23 +1139,9 @@ String buildStatusJson(){
     doc["pulses"] = totalPulses;
     float litresTotal = (float)totalPulses / PULSES_PER_LITRE;
     doc["litres"] = litresTotal;
-    // compute simple instantaneous flow (L/min) using delta since last WS status
-    static unsigned long lastPulseSnapshot = 0;
-    static unsigned long lastPulseMs = 0;
-    unsigned long nowMs = millis();
-    float flowLpm = 0.0f;
-    if(lastPulseMs == 0){ lastPulseSnapshot = totalPulses; lastPulseMs = nowMs; }
-    unsigned long deltaP = 0;
-    unsigned long deltaMs = nowMs - lastPulseMs;
-    if(totalPulses >= lastPulseSnapshot) deltaP = totalPulses - lastPulseSnapshot;
-    if(deltaMs > 0){
-        float litresDelta = (float)deltaP / PULSES_PER_LITRE;
-        flowLpm = litresDelta * (60000.0f / (float)deltaMs);
-    }
-    // update snapshot every broadcast to have moving window
-    lastPulseSnapshot = totalPulses;
-    lastPulseMs = nowMs;
-    doc["flow_lpm"] = flowLpm;
+    // CORRECTIF : calcul de débit désormais partagé avec MQTT via computeFlowLpm()
+    // (auparavant dupliqué ici avec des statics locales invisibles depuis mqttPublishState()).
+    doc["flow_lpm"] = computeFlowLpm(totalPulses);
     String out; serializeJson(doc,out);
     return out;
 }
@@ -1147,8 +1181,18 @@ void onWsEvent(AsyncWebSocket* server, AsyncWebSocketClient* client,
 //   - switch  (×N) : valve_N (commande via <cmd_topic>)
 //
 // Les commandes émises par HA (switch) arrivent sur
-//   <prefix>/switch/<nodeId>/valve_N/set  (payload: ON / OFF)
+//   <prefix>/switch/<mqttId>/valve_N/set  (payload: ON / OFF)
 // et sont routées vers valveHardOpen / valveHardClose.
+//
+// CORRECTIF IMPORTANT : le topic auquel l'ESP32 s'abonne dans
+// onMqttConnect() DOIT être construit exactement de la même façon que le
+// command_topic publié dans mqttPublishDiscovery() (mqttTopic("switch",oid)),
+// soit <prefix>/switch/<mqttId>/<objId>/set. L'ancienne version utilisait
+// mqttTopicNode() (= <prefix>/<mqttId>) pour l'abonnement, ce qui donnait
+// un chemin totalement différent du command_topic réellement publié à HA :
+// les clics sur les switches dans Home Assistant n'atteignaient alors
+// jamais l'ESP32, sans aucune erreur visible (le message MQTT partait
+// juste vers un topic non souscrit).
 
 static String mqttTopic(const char* component, const char* objId){
     // ex: homeassistant/sensor/irrpro_hs3/temperature1
@@ -1336,9 +1380,10 @@ static void mqttPublishState(){
     pub("sensor","temperature_remote", String(temperatureRemote,2));
     pub("sensor","pulse_total", String((unsigned long)totalPulses));
     pub("sensor","litres_total", String(litresTotal,2));
-    // flow_lpm : on relit la valeur calculée par buildStatusJson pour éviter
-    // de dupliquer la logique — alternative simple : republier 0 si pas dispo
-    pub("sensor","flow_lpm", String(0.0,2));
+    // CORRECTIF : flow_lpm est désormais calculé via computeFlowLpm(), la même
+    // fonction partagée utilisée par buildStatusJson() pour le WebSocket — au
+    // lieu de republier 0.0 en permanence comme c'était le cas auparavant.
+    pub("sensor","flow_lpm", String(computeFlowLpm(totalPulses),2));
 
     // Vannes
     uint16_t today = todayYMD();
@@ -1362,7 +1407,7 @@ static void mqttPublishState(){
 static void mqttHandleMessage(char* topic, char* payload, size_t len){
     String t(topic);
     String p(payload, len);
-    // topic attendu : <prefix>/switch/<id>/valve_N/set
+    // topic attendu : <prefix>/switch/<mqttId>/valve_N/set
     int idxSlash = t.lastIndexOf('/');
     if(idxSlash < 0) return;
     String leaf = t.substring(idxSlash+1); // "set" attendu
@@ -1388,9 +1433,16 @@ static void mqttHandleMessage(char* topic, char* payload, size_t len){
 static void onMqttConnect(bool sessionPresent){
     mqttConnected = true;
     Serial.println("[MQTT] Connecté");
-    // Abonnement aux commandes switch
-    String cmdTopic = mqttTopicNode() + "/switch/+/set";
+    // CORRECTIF : le topic de souscription doit être construit EXACTEMENT
+    // comme le command_topic publié dans mqttPublishDiscovery(), c'est-à-dire
+    // mqttTopic("switch", oid) + "/set" = <prefix>/switch/<mqttId>/<oid>/set.
+    // L'ancienne version utilisait mqttTopicNode() + "/switch/+/set"
+    // (= <prefix>/<mqttId>/switch/+/set), un chemin différent qui ne
+    // correspondait à aucun message réellement publié par HA -> les
+    // commandes de Home Assistant n'arrivaient jamais à l'ESP32.
+    String cmdTopic = String(sysConfig.mqttPrefix) + "/switch/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(cmdTopic.c_str(), 0);
+    Serial.print("[MQTT] Abonné à: "); Serial.println(cmdTopic);
     // Publication disponibilité
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
@@ -1410,6 +1462,14 @@ static void mqttSetup(){
     if(strlen(sysConfig.mqttUser)>0){
         mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
     }
+    // CORRECTIF (Last Will Testament) : si la connexion TCP tombe sans
+    // déconnexion MQTT propre (crash, coupure WiFi brutale), le broker
+    // publiera automatiquement "offline" (retained) sur ce topic. Sans LWT,
+    // Home Assistant continuait à afficher l'appareil comme "online" pour
+    // toujours après un crash, car le topic availability restait figé sur
+    // la dernière valeur retained ("online") publiée avant la coupure.
+    String availTopic = mqttTopicNode() + "/availability";
+    mqttClient.setWill(availTopic.c_str(), 0, true, "offline");
     mqttClient.setKeepAlive(60);
     mqttClient.setCleanSession(true);
     mqttClient.onConnect(onMqttConnect);
