@@ -1937,8 +1937,21 @@ String schedulesToJson(){
 
 void webSetup(){
     // ── SPA principale
+    // On utilise beginResponse_P() pour servir directement depuis PROGMEM,
+    // SANS recopier la chaîne (~52 KB) dans une String heap. C'est essentiel
+    // car req->send(200,"text/html",WEB_HTML) duplique la page en RAM et
+    // peut faire échouer malloc() quand la heap est fragmentée (~138 KB
+    // libres observés sur heltec-Iocan-HS3), donnant une page blanche
+    // sans erreur côté navigateur (Content-Length incorrect / troncature).
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req){
-        req->send(200,"text/html",WEB_HTML);
+        Serial.println("[HTTP] GET /");
+        const char* p = (const char*)WEB_HTML;
+        const size_t total = strlen_P(p);
+        AsyncWebServerResponse* resp = req->beginResponse_P(
+            200, "text/html; charset=utf-8",
+            (const uint8_t*)p, total);
+        resp->addHeader("Cache-Control", "no-store");
+        req->send(resp);
     });
 
     // ── Statut complet GET
@@ -2277,6 +2290,13 @@ void webSetup(){
     server.on("/reset", HTTP_GET, [](AsyncWebServerRequest* req){
         req->send(200,"text/plain","Redémarrage...");
         delay(300); ESP.restart();
+    });
+
+    // Catch-all : trace toute requête non routée pour faciliter le diag
+    server.onNotFound([](AsyncWebServerRequest* req){
+        Serial.printf("[HTTP] 404 %s %s\n",
+            req->methodToString(), req->url().c_str());
+        req->send(404, "text/plain", "not found");
     });
 
     // WebSocket
