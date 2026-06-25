@@ -38,6 +38,7 @@
 #include <ArduinoOTA.h>
 #include <ESPAsyncWebServer.h>
 #include <Preferences.h>
+#include <nvs_flash.h>
 #include <time.h>
 #include <esp_task_wdt.h>
 #include <OneWire.h>
@@ -578,10 +579,11 @@ void configLoad(){
 
 void configSave(){
     prefs.begin("irrigcfg", false);
-    prefs.putString("ssid",   sysConfig.ssid);
-    prefs.putString("wpass",  sysConfig.wifiPass);
-    prefs.putString("nodeId", sysConfig.nodeId);
-    prefs.putString("ntpSrv", sysConfig.ntpServer);
+    size_t errors = 0;
+    if(prefs.putString("ssid",   sysConfig.ssid)   != sizeof(size_t)) errors++;
+    if(prefs.putString("wpass",  sysConfig.wifiPass)!= sizeof(size_t)) errors++;
+    if(prefs.putString("nodeId", sysConfig.nodeId) != sizeof(size_t)) errors++;
+    if(prefs.putString("ntpSrv", sysConfig.ntpServer)!= sizeof(size_t)) errors++;
     prefs.putFloat("lFreq",   sysConfig.loraFreq);
     prefs.putChar("lPow",     sysConfig.loraPower);
     prefs.putInt("tzOff",     sysConfig.tzOffset);
@@ -600,6 +602,58 @@ void configSave(){
         prefs.putString(key, valves[i].name);
     }
     prefs.end();
+    if(errors){
+        Serial.printf("[CFG] ⚠️  configSave: %u échec(s) NVS — partition probablement saturée\n",
+                      (unsigned)errors);
+        Serial.println("[CFG] Tentative de récupération au prochain reboot...");
+    }
+}
+
+// ============================================================
+// SECTION 5b — RÉCUPÉRATION NVS
+// ============================================================
+//
+// Symptôme : putString("ssid", ...) renvoie NOT_ENOUGH_SPACE bien que la
+// partition NVS semble large (36 KB par défaut sur ESP32-S3). Cause : la
+// partition est corrompue/saturée par des fragments d'écritures passées,
+// typiquement parce que la conso par vanne a longtemps utilisé le même
+// namespace que la config système (avant le fix irrcons). Une fois la
+// fragmentation installée, Preferences::put refuse tout putString.
+//
+// Stratégie de récupération automatique :
+//   1) Au boot, AVANT le premier configLoad(), on tente un test-write
+//      anodin dans le namespace irrcons (namespace dédié conso, peu
+//      critique). Si putString échoue avec NOT_ENOUGH_SPACE, on sait
+//      que la partition est inutilisable.
+//   2) Si la partition est inutilisable, on appelle nvs_flash_erase().
+//      Ça efface TOUTE la NVS (config, conso, schedules) — c'est un
+//      mode recovery. On logue clairement ce qui se passe.
+//   3) On reboote pour repartir sur une NVS vierge.
+//
+// IMPORTANT : ce recovery ne se déclenche qu'au boot, jamais pendant
+// un configSave() en cours — sinon on pourrait effacer des données
+// utilisateur en plein milieu d'une sauvegarde.
+static bool nvsSelfTestAndRecover(){
+    Preferences test;
+    if(!test.begin("nvsselftest", false)){
+        // begin() peut lui-même échouer si la partition est HS
+        Serial.println("[NVS] begin(nvsselftest) a échoué → erase + reboot");
+        nvs_flash_erase();
+        delay(200);
+        ESP.restart();
+        return false; // jamais atteint
+    }
+    test.putString("probe", "ok");
+    String back = test.getString("probe", "");
+    test.end();
+    if(back != "ok"){
+        Serial.println("[NVS] put/get probe a échoué → erase + reboot");
+        nvs_flash_erase();
+        delay(200);
+        ESP.restart();
+        return false;
+    }
+    return true;
 }
 
 // Charger et sauvegarder le compteur d'impulsions persisté
@@ -623,8 +677,19 @@ static uint16_t todayYMD(){
 }
 
 // ── Consommation par vanne — chargement / sauvegarde NVS
+//
+// NOTE IMPORTANTE : ces données sont stockées dans un namespace NVS
+// dédié "irrcons" (PAS "irrigcfg", qui contient la config système).
+// Pourquoi : chaque namespace NVS est limité en nombre d'entrées (~255
+// par défaut sur ESP32-S3, mais en pratique bien moins à cause des
+// pages d'index). La conso par vanne utilise 5 vannes × 16 clés = 80
+// entrées (totaux + index + historique 14 jours + coeff calibration),
+// ce qui saturerait irriguous et ferait échouer silencieusement
+// putString("ssid",...) avec NOT_ENOUGH_SPACE. Conséquence visible : un
+// changement de SSID semblait "ne rien faire" même après reboot, parce
+// que la valeur n'était jamais écrite en flash.
 void valveConsLoad(){
-    prefs.begin("irrigcfg", false);
+    prefs.begin("irrcons", false);
     for(int v=0;v<VANNE_COUNT;v++){
         char key[24];
         // Total cumulé
@@ -640,13 +705,21 @@ void valveConsLoad(){
         snprintf(key,sizeof(key),"v%d_fc",v);
         valveCons[v].flowCoeff = prefs.getFloat(key, 1.0f);
         // Historique : on stocke chaque entrée (ymd + pulses) en binaire
+        // On teste d'abord isKey() pour éviter que Preferences::getBytes()
+        // n'appelle en interne getBytesLength(), qui logue systématiquement
+        // une erreur "nvs_get_blob len fail: ... NOT_FOUND" dans le moniteur
+        // série à chaque entrée absente (1ère mise sous tension / après
+        // recovery NVS). Le log n'est pas une vraie erreur fonctionnelle,
+        // mais il spamme la console de manière inutile — au moins 80 lignes
+        // par boot (5 vannes × 16 clés).
         for(int d=0;d<CONS_HISTORY_DAYS;d++){
             snprintf(key,sizeof(key),"v%d_h%d",v,d);
             DayStat ds;
-            if(prefs.getBytes(key, &ds, sizeof(DayStat)) != sizeof(DayStat)){
-                ds.ymd = 0; ds.pulses = 0; ds.litres = 0;
+            if(prefs.isKey(key) && prefs.getBytes(key, &ds, sizeof(DayStat)) == sizeof(DayStat)){
+                valveCons[v].history[d] = ds;
+            } else {
+                valveCons[v].history[d] = {0, 0, 0.0f};
             }
-            valveCons[v].history[d] = ds;
         }
     }
     prefs.end();
@@ -662,7 +735,7 @@ void valveConsLoad(){
 }
 
 void valveConsSaveOne(int v){
-    prefs.begin("irrigcfg", false);
+    prefs.begin("irrcons", false);
     char key[24];
     snprintf(key,sizeof(key),"v%d_pc",v);
     prefs.putULong(key, valveCons[v].pulsesTotal);
@@ -683,7 +756,7 @@ void valveConsSaveOne(int v){
 // inutile de réécrire flowCoeff en NVS à ce rythme alors qu'il ne change
 // qu'à la fin d'une calibration explicite.
 void valveConsSaveFlowCoeff(int v){
-    prefs.begin("irrigcfg", false);
+    prefs.begin("irrcons", false);
     char key[24];
     snprintf(key,sizeof(key),"v%d_fc",v);
     prefs.putFloat(key, valveCons[v].flowCoeff);
@@ -1795,12 +1868,50 @@ static void onMqttConnect(bool sessionPresent){
 
 static void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     mqttConnected = false;
-    Serial.printf("[MQTT] Déconnecté (%d)\n", (int)r);
+    // Libellé lisible de la raison — pratique quand le broker refuse la
+    // connexion (auth invalide, version protocole incompatible, etc.) ou
+    // quand l'ESP n'arrive simplement pas à joindre le port TCP.
+    const char* reasonStr = "?";
+    switch(r){
+        case AsyncMqttClientDisconnectReason::TCP_DISCONNECTED:          reasonStr = "TCP_DISCONNECTED (broker injoignable ou port fermé)"; break;
+        case AsyncMqttClientDisconnectReason::MQTT_UNACCEPTABLE_PROTOCOL_VERSION: reasonStr = "MQTT_PROTOCOL_VERSION"; break;
+        case AsyncMqttClientDisconnectReason::MQTT_IDENTIFIER_REJECTED: reasonStr = "MQTT_IDENTIFIER_REJECTED"; break;
+        case AsyncMqttClientDisconnectReason::MQTT_SERVER_UNAVAILABLE:  reasonStr = "MQTT_SERVER_UNAVAILABLE"; break;
+        case AsyncMqttClientDisconnectReason::MQTT_MALFORMED_CREDENTIALS: reasonStr = "MQTT_MALFORMED_CREDENTIALS"; break;
+        case AsyncMqttClientDisconnectReason::MQTT_NOT_AUTHORIZED:       reasonStr = "MQTT_NOT_AUTHORIZED (login/mot de passe refusés)"; break;
+        case AsyncMqttClientDisconnectReason::ESP8266_NOT_ENOUGH_SPACE:  reasonStr = "NOT_ENOUGH_SPACE"; break;
+        case AsyncMqttClientDisconnectReason::TLS_BAD_FINGERPRINT:       reasonStr = "TLS_BAD_FINGERPRINT"; break;
+        default:                                                        reasonStr = "UNKNOWN"; break;
+    }
+    Serial.printf("[MQTT] Déconnecté (%d = %s)\n", (int)r, reasonStr);
 }
 
 static void mqttSetup(){
-    if(!sysConfig.mqttEnabled) return;
-    mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
+    if(!sysConfig.mqttEnabled){
+        Serial.println("[MQTT] Désactivé dans la config — client non démarré");
+        return;
+    }
+    Serial.printf("[MQTT] Démarrage: host='%s' port=%u user='%s' id='%s'\n",
+                  sysConfig.mqttHost, (unsigned)sysConfig.mqttPort,
+                  sysConfig.mqttUser, sysConfig.mqttId);
+
+    // setServer() a un comportement différent selon qu'on lui passe une IP
+    // numérique ou un hostname. Pour une IP (notre cas par défaut), on
+    // utilise IPAddress() qui évite toute ambiguïté sur la signature et
+    // contourne un bug connu d'AsyncMqttClient sur ESP32-S3 où le passage
+    // d'un char* numérique peut être mal interprété comme un hostname,
+    // provoquant une résolution DNS qui timeout silencieusement (= le
+    // symptôme exact qu'on observe : TCP_DISCONNECTED sans message
+    // d'erreur intermédiaire).
+    IPAddress brokerIp;
+    if(brokerIp.fromString(sysConfig.mqttHost)){
+        Serial.printf("[MQTT] Broker IP parsée: %s\n", brokerIp.toString().c_str());
+        mqttClient.setServer(brokerIp, sysConfig.mqttPort);
+    } else {
+        Serial.printf("[MQTT] Host non-IP, résolution DNS: %s\n", sysConfig.mqttHost);
+        mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
+    }
+
     if(strlen(sysConfig.mqttUser)>0){
         mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
     }
@@ -1819,6 +1930,11 @@ static void mqttSetup(){
     mqttClient.onMessage([](char* topic, char* payload, AsyncMqttClientMessageProperties, size_t len, size_t, size_t){
         mqttHandleMessage(topic, payload, len);
     });
+    // Petit délai avant connect() : sur ESP32-S3, AsyncMqttClient a besoin
+    // que la pile TCP interne soit stabilisée après setServer(), sinon le
+    // premier connect() peut échouer silencieusement (TCP_DISCONNECTED)
+    // même si tous les paramètres sont bons. 200 ms est suffisant.
+    delay(200);
     mqttClient.connect();
     lastMqttConnectAttemptMs = millis();
 }
@@ -2243,38 +2359,104 @@ void webSetup(){
     });
 
     // ── Config POST /api/config
+    //
+    // Notes de conception :
+    //  * Chaque champ n'est mis à jour QUE si la clé est présente et non
+    //    nulle côté JSON. Sans ce garde-fou, un payload partiel (rare mais
+    //    possible) écraserait silencieusement des champs valides.
+    //  * Le mot de passe WiFi n'est mis à jour QUE si non vide (évite
+    //    d'effacer un pass existant quand l'UI envoie "" pour "non modifié").
+    //  * Quand le SSID ou le mot de passe WiFi changent réellement, on
+    //    déclenche un reboot ~1 s après la réponse HTTP. Sans ça, le module
+    //    WiFi garde l'ancien SSID en interne jusqu'au prochain reset manuel,
+    //    et l'utilisateur voit "rien n'a changé même après reboot" parce que
+    //    il n'a pas pensé à rebooter, OU le reboot manuel ne suffit pas si
+    //    configSave() a échoué silencieusement (corrigé par les logs).
     server.on("/api/config", HTTP_POST, [](AsyncWebServerRequest* req){},
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
             StaticJsonDocument<1024> doc;
-            if(deserializeJson(doc,data,len)){jsonResp(req,"{\"ok\":false}",400);return;}
-            if(doc.containsKey("ssid"))   strlcpy(sysConfig.ssid,   doc["ssid"],   32);
-            if(doc.containsKey("wifiPass") && strlen(doc["wifiPass"])>0)
-                strlcpy(sysConfig.wifiPass, doc["wifiPass"], 64);
-            if(doc.containsKey("ntpServer")) strlcpy(sysConfig.ntpServer,doc["ntpServer"],48);
-            if(doc.containsKey("nodeId"))    strlcpy(sysConfig.nodeId,   doc["nodeId"],   24);
-            sysConfig.tzOffset     = doc["tzOffset"]     | sysConfig.tzOffset;
-            sysConfig.loraFreq     = doc["loraFreq"]     | sysConfig.loraFreq;
-            sysConfig.loraPower    = doc["loraPower"]    | sysConfig.loraPower;
-            sysConfig.irrigMode    = doc["irrigMode"]    | sysConfig.irrigMode;
-            sysConfig.maxOpenSec   = doc["maxOpenSec"]   | sysConfig.maxOpenSec;
-            sysConfig.manualForceSec=doc["manualForceSec"]|sysConfig.manualForceSec;
-            // MQTT
-            if(doc.containsKey("mqttEnabled"))  sysConfig.mqttEnabled = doc["mqttEnabled"].as<bool>();
-            if(doc.containsKey("mqttHost"))     strlcpy(sysConfig.mqttHost, doc["mqttHost"], 64);
-            if(doc.containsKey("mqttPort"))     sysConfig.mqttPort = doc["mqttPort"] | sysConfig.mqttPort;
-            if(doc.containsKey("mqttUser"))     strlcpy(sysConfig.mqttUser, doc["mqttUser"], 32);
-            if(doc.containsKey("mqttPass"))     strlcpy(sysConfig.mqttPass, doc["mqttPass"], 48);
-            if(doc.containsKey("mqttPrefix"))   strlcpy(sysConfig.mqttPrefix, doc["mqttPrefix"], 32);
-            if(doc.containsKey("mqttId"))       strlcpy(sysConfig.mqttId, doc["mqttId"], 32);
-            // Noms vannes
+            DeserializationError err = deserializeJson(doc, data, len);
+            if(err){
+                Serial.printf("[CFG] POST /api/config: JSON parse error: %s (len=%u)\n",
+                              err.c_str(), (unsigned)len);
+                jsonResp(req, "{\"ok\":false,\"reason\":\"json-parse\"}", 400);
+                return;
+            }
+
+            // Détecter un vrai changement de SSID/pass AVANT modification
+            char prevSsid[32]; strlcpy(prevSsid, sysConfig.ssid, 32);
+            char prevPass[64]; strlcpy(prevPass, sysConfig.wifiPass, 64);
+            bool wifiChanged = false;
+
+            // --- WiFi : SSID / pass
+            const char* newSsid = doc["ssid"] | (const char*)nullptr;
+            if(newSsid){
+                strlcpy(sysConfig.ssid, newSsid, sizeof(sysConfig.ssid));
+                if(strcmp(prevSsid, sysConfig.ssid) != 0) wifiChanged = true;
+            }
+            const char* newPass = doc["wifiPass"] | (const char*)nullptr;
+            if(newPass && strlen(newPass) > 0){
+                strlcpy(sysConfig.wifiPass, newPass, sizeof(sysConfig.wifiPass));
+                if(strcmp(prevPass, sysConfig.wifiPass) != 0) wifiChanged = true;
+            }
+
+            // --- Autres champs système
+            const char* v;
+            if((v = doc["ntpServer"]   | (const char*)nullptr)) strlcpy(sysConfig.ntpServer, v, sizeof(sysConfig.ntpServer));
+            if((v = doc["nodeId"]      | (const char*)nullptr)) strlcpy(sysConfig.nodeId,    v, sizeof(sysConfig.nodeId));
+            // Les numériques : ArduinoJson `|` avec la valeur courante
+            // préserve la valeur existante si la clé est absente. Pour les
+            // champs que l'UI envoie TOUJOURS, on garde ce pattern ; pour
+            // les flags qu'on veut pouvoir remettre à 0, on testerait
+            // containsKey() à la place.
+            sysConfig.tzOffset       = doc["tzOffset"]       | sysConfig.tzOffset;
+            sysConfig.loraFreq       = doc["loraFreq"]       | sysConfig.loraFreq;
+            sysConfig.loraPower      = doc["loraPower"]      | sysConfig.loraPower;
+            sysConfig.irrigMode      = doc["irrigMode"]      | sysConfig.irrigMode;
+            sysConfig.maxOpenSec     = doc["maxOpenSec"]     | sysConfig.maxOpenSec;
+            sysConfig.manualForceSec = doc["manualForceSec"] | sysConfig.manualForceSec;
+
+            // --- MQTT
+            if(doc.containsKey("mqttEnabled")) sysConfig.mqttEnabled = doc["mqttEnabled"].as<bool>();
+            if((v = doc["mqttHost"]   | (const char*)nullptr)) strlcpy(sysConfig.mqttHost,   v, sizeof(sysConfig.mqttHost));
+            sysConfig.mqttPort   = doc["mqttPort"]   | sysConfig.mqttPort;
+            if((v = doc["mqttUser"]   | (const char*)nullptr)) strlcpy(sysConfig.mqttUser,   v, sizeof(sysConfig.mqttUser));
+            if((v = doc["mqttPass"]   | (const char*)nullptr)) strlcpy(sysConfig.mqttPass,   v, sizeof(sysConfig.mqttPass));
+            if((v = doc["mqttPrefix"] | (const char*)nullptr)) strlcpy(sysConfig.mqttPrefix, v, sizeof(sysConfig.mqttPrefix));
+            if((v = doc["mqttId"]     | (const char*)nullptr)) strlcpy(sysConfig.mqttId,     v, sizeof(sysConfig.mqttId));
+
+            // --- Noms de vannes
             if(doc.containsKey("valveNames")){
                 JsonArray arr = doc["valveNames"];
-                for(int i=0;i<VANNE_COUNT && i<(int)arr.size();i++)
-                    strlcpy(valves[i].name, arr[i]|"", 24);
+                for(int i=0; i<VANNE_COUNT && i<(int)arr.size(); i++){
+                    const char* nm = arr[i] | (const char*)nullptr;
+                    strlcpy(valves[i].name, nm ? nm : "", sizeof(valves[i].name));
+                }
             }
+
+            // --- Persistance NVS + log de ce qui a vraiment été écrit
             configSave();
-            jsonResp(req,"{\"ok\":true}");
+            Serial.printf("[CFG] saved: ssid='%s' nodeId='%s' wifiChanged=%d\n",
+                          sysConfig.ssid, sysConfig.nodeId, wifiChanged);
+
+            // --- Redémarrage auto si WiFi a changé
+            if(wifiChanged){
+                jsonResp(req, "{\"ok\":true,\"restart\":true,\"reason\":\"wifi-changed\"}");
+                Serial.println("[CFG] WiFi modifié → redémarrage dans 800 ms");
+                static bool restartScheduled = false;
+                if(!restartScheduled){
+                    restartScheduled = true;
+                    xTaskCreate([](void*){
+                        vTaskDelay(pdMS_TO_TICKS(800));
+                        Serial.println("[CFG] Redémarrage pour appliquer le nouveau WiFi");
+                        ESP.restart();
+                    }, "cfgReboot", 2048, NULL, 1, NULL);
+                }
+                return;
+            }
+
+            jsonResp(req, "{\"ok\":true}");
         }
     );
 
@@ -2768,6 +2950,11 @@ void setup(){
     display.drawString(0,0,"IrrigPro v" SOFT_REV);
     display.drawString(0,14,"Démarrage...");
     display.display();
+
+    // ── Auto-réparation NVS si partition saturée/corrompue.
+    // Doit être appelé AVANT tout configLoad() pour qu'on reparte d'une
+    // base saine. Ne fait rien si la NVS est OK.
+    nvsSelfTestAndRecover();
 
     // ── Charger config NVS
     configLoad();

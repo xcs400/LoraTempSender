@@ -1350,7 +1350,11 @@ function saveConfig() {
   // avaient été pris en compte alors que ce n'était pas le cas.
   api('POST','/api/config',body).then((d)=>{
     if(d && d.ok){
-      alert('Configuration sauvegardée. Redémarrage recommandé pour appliquer MQTT.');
+      if(d.restart){
+        alert('Configuration sauvegardée.\n\nWiFi SSID/mot de passe modifiés — l\'ESP redémarre dans ~1 seconde pour appliquer les changements.');
+      } else {
+        alert('Configuration sauvegardée. Redémarrage recommandé pour appliquer MQTT.');
+      }
     } else {
       alert('Échec de la sauvegarde — vérifiez la connexion à l\'appareil et réessayez.');
     }
