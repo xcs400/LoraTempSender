@@ -406,6 +406,7 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   <button class="active" onclick="showPage('dashboard',this)">Dashboard</button>
   <button onclick="showPage('programmes',this)">Programmes</button>
   <button onclick="showPage('calendrier',this)">Calendrier</button>
+  <button onclick="showPage('calibration',this)">Calibration</button>
   <button onclick="showPage('journal',this)">Journal</button>
   <button onclick="showPage('config',this)">Configuration</button>
   <button onclick="showPage('io',this)">Entr&eacute;es/Sorties</button>
@@ -550,6 +551,90 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
         </tbody>
       </table>
     </div>
+  </div>
+</div>
+
+<!-- ══ PAGE CALIBRATION ═════════════════════════════════ -->
+<div id="page-calibration" class="page">
+  <div class="card">
+    <div class="card-header">
+      <h2>Calibration du débitmètre</h2>
+      <span id="calib-phase-badge" class="badge" style="background:var(--surface2);color:var(--text-muted);font-size:.75rem">inactif</span>
+    </div>
+
+    <div style="padding:8px 4px 16px;color:var(--text-muted);font-size:.86rem;line-height:1.5">
+      La calibration mesure le débit de chaque vanne <strong>une par une</strong>, en l'ouvrant
+      seule pendant la durée choisie. Le coefficient <code>flowCoeff</code> (en pulses/seconde)
+      est calculé automatiquement et utilisé pour répartir les pulses globaux entre vannes
+      ouvertes simultanément. <strong>Fermez toutes les vannes avant de lancer</strong> (sécurité
+      intégrée côté firmware : démarrage refusé si une vanne est ouverte).
+    </div>
+
+    <!-- Formulaire de lancement -->
+    <div class="config-section" id="calib-launch-form">
+      <h3>Lancer une calibration</h3>
+      <div class="config-row">
+        <div>
+          <label>Durée par vanne (secondes)</label>
+          <input type="number" id="calib-duration" value="60" min="5" max="600"/>
+          <div style="font-size:.75rem;color:var(--text-muted);margin-top:4px">
+            Recommandé : 30-120 s. Plus c'est long, plus la mesure est précise.
+          </div>
+        </div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
+        <button id="calib-start-btn" class="btn btn-green" onclick="startCalibration()">
+          ▶ Démarrer la calibration
+        </button>
+        <button id="calib-abort-btn" class="btn btn-red" onclick="abortCalibration()" style="display:none">
+          ■ Annuler
+        </button>
+        <span id="calib-msg" style="font-size:.85rem;color:var(--text-muted)"></span>
+      </div>
+    </div>
+
+    <!-- Progression en direct -->
+    <div class="config-section" id="calib-progress" style="display:none">
+      <h3>Progression</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div>
+          <div style="font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Vanne en cours</div>
+          <div style="font-size:1.5rem;font-weight:700" id="calib-current-valve">—</div>
+        </div>
+        <div>
+          <div style="font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Temps restant</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--blue)" id="calib-remaining">— s</div>
+        </div>
+      </div>
+      <div style="background:var(--bg);border-radius:8px;height:8px;overflow:hidden;margin-bottom:6px">
+        <div id="calib-bar" style="height:100%;background:var(--green);width:0%;transition:width 0.5s linear"></div>
+      </div>
+      <div style="font-size:.78rem;color:var(--text-muted);text-align:right">
+        Vanne <span id="calib-progress-valve">0</span> / <span id="calib-progress-total">0</span>
+      </div>
+    </div>
+
+    <!-- Résultats -->
+    <div class="config-section">
+      <h3>Coefficients actuels</h3>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">
+        Mis à jour automatiquement après une calibration. Le firmware les utilise pour
+        pondérer la répartition des pulses entre vannes ouvertes simultanément.
+      </div>
+      <table class="tbl" style="max-width:500px">
+        <thead>
+          <tr>
+            <th>Vanne</th>
+            <th style="text-align:right">flowCoeff (pulses/s)</th>
+            <th style="text-align:right">Équiv. L/min</th>
+          </tr>
+        </thead>
+        <tbody id="calib-coeff-body">
+          <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:18px">Chargement…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
   </div>
 </div>
 
@@ -954,6 +1039,7 @@ function showPage(id, btn) {
   if(btn) btn.classList.add('active');
   if(id==='programmes') renderSchedules();
   if(id==='calendrier') loadSchedules().then(()=>renderCalendar());
+  if(id==='calibration') refreshCalibration();
   if(id==='journal') loadLog();
   if(id==='config') loadConfig();
 }
@@ -962,6 +1048,105 @@ function closeModal(id) {
   document.getElementById(id).classList.remove('open');
   if(id==='sched-modal') schedModalOpen = false;
 }
+
+// ══════════════════════════════════════════════════════════
+// CALIBRATION DÉBITMÈTRE
+// ══════════════════════════════════════════════════════════
+function startCalibration(){
+  const dur = parseInt(document.getElementById('calib-duration').value) || 60;
+  const msg = document.getElementById('calib-msg');
+  msg.textContent = 'Démarrage…';
+  msg.style.color = 'var(--text-muted)';
+  api('POST','/api/calibration/start',{durationSec: dur}).then(d=>{
+    if(d && d.ok){
+      msg.textContent = '';
+      document.getElementById('calib-launch-form').style.display = 'none';
+      document.getElementById('calib-progress').style.display = 'block';
+      document.getElementById('calib-phase-badge').textContent = 'EN COURS';
+      document.getElementById('calib-phase-badge').style.background = 'var(--orange-dim)';
+      document.getElementById('calib-phase-badge').style.color = 'var(--orange)';
+      // Polling toutes les 2 s pour suivre la progression
+      if(window._calibPoll) clearInterval(window._calibPoll);
+      window._calibPoll = setInterval(refreshCalibration, 2000);
+      refreshCalibration();
+    } else {
+      msg.textContent = '✗ Échec : ' + (d && d.reason ? d.reason : 'inconnu');
+      msg.style.color = 'var(--red)';
+    }
+  }).catch(err => {
+    msg.textContent = '✗ Erreur réseau : ' + err;
+    msg.style.color = 'var(--red)';
+  });
+}
+
+function abortCalibration(){
+  if(!confirm('Annuler la calibration en cours ?')) return;
+  api('POST','/api/calibration/abort',{}).then(()=>{
+    refreshCalibration();
+  });
+}
+
+function refreshCalibration(){
+  api('GET','/api/calibration/status').then(d=>{
+    if(!d) return;
+    const phase   = d.phase || 'idle';
+    const phaseFr = {idle:'inactif', running:'EN COURS', done:'terminé', aborted:'annulé', failed:'échoué'}[phase] || phase;
+    const badge = document.getElementById('calib-phase-badge');
+    badge.textContent = phaseFr;
+    const colors = {
+      idle:     {bg:'var(--surface2)', fg:'var(--text-muted)'},
+      running:  {bg:'var(--orange-dim)',fg:'var(--orange)'},
+      done:     {bg:'var(--green-dim)', fg:'var(--green)'},
+      aborted:  {bg:'var(--red-dim)',   fg:'var(--red)'},
+      failed:   {bg:'var(--red-dim)',   fg:'var(--red)'},
+    };
+    const c = colors[phase] || colors.idle;
+    badge.style.background = c.bg;
+    badge.style.color      = c.fg;
+
+    // Affichage progression si en cours
+    const progBox = document.getElementById('calib-progress');
+    const launchBox = document.getElementById('calib-launch-form');
+    if(phase === 'running'){
+      progBox.style.display = 'block';
+      launchBox.style.display = 'none';
+      const v = (d.currentValve !== undefined ? d.currentValve : -1) + 1;
+      const total = (window.VANNE_COUNT_FALLBACK || 5);
+      document.getElementById('calib-current-valve').textContent = (v > 0 ? 'V'+v : '—');
+      const remain = d.remainingSec !== undefined ? d.remainingSec : 0;
+      document.getElementById('calib-remaining').textContent = remain + ' s';
+      document.getElementById('calib-progress-valve').textContent = v;
+      document.getElementById('calib-progress-total').textContent  = total;
+      // Barre de progression : % du cycle en cours
+      const durationSec = d.durationSec || 60;
+      const pct = Math.max(0, Math.min(100, ((durationSec - remain) / durationSec) * 100));
+      document.getElementById('calib-bar').style.width = pct.toFixed(1) + '%';
+    } else {
+      progBox.style.display = 'none';
+      launchBox.style.display = 'block';
+      if(window._calibPoll){ clearInterval(window._calibPoll); window._calibPoll = null; }
+    }
+
+    // Tableau des coefficients — on lit depuis /api/consumption si dispo,
+    // sinon on prend d. flowCoeffs s'il est dans le payload
+    const tbody = document.getElementById('calib-coeff-body');
+    if(d.flowCoeffs && Array.isArray(d.flowCoeffs)){
+      tbody.innerHTML = d.flowCoeffs.map((c,i)=>{
+        const lpm = (c > 0 && window.PULSES_PER_LITRE) ? (c * 60 / window.PULSES_PER_LITRE).toFixed(2) : '—';
+        const cdisp = c > 0 ? c.toFixed(3) : '<span style="color:var(--text-muted)">non calibré</span>';
+        return `<tr>
+          <td><strong>V${i+1}</strong></td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${cdisp}</td>
+          <td style="text-align:right;color:var(--blue);font-weight:600">${lpm}</td>
+        </tr>`;
+      }).join('');
+    }
+  });
+}
+// Constantes exposées pour refreshCalibration() — définies plus haut
+// dans le state (VALVE_COUNT_FALLBACK = 5). On garde une référence
+// directe pour éviter un ReferenceError.
+window.VALNE_COUNT_FALLBACK = 5;
 
 // ══════════════════════════════════════════════════════════
 // WEBSOCKET

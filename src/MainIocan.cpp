@@ -460,7 +460,7 @@ static unsigned long flowLastPulseSnapshot = 0;
 // le débit = (pulses_maintenant - pulses_il_y_a_N_secondes) / N_secondes.
 // Comme le calcul est continu, la valeur affichée est lissée et stable.
 #define FLOW_WINDOW_MS  5000UL    // fenêtre de calcul = 5 secondes
-#define FLOW_SAMPLES    16        // 16 échantillons × 1s = 16s d'historique
+#define FLOW_SAMPLES    32        // 16 échantillons × 1s = 16s d'historique
                                   // (suffisant pour la fenêtre 5s + marge)
 struct FlowSample { unsigned long tMs; unsigned long pulses; };
 static FlowSample flowRing[FLOW_SAMPLES];
@@ -482,43 +482,54 @@ void flowUpdate(unsigned long totalPulses){
     // (= celui dont tMs est le plus proche de nowMs - FLOW_WINDOW_MS).
     // On cherche l'échantillon le plus récent qui est plus vieux que
     // (nowMs - FLOW_WINDOW_MS) — c'est notre point de référence.
+    // Calcul du débit = MOYENNE sur tous les échantillons de la fenêtre.
+    // L'ancien code prenait un seul point de référence (le plus vieux dans
+    // la fenêtre), ce qui causait une oscillation entre 2 valeurs quand le
+    // capteur émettait 1 pulse par échantillon certaines secondes et 2
+    // d'autres secondes. En moyennant sur tous les échantillons tombant
+    // dans la fenêtre FLOW_WINDOW_MS, on lisse ces fluctuations et on
+    // obtient une valeur stable qui représente le débit RÉEL moyen.
     unsigned long cutoff = (nowMs > FLOW_WINDOW_MS) ? (nowMs - FLOW_WINDOW_MS) : 0;
-    // Cherche l'échantillon i tel que flowRing[i].tMs <= cutoff ET
-    // flowRing[(i+1)%FLOW_SAMPLES].tMs > cutoff (ou i est le plus récent).
-    // Approximation simple : on prend l'échantillon le plus vieux dont
-    // tMs <= cutoff, ou l'échantillon le plus ancien si aucun ne matche.
-    int refIdx = -1;
-    for(int k=0; k<flowCount; k++){
-        // index dans l'ordre chronologique inverse (du plus récent au plus vieux)
-        int idx = (flowHead - 1 - k + FLOW_SAMPLES) % FLOW_SAMPLES;
-        if(flowRing[idx].tMs <= cutoff){
-            refIdx = idx;
-            break;
-        }
-    }
-    // Si on n'a pas trouvé de point dans la fenêtre, on prend le plus
-    // ancien échantillon disponible (= début de mesure).
-    if(refIdx < 0){
-        refIdx = (flowHead - flowCount + FLOW_SAMPLES) % FLOW_SAMPLES;
-    }
-
-    unsigned long refMs    = flowRing[refIdx].tMs;
-    unsigned long refPulse = flowRing[refIdx].pulses;
-    // L'échantillon "courant" est celui qu'on vient d'écrire (= head-1)
+    unsigned long totalDeltaMs = 0;
+    unsigned long totalDeltaP  = 0;
+    int usedSamples = 0;
+    // Échantillon "courant" = celui qu'on vient d'écrire (head-1)
     int curIdx = (flowHead - 1 + FLOW_SAMPLES) % FLOW_SAMPLES;
-    unsigned long curMs    = flowRing[curIdx].tMs;
     unsigned long curPulse = flowRing[curIdx].pulses;
-
-    unsigned long deltaMs = curMs - refMs;
-    if(deltaMs > 0 && curPulse >= refPulse){
-        unsigned long deltaP = curPulse - refPulse;
-        float litresDelta = (float)deltaP / PULSES_PER_LITRE;
-        flowCurrentLpm = litresDelta * (60000.0f / (float)deltaMs);
+    // On parcourt l'anneau en ordre chronologique inverse (du plus récent
+    // au plus vieux) et on accumule les deltas successifs tant que l'écart
+    // temporel entre l'échantillon k et l'échantillon (k-1) reste dans la
+    // fenêtre. On s'arrête au premier échantillon qui sort de la fenêtre.
+    unsigned long prevMs = flowRing[curIdx].tMs;
+    for(int k=1; k<flowCount; k++){
+        int idx = (flowHead - 1 - k + FLOW_SAMPLES) % FLOW_SAMPLES;
+        if(flowRing[idx].tMs < cutoff) break; // sortie de fenêtre
+        unsigned long thisMs = flowRing[idx].tMs;
+        unsigned long thisPulse = flowRing[idx].pulses;
+        unsigned long dMs = prevMs - thisMs;
+        if(dMs > 0 && curPulse >= thisPulse){
+            totalDeltaMs += dMs;
+            // curPulse - thisPulse cumule tous les pulses entre thisPulse
+            // et maintenant. Pour ne pas recompter plusieurs fois le même
+            // pulse, on prend le delta entre (thisPulse de l'échantillon
+            // suivant) et thisPulse — c'est la part de pulses arrivée dans
+            // l'intervalle [thisMs, prevMs].
+            if(k+1 < flowCount){
+                int prevIdx = (flowHead - 1 - (k-1) + FLOW_SAMPLES) % FLOW_SAMPLES;
+                unsigned long prevPulse = flowRing[prevIdx].pulses;
+                if(prevPulse > thisPulse) totalDeltaP += (prevPulse - thisPulse);
+            }
+            usedSamples++;
+        }
+        prevMs = thisMs;
+    }
+    // Si on n'a qu'un seul échantillon (pas de recul), on garde la
+    // dernière valeur connue plutôt que de retourner 0.
+    if(usedSamples == 0 || totalDeltaMs == 0){
+        // flowCurrentLpm reste à sa valeur précédente
     } else {
-        // Pas assez de recul (premier boot) ou pas de pulses : on garde
-        // la dernière valeur connue plutôt que de la mettre brutalement à 0,
-        // ça évite le scintillement "0 → X → 0" dans l'UI au démarrage.
-        // (flowCurrentLpm reste à sa dernière valeur.)
+        float litresDelta = (float)totalDeltaP / PULSES_PER_LITRE;
+        flowCurrentLpm = litresDelta * (60000.0f / (float)totalDeltaMs);
     }
 }
 
