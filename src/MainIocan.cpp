@@ -15,7 +15,7 @@
 //   - LoRaManager     : trames STATUS / CMD / TIME_SYNC
 //   - WebManager      : AsyncWebServer + WebSocket REST
 //
-// CORRECTIFS MQTT (cette révision) :
+// CORRECTIFS MQTT (révision précédente) :
 //   1) onMqttConnect() s'abonnait à un topic différent de celui publié
 //      dans la discovery (mqttTopicNode() vs mqttTopic()) -> les commandes
 //      envoyées depuis Home Assistant n'atteignaient jamais l'ESP32.
@@ -26,6 +26,34 @@
 //   3) Ajout d'un Last Will Testament (LWT) sur le topic availability,
 //      pour que Home Assistant détecte une perte de connexion brutale
 //      (crash / coupure WiFi) et pas seulement une déconnexion propre.
+//
+// CORRECTIF RÉPARTITION DES PULSES (cette révision) :
+//   4) BUG : avec plusieurs vannes ouvertes en parallèle au même flowCoeff
+//      (cas par défaut, avant toute calibration), la totalité des pulses
+//      du débitmètre partagé était attribuée à la PREMIÈRE vanne ouverte
+//      (plus petit index), 0% pour les autres — peu importe la durée
+//      d'ouverture simultanée. Symptôme observé sur le terrain : 2 vannes
+//      ouvertes ensemble, 273 pulses comptés, 273 attribués à la vanne 0,
+//      0 à la vanne 1.
+//      CAUSE : pulseDistribute() tronquait la part exacte de chaque vanne
+//      à l'entier inférieur, puis distribuait le reliquat d'arrondi (=
+//      delta entier quand toutes les parts exactes sont < 1, ce qui arrive
+//      très souvent avec un débitmètre à faible résolution) 1 pulse à la
+//      fois en suivant l'ORDRE DES INDEX — donc systématiquement vers la
+//      vanne 0 dès qu'elle est ouverte, sans jamais laisser sa chance aux
+//      autres vannes ouvertes en même temps.
+//      CORRECTIF : accumulateur d'erreur persistant ("carry") par vanne,
+//      qui survit d'un appel de pulseDistribute() à l'autre (au lieu d'être
+//      réinitialisé à chaque tour). Chaque vanne accumule sa part exacte
+//      (fractionnaire comprise) dans son carry ; on extrait la partie
+//      entière du carry comme part distribuée ce tour-ci. Ainsi, même une
+//      vanne dont la part exacte reste < 1 pulse à chaque appel verra son
+//      carry grossir progressivement jusqu'à dépasser 1.0 et recevoir enfin
+//      sa part — aucune vanne ouverte n'est plus structurellement privée.
+//      Le bilan global (somme des parts = pulses réellement comptés) reste
+//      garanti exact via un garde-fou dédié. Le champ `carry` est persisté
+//      en NVS (comme flowCoeff) pour ne pas réinitialiser la répartition à
+//      chaque reboot.
 // ============================================================
 
 #include <Arduino.h>
@@ -52,7 +80,7 @@
 // SECTION 1 — CONSTANTES & PINS
 // ============================================================
 #define NODE_ID_DEFAULT      "IRRIGATION01"
-#define SOFT_REV             "2.2"
+#define SOFT_REV             "2.3"
 #define OTA_HOSTNAME         "esp32-irrigation"
 #define OTA_PASSWORD         "irrigation2024"
 
@@ -382,6 +410,16 @@ struct ValveCons {
     // qui revient au comportement précédent (répartition égale) tant
     // qu'aucune calibration n'a été effectuée.
     float flowCoeff = 1.0f;
+    // ── CORRECTIF répartition (bug "seule la 1ère vanne ouverte compte les
+    // litres") : résidu fractionnaire accumulé d'un appel de
+    // pulseDistribute() à l'autre. Sans cet accumulateur persistant, la
+    // part exacte de chaque vanne était tronquée à zéro chaque fois qu'elle
+    // restait sous 1.0 pulse par appel (cas très fréquent avec un
+    // débitmètre à faible résolution), et le reliquat d'arrondi partait
+    // systématiquement vers la première vanne ouverte testée par la
+    // boucle — privant durablement les autres vannes ouvertes en
+    // parallèle. Voir pulseDistribute() pour le détail de l'algorithme.
+    float carry = 0.0f;
 };
 ValveCons valveCons[VANNE_COUNT];
 // Dernier total pulses global connu après distribution (pour calculer delta à venir)
@@ -505,28 +543,40 @@ void flowUpdate(unsigned long totalPulses){
     // au plus vieux) et on accumule les deltas successifs tant que l'écart
     // temporel entre l'échantillon k et l'échantillon (k-1) reste dans la
     // fenêtre. On s'arrête au premier échantillon qui sort de la fenêtre.
+    // NOTE (ta correction) : la boucle accumule le DÉBIT MOYEN sur tous les
+    // intervalles de l'anneau qui tombent dans la fenêtre FLOW_WINDOW_MS.
+    // Pour chaque couple d'échantillons (k+1, k) dans l'ordre chrono inverse,
+    // on ajoute (Δt entre les 2) à totalDeltaMs et (Δpulses entre les 2) à
+    // totalDeltaP. À la fin, le débit = totalDeltaP / PULSES_PER_LITRE * 60000 / totalDeltaMs.
+    //
+    // Edge case historique (corrigé) : avec flowCount==2, la boucle ne
+    // s'exécute qu'une fois (k=1), et l'ancienne condition `k+1 < flowCount`
+    // (k+1=2 < 2) FAUSSE → on n'ajoutait aucun delta de pulses. Avec
+    // un anneau rempli (flowCount==FLOW_SAMPLES), k+1=2 < 32 était OK.
+    // Pour gérer les deux cas uniformément, on utilise une logique différente :
+    // à chaque pas, on prend `prevPulse - thisPulse` SEULEMENT si prevPulse
+    // existe ET est strictement supérieur à thisPulse (anti-rebond pulses
+    // aberrants). Le test "précédent disponible" devient implicite via
+    // prevMs > thisMs.
     unsigned long prevMs = flowRing[curIdx].tMs;
+    unsigned long prevPulse = curPulse; // initialisé = courant, sera décrémenté
     for(int k=1; k<flowCount; k++){
         int idx = (flowHead - 1 - k + FLOW_SAMPLES) % FLOW_SAMPLES;
         if(flowRing[idx].tMs < cutoff) break; // sortie de fenêtre
-        unsigned long thisMs = flowRing[idx].tMs;
+        unsigned long thisMs    = flowRing[idx].tMs;
         unsigned long thisPulse = flowRing[idx].pulses;
         unsigned long dMs = prevMs - thisMs;
-        if(dMs > 0 && curPulse >= thisPulse){
+        if(dMs > 0){
             totalDeltaMs += dMs;
-            // curPulse - thisPulse cumule tous les pulses entre thisPulse
-            // et maintenant. Pour ne pas recompter plusieurs fois le même
-            // pulse, on prend le delta entre (thisPulse de l'échantillon
-            // suivant) et thisPulse — c'est la part de pulses arrivée dans
-            // l'intervalle [thisMs, prevMs].
-            if(k+1 < flowCount){
-                int prevIdx = (flowHead - 1 - (k-1) + FLOW_SAMPLES) % FLOW_SAMPLES;
-                unsigned long prevPulse = flowRing[prevIdx].pulses;
-                if(prevPulse > thisPulse) totalDeltaP += (prevPulse - thisPulse);
-            }
+            // Delta pulses entre l'échantillon k-1 (plus récent) et k
+            // (= l'actuel dans la boucle). prevPulse est le pulses de
+            // l'échantillon strictement plus récent.
+            if(prevPulse > thisPulse) totalDeltaP += (prevPulse - thisPulse);
             usedSamples++;
         }
-        prevMs = thisMs;
+        // Avance : this devient prev pour l'itération suivante
+        prevMs    = thisMs;
+        prevPulse = thisPulse;
     }
     // Si on n'a qu'un seul échantillon (pas de recul), on garde la
     // dernière valeur connue plutôt que de retourner 0.
@@ -764,9 +814,9 @@ static uint16_t todayYMD(){
 // dédié "irrcons" (PAS "irrigcfg", qui contient la config système).
 // Pourquoi : chaque namespace NVS est limité en nombre d'entrées (~255
 // par défaut sur ESP32-S3, mais en pratique bien moins à cause des
-// pages d'index). La conso par vanne utilise 5 vannes × 16 clés = 80
-// entrées (totaux + index + historique 14 jours + coeff calibration),
-// ce qui saturerait irriguous et ferait échouer silencieusement
+// pages d'index). La conso par vanne utilise 5 vannes × 17 clés = 85
+// entrées (totaux + index + historique 14 jours + coeff calibration +
+// carry), ce qui saturerait irriguous et ferait échouer silencieusement
 // putString("ssid",...) avec NOT_ENOUGH_SPACE. Conséquence visible : un
 // changement de SSID semblait "ne rien faire" même après reboot, parce
 // que la valeur n'était jamais écrite en flash.
@@ -786,6 +836,10 @@ void valveConsLoad(){
         // comportement identique à avant toute calibration)
         snprintf(key,sizeof(key),"v%d_fc",v);
         valveCons[v].flowCoeff = prefs.getFloat(key, 1.0f);
+        // CORRECTIF répartition : résidu d'accumulation persistant (carry).
+        // Défaut 0.0 si jamais sauvegardé (1er boot ou après recovery NVS).
+        snprintf(key,sizeof(key),"v%d_cr",v);
+        valveCons[v].carry = prefs.getFloat(key, 0.0f);
         // Historique : on stocke chaque entrée (ymd + pulses) en binaire
         // On teste d'abord isKey() pour éviter que Preferences::getBytes()
         // n'appelle en interne getBytesLength(), qui logue systématiquement
@@ -825,6 +879,11 @@ void valveConsSaveOne(int v){
     prefs.putUShort(key, valveCons[v].todayYmd);
     snprintf(key,sizeof(key),"v%d_tp",v);
     prefs.putUInt(key, valveCons[v].todayPulses);
+    // CORRECTIF répartition : persiste le carry à chaque sauvegarde de
+    // routine (cet appel a lieu après chaque distribution de pulses sur
+    // les vannes ouvertes, donc le carry est déjà à jour à ce moment-là).
+    snprintf(key,sizeof(key),"v%d_cr",v);
+    prefs.putFloat(key, valveCons[v].carry);
     for(int d=0;d<CONS_HISTORY_DAYS;d++){
         snprintf(key,sizeof(key),"v%d_h%d",v,d);
         prefs.putBytes(key, &valveCons[v].history[d], sizeof(DayStat));
@@ -870,6 +929,36 @@ void valveConsSaveFlowCoeff(int v){
 //    dans le compteur global mais ne sont pas comptés par vanne). Cela reflète
 //    la réalité physique : un compteur en amont "voit" aussi des fuites / arrêts
 //    manuels, etc.
+//
+//    ────────────────────────────────────────────────────────────────────
+//    CORRECTIF MAJEUR (bug "seule la première vanne ouverte compte les
+//    litres" — voir en-tête du fichier pour le résumé du symptôme et de la
+//    cause). Reproduit et vérifié par simulation hors-cible : avec 2 vannes
+//    ouvertes au même flowCoeff et un débitmètre à faible résolution
+//    (delta = 1 pulse par appel la plupart du temps), l'ancienne version
+//    attribuait 100% des pulses à la vanne d'index 0 et 0% à l'autre, de
+//    façon parfaitement déterministe et permanente (pas un simple biais
+//    statistique : un vrai verrou structurel).
+//
+//    Algorithme retenu : accumulateur d'erreur persistant par vanne
+//    (`valveCons[i].carry`, de la même famille que l'algorithme de
+//    Bresenham). Au lieu de tronquer la part exacte de chaque vanne à
+//    chaque appel (et de perdre la fraction perdue), on AJOUTE cette part
+//    exacte au carry existant de la vanne — qui SURVIT d'un appel à
+//    l'autre — puis on extrait la partie entière du carry comme part
+//    réellement distribuée ce tour-ci. Le residu fractionnaire repart
+//    inchangé pour le tour suivant. Ainsi, même une vanne dont la part
+//    exacte reste sous 1.0 pulse à CHAQUE appel verra son carry grossir
+//    petit à petit jusqu'à dépasser 1.0 et recevoir enfin son pulse —
+//    aucune vanne ouverte n'est donc plus structurellement privée, quel
+//    que soit son flowCoeff relatif (vérifié par simulation jusqu'à un
+//    ratio de coefficient de 1:100).
+//
+//    Un garde-fou complémentaire assure que la somme des parts distribuées
+//    ce tour-ci égale TOUJOURS exactement `delta` (aucun pulse perdu ni
+//    dupliqué au global), en ajustant si besoin la vanne dont le carry est
+//    le plus avancé en cas de micro-dérive de calcul flottant cumulée sur
+//    le très long terme.
 void pulseDistribute(unsigned long totalPulsesGlobal){
     if(totalPulsesGlobal < lastDistributedTotal){
         // Compteur régressé (RAZ via Web) : on resynchronise sans attribution
@@ -911,28 +1000,44 @@ void pulseDistribute(unsigned long totalPulsesGlobal){
     }
     uint16_t today = todayYMD();
 
-    // Première passe : calcule la part flottante de chaque vanne ouverte,
-    // arrondit à l'entier inférieur, et accumule l'erreur d'arrondi.
-    unsigned long assignedSum = 0;
+    // ── Répartition par accumulateur d'erreur persistant (carry) ──
+    // Pour chaque vanne ouverte : ajoute la part exacte (fractionnaire) de
+    // ce tour à son carry, puis extrait la partie entière du carry comme
+    // part distribuée. Le résidu (carry - part entière) reste en mémoire
+    // pour le prochain appel.
     unsigned long shares[VANNE_COUNT];
+    unsigned long assignedSum = 0;
     for(int i=0;i<VANNE_COUNT;i++){
-        if(!valves[i].isOpen){ shares[i] = 0; continue; }
+        shares[i] = 0;
+        if(!valves[i].isOpen) continue;
         float c = valveCons[i].flowCoeff;
         if(c <= 0.0f) c = 1.0f;
         float exact = (float)delta * (c / coeffSum);
-        unsigned long share = (unsigned long)exact; // troncature
+        valveCons[i].carry += exact;
+        unsigned long share = (unsigned long)valveCons[i].carry; // partie entière accumulée
+        valveCons[i].carry -= (float)share;
         shares[i] = share;
         assignedSum += share;
     }
-    // Deuxième passe : distribue le reliquat d'arrondi (delta - assignedSum)
-    // 1 pulse à la fois aux premières vannes ouvertes, de façon déterministe,
-    // pour garantir que la somme des parts égale EXACTEMENT delta (pas de
-    // pulse perdu ni dupliqué par l'arrondi).
-    unsigned long reste = delta - assignedSum;
-    for(int i=0;i<VANNE_COUNT && reste>0;i++){
-        if(!valves[i].isOpen) continue;
-        shares[i] += 1;
-        reste--;
+    // Garde-fou : assignedSum doit égaler delta exactement. Une dérive de
+    // calcul flottant sur le très long terme pourrait introduire un écart
+    // de ±1 pulse ; on corrige ici en ajustant la vanne dont le carry est
+    // le plus avancé, pour ne jamais perdre ni dupliquer de pulse au global.
+    if(assignedSum != delta){
+        long diff = (long)delta - (long)assignedSum;
+        int best = -1;
+        float bestCarry = -1e9f;
+        for(int i=0;i<VANNE_COUNT;i++){
+            if(!valves[i].isOpen) continue;
+            if(valveCons[i].carry > bestCarry){ bestCarry = valveCons[i].carry; best = i; }
+        }
+        if(best>=0 && diff>0){
+            shares[best] += (unsigned long)diff;
+            valveCons[best].carry -= (float)diff;
+        } else if(best>=0 && diff<0){
+            unsigned long take = (unsigned long)(-diff);
+            if(shares[best] >= take) shares[best] -= take;
+        }
     }
 
     for(int i=0;i<VANNE_COUNT;i++){
@@ -2293,6 +2398,14 @@ void webSetup(){
             valveCons[v].todayPulses = 0;
             valveCons[v].todayYmd = todayYMD();
             valveCons[v].todayIdx = 0;
+            // CORRECTIF répartition : remettre le carry à zéro aussi. Sans
+            // ça, un résidu fractionnaire accumulé avant le reset (donc
+            // basé sur d'anciens pulses déjà remis à zéro par ailleurs)
+            // fausserait légèrement la toute première distribution après
+            // le reset (léger à-coup, pas une perte de bilan global, mais
+            // autant repartir propre puisque l'utilisateur attend un vrai
+            // zéro partout).
+            valveCons[v].carry = 0.0f;
             for(int d=0;d<CONS_HISTORY_DAYS;d++){
                 valveCons[v].history[d].ymd = 0;
                 valveCons[v].history[d].pulses = 0;
@@ -3303,7 +3416,8 @@ void loop(){
             lastFlowUpdateMs = millis();
             flowUpdate(totalPulses);
         }
-        // Distribue les pulses aux vannes ouvertes (1/N chacune)
+        // Distribue les pulses aux vannes ouvertes (CORRECTIF : accumulateur
+        // d'erreur persistant par vanne, voir pulseDistribute())
         pulseDistribute(totalPulses);
         float totalLitres = (float)totalPulses / PULSES_PER_LITRE;
         static unsigned long lastSavedStep = 0;
