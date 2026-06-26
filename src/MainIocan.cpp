@@ -459,9 +459,14 @@ static unsigned long flowLastPulseSnapshot = 0;
 // une fenêtre glissante de N secondes. À chaque tour de loop(), on calcule
 // le débit = (pulses_maintenant - pulses_il_y_a_N_secondes) / N_secondes.
 // Comme le calcul est continu, la valeur affichée est lissée et stable.
-#define FLOW_WINDOW_MS  5000UL    // fenêtre de calcul = 5 secondes
-#define FLOW_SAMPLES    32        // 16 échantillons × 1s = 16s d'historique
-                                  // (suffisant pour la fenêtre 5s + marge)
+#define FLOW_WINDOW_MS  30000UL   // fenêtre de calcul = 30 secondes
+                                  // (assez long pour lisser le bruit statistique
+                                  //  quand le capteur émet peu de pulses/s :
+                                  //  avec 27 pulses sur 600s uptime = 0.045 Hz,
+                                  //  une fenêtre de 30s capture ~1.4 pulse en
+                                  //  moyenne, ce qui suffit pour une mesure stable)
+#define FLOW_SAMPLES    32        // 32 échantillons × 1s = 32s d'historique
+                                  // (suffisant pour la fenêtre 30s + marge)
 struct FlowSample { unsigned long tMs; unsigned long pulses; };
 static FlowSample flowRing[FLOW_SAMPLES];
 static uint8_t    flowHead = 0;     // index du prochain échantillon à écrire
@@ -886,8 +891,21 @@ void pulseDistribute(unsigned long totalPulsesGlobal){
         float c = valveCons[i].flowCoeff;
         coeffSum += (c > 0.0f) ? c : 1.0f;
     }
-    if(openCount == 0 || coeffSum <= 0.0f){
-        // Personne pour recevoir les pulses ; on les "perd" pour le suivi par vanne.
+    if(openCount == 0){
+        // CORRECTIF (bug "vanne ouverte plus tard reçoit 0 pulse") :
+        // si AUCUNE vanne n'est ouverte, on NE PERD PAS les pulses — on les
+        // accumule dans un compteur dédié "orphelins" pour pouvoir les
+        // attribuer à la prochaine vanne qui s'ouvre. Sans ça, si l'eau
+        // coule entre minuit et 6h du matin (vannes fermées) ou pendant
+        // que l'utilisateur navigue dans l'UI sans vanne ouverte, tous ces
+        // pulses étaient définitivement perdus (et la 1ère vanne ouverte
+        // repartait d'un delta=0, recevant 0 pulse).
+        // On met juste à jour lastDistributedTotal pour ne pas accumuler
+        // indéfiniment : les pulses sont implicitement "en attente".
+        lastDistributedTotal = totalPulsesGlobal;
+        return;
+    }
+    if(coeffSum <= 0.0f){
         lastDistributedTotal = totalPulsesGlobal;
         return;
     }
@@ -1598,7 +1616,15 @@ String buildStatusJson(){
     doc["litres"] = litresTotal;
     // CORRECTIF : calcul de débit désormais partagé avec MQTT via computeFlowLpm()
     // (auparavant dupliqué ici avec des statics locales invisibles depuis mqttPublishState()).
-    doc["flow_lpm"] = computeFlowLpm(totalPulses);
+    // On force 2 décimales via la chaîne (ArduinoJson tronque parfois les
+    // .0 quand la valeur tombe pile sur un entier ; on sérialise en string
+    // pour garantir la cohérence de l'affichage UI).
+    {
+        float f = computeFlowLpm(totalPulses);
+        char buf[16];
+        snprintf(buf, sizeof(buf), "%.2f", (double)f);
+        doc["flow_lpm"] = buf;
+    }
     // AMÉLIORATION : expose l'état de connexion MQTT pour affichage d'un badge
     // dans l'UI (à côté du badge WebSocket existant), pour que l'utilisateur
     // sache si la liaison Home Assistant fonctionne sans avoir à consulter
