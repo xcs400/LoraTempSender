@@ -96,20 +96,20 @@ static const int FORCE_INPUT_PINS[INPUTCOUNT] = { 47 ,  //PB0
                                                 20      //PB6
                                                 ,26 };  //PB7
 
-                                                // === Compteur d'impulsions (flow meter) connecté sur FORCE_INPUT_PINS[7]
-                                                // ISR matériel avec anti-rebond basique (microsecondes)
-                                                volatile unsigned long pulseCount = 0;
-                                                volatile unsigned long lastPulseUs = 0;
-                                                #define PULSE_DEBOUNCE_US 2000UL  // 2ms debounce
-                                                #define PULSES_PER_LITRE 450.0f   // constante par défaut (ajuster selon capteur)
+// === Compteur d'impulsions (flow meter) connecté sur FORCE_INPUT_PINS[7]
+// ISR matériel avec anti-rebond basique (microsecondes)
+volatile unsigned long pulseCount = 0;
+volatile unsigned long lastPulseUs = 0;
+#define PULSE_DEBOUNCE_US 2000UL  // 2ms debounce
+#define PULSES_PER_LITRE 4.0f   // constante par défaut (ajuster selon capteur)
 
-                                                // ISR dédiée (doit être IRAM pour ESP32)
-                                                void IRAM_ATTR pulse_isr(){
-                                                    unsigned long nowUs = micros();
-                                                    if(nowUs - lastPulseUs < PULSE_DEBOUNCE_US) return;
-                                                    lastPulseUs = nowUs;
-                                                    pulseCount++;
-                                                }
+// ISR dédiée (doit être IRAM pour ESP32)
+void IRAM_ATTR pulse_isr(){
+    unsigned long nowUs = micros();
+    if(nowUs - lastPulseUs < PULSE_DEBOUNCE_US) return;
+    lastPulseUs = nowUs;
+    pulseCount++;
+}
 
 
 /******************************************************************************
@@ -447,26 +447,85 @@ unsigned long pendingRestartMs = 0;     // timestamp de la demande
 // représentative du débit moyen récent, juste avec un pas de temps non
 // strictement régulier si WS et MQTT s'entrelacent.
 static unsigned long flowLastPulseSnapshot = 0;
-static unsigned long flowLastMs = 0;
+// Débit instantané : calcul en continu dans loop(), pas à la demande.
+//
+// L'ancien code calculait flow_lpm à chaque appel MQTT/WS en faisant
+// (pulses_now - pulses_precedent) / temps_écoulé. Comme MQTT publie
+// toutes les 10s et WS toutes les 1s mais de façon asynchrone, le delta
+// entre deux appels était très irrégulier → l'UI voyait alterner 0 et
+// une valeur élevée (typiquement "0 → gros débit → 0 → gros débit").
+//
+// Nouveau calcul : on garde en RAM un anneau de (timestamp, pulses) sur
+// une fenêtre glissante de N secondes. À chaque tour de loop(), on calcule
+// le débit = (pulses_maintenant - pulses_il_y_a_N_secondes) / N_secondes.
+// Comme le calcul est continu, la valeur affichée est lissée et stable.
+#define FLOW_WINDOW_MS  5000UL    // fenêtre de calcul = 5 secondes
+#define FLOW_SAMPLES    16        // 16 échantillons × 1s = 16s d'historique
+                                  // (suffisant pour la fenêtre 5s + marge)
+struct FlowSample { unsigned long tMs; unsigned long pulses; };
+static FlowSample flowRing[FLOW_SAMPLES];
+static uint8_t    flowHead = 0;     // index du prochain échantillon à écrire
+static uint8_t    flowCount = 0;    // nombre d'échantillons valides (max FLOW_SAMPLES)
+static float      flowCurrentLpm = 0.0f;  // dernière valeur calculée, publiée telle quelle
 
-float computeFlowLpm(unsigned long totalPulses){
+// À appeler à chaque tour de loop() avec le totalPulses courant.
+// Met à jour l'anneau et recalcule flowCurrentLpm sur la fenêtre FLOW_WINDOW_MS.
+void flowUpdate(unsigned long totalPulses){
     unsigned long nowMs = millis();
-    if(flowLastMs == 0){
-        // Premier appel : pas encore de fenêtre de mesure -> 0, on amorce juste le snapshot
-        flowLastPulseSnapshot = totalPulses;
-        flowLastMs = nowMs;
-        return 0.0f;
+    // Pousse le nouvel échantillon dans l'anneau
+    flowRing[flowHead].tMs    = nowMs;
+    flowRing[flowHead].pulses = totalPulses;
+    flowHead = (flowHead + 1) % FLOW_SAMPLES;
+    if(flowCount < FLOW_SAMPLES) flowCount++;
+
+    // Trouve l'échantillon le plus ancien ENCORE DANS LA FENÊTRE
+    // (= celui dont tMs est le plus proche de nowMs - FLOW_WINDOW_MS).
+    // On cherche l'échantillon le plus récent qui est plus vieux que
+    // (nowMs - FLOW_WINDOW_MS) — c'est notre point de référence.
+    unsigned long cutoff = (nowMs > FLOW_WINDOW_MS) ? (nowMs - FLOW_WINDOW_MS) : 0;
+    // Cherche l'échantillon i tel que flowRing[i].tMs <= cutoff ET
+    // flowRing[(i+1)%FLOW_SAMPLES].tMs > cutoff (ou i est le plus récent).
+    // Approximation simple : on prend l'échantillon le plus vieux dont
+    // tMs <= cutoff, ou l'échantillon le plus ancien si aucun ne matche.
+    int refIdx = -1;
+    for(int k=0; k<flowCount; k++){
+        // index dans l'ordre chronologique inverse (du plus récent au plus vieux)
+        int idx = (flowHead - 1 - k + FLOW_SAMPLES) % FLOW_SAMPLES;
+        if(flowRing[idx].tMs <= cutoff){
+            refIdx = idx;
+            break;
+        }
     }
-    unsigned long deltaMs = nowMs - flowLastMs;
-    float flowLpm = 0.0f;
-    if(deltaMs > 0 && totalPulses >= flowLastPulseSnapshot){
-        unsigned long deltaP = totalPulses - flowLastPulseSnapshot;
+    // Si on n'a pas trouvé de point dans la fenêtre, on prend le plus
+    // ancien échantillon disponible (= début de mesure).
+    if(refIdx < 0){
+        refIdx = (flowHead - flowCount + FLOW_SAMPLES) % FLOW_SAMPLES;
+    }
+
+    unsigned long refMs    = flowRing[refIdx].tMs;
+    unsigned long refPulse = flowRing[refIdx].pulses;
+    // L'échantillon "courant" est celui qu'on vient d'écrire (= head-1)
+    int curIdx = (flowHead - 1 + FLOW_SAMPLES) % FLOW_SAMPLES;
+    unsigned long curMs    = flowRing[curIdx].tMs;
+    unsigned long curPulse = flowRing[curIdx].pulses;
+
+    unsigned long deltaMs = curMs - refMs;
+    if(deltaMs > 0 && curPulse >= refPulse){
+        unsigned long deltaP = curPulse - refPulse;
         float litresDelta = (float)deltaP / PULSES_PER_LITRE;
-        flowLpm = litresDelta * (60000.0f / (float)deltaMs);
+        flowCurrentLpm = litresDelta * (60000.0f / (float)deltaMs);
+    } else {
+        // Pas assez de recul (premier boot) ou pas de pulses : on garde
+        // la dernière valeur connue plutôt que de la mettre brutalement à 0,
+        // ça évite le scintillement "0 → X → 0" dans l'UI au démarrage.
+        // (flowCurrentLpm reste à sa dernière valeur.)
     }
-    flowLastPulseSnapshot = totalPulses;
-    flowLastMs = nowMs;
-    return flowLpm;
+}
+
+// Accesseur pour MQTT/WS : renvoie la valeur lissée courante.
+// Conservé sous le même nom pour ne pas casser les call sites existants.
+float computeFlowLpm(unsigned long /*totalPulsesIgnored*/){
+    return flowCurrentLpm;
 }
 
 // ============================================================
@@ -3194,6 +3253,19 @@ void loop(){
         unsigned long cnt;
         noInterrupts(); cnt = pulseCount; interrupts();
         unsigned long totalPulses = persistedPulseCount + cnt;
+        // ── Débit instantané lissé : sous-échantillonnage à ~1 Hz pour que
+        // l'anneau glissant couvre bien la fenêtre FLOW_WINDOW_MS (5s).
+        // Si on appelait flowUpdate() à chaque tour de loop (~10ms), l'anneau
+        // de 16 échantillons ne couvrirait que ~160ms et la référence "il y
+        // a 5s" tomberait toujours sur le plus vieil échantillon disponible,
+        // soit ~160ms en arrière → fenêtre trop petite → débit très instable
+        // ou figé à 0. Un échantillon par seconde × fenêtre 5s = 5 points
+        // disponibles dans la fenêtre : stable et lissé.
+        static unsigned long lastFlowUpdateMs = 0;
+        if(millis() - lastFlowUpdateMs >= 1000){
+            lastFlowUpdateMs = millis();
+            flowUpdate(totalPulses);
+        }
         // Distribue les pulses aux vannes ouvertes (1/N chacune)
         pulseDistribute(totalPulses);
         float totalLitres = (float)totalPulses / PULSES_PER_LITRE;

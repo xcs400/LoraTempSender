@@ -289,6 +289,95 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 @keyframes spin{to{transform:rotate(360deg)}}
 /* Programmes table: inactive row styling */
 .sched-row.inactive td{opacity:.6;color:var(--text-muted)}
+
+/* ── BOÎTE STATUS SYSTÈME ────────────────────────────────────
+   Regroupe les métriques globales (uptime, T°, conso, santé)
+   dans une zone visuellement distincte des cartes de vannes :
+   fond plus contrasté, cartes internes alignées en grille,
+   couleurs sémantiques par métrique. */
+.status-box{
+  background:linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%);
+  border:1px solid var(--border);
+  border-radius:var(--radius);
+  padding:16px 18px 12px;
+  margin-bottom:20px;
+  box-shadow:0 1px 3px rgba(0,0,0,.25);
+}
+.status-header{
+  display:flex;align-items:center;gap:10px;
+  padding-bottom:12px;margin-bottom:14px;
+  border-bottom:1px solid var(--border);
+}
+.status-header h3{
+  font-size:.95rem;font-weight:600;color:var(--text);
+  margin:0;flex:1;letter-spacing:.3px;
+}
+.status-time{
+  font-size:.78rem;color:var(--text-muted);
+  font-variant-numeric:tabular-nums;
+}
+.status-grid{
+  display:grid;
+  grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));
+  gap:10px;
+  margin-bottom:14px;
+}
+.status-card{
+  display:flex;align-items:center;gap:10px;
+  background:var(--bg);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:10px 12px;
+  min-height:62px;
+}
+.status-card-icon{
+  width:36px;height:36px;border-radius:8px;
+  display:flex;align-items:center;justify-content:center;
+  flex-shrink:0;
+}
+.status-card-body{flex:1;min-width:0;}
+.status-card-label{
+  font-size:.68rem;color:var(--text-muted);
+  text-transform:uppercase;letter-spacing:.5px;
+  margin-bottom:2px;
+}
+.status-card-value{
+  font-size:1rem;font-weight:600;color:var(--text);
+  font-variant-numeric:tabular-nums;
+  line-height:1.2;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
+.status-card-sub{
+  font-size:.72rem;color:var(--text-muted);
+  margin-top:2px;
+  font-variant-numeric:tabular-nums;
+}
+.status-conso{
+  background:var(--bg);
+  border:1px solid var(--border);
+  border-radius:8px;
+  padding:8px 10px;
+}
+.status-conso-header{
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:.8rem;font-weight:600;color:var(--text);
+  padding:4px 4px 8px;
+  border-bottom:1px solid var(--border);
+  margin-bottom:6px;
+}
+.status-conso-tbl{
+  font-size:.78rem;
+}
+.status-conso-tbl th{
+  font-weight:500;color:var(--text-muted);
+  font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;
+  padding:6px 4px;
+}
+.status-conso-tbl td{
+  padding:6px 4px;
+  border-top:1px solid var(--border);
+  font-variant-numeric:tabular-nums;
+}
 </style>
 </head>
 <body>
@@ -329,14 +418,114 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
     <div>
       <div style="font-size:1.1rem;font-weight:700">Tableau de bord</div>
-      <div style="font-size:.8rem;color:var(--text-muted)" id="uptime-label">—</div>
-      <div style="font-size:.85rem;margin-top:4px;color:var(--text-muted)" id="temps-label">T1: -- °C | TRem: -- °C</div>
-      <div style="font-size:.85rem;margin-top:6px;color:var(--text-muted)" id="flow-label">Litres: -- L | Débit: -- L/min</div>
     </div>
     <div style="display:flex;gap:8px">
       <button class="btn btn-ghost btn-sm" onclick="closeAll()">Tout fermer</button>
     </div>
   </div>
+
+  <!-- ══ BOÎTE STATUS SYSTÈME ══════════════════════════════
+       Distinction visuelle forte vs les cartes de vanne :
+         • fond bleu-dim/var(--surface) au lieu de la grille blanche
+         • cartes internes (uptime, T°, conso) avec icônes inline
+         • tableau conso compact en bas
+       Mise à jour automatique via handleStatus() / refreshConsumption(). -->
+  <div class="status-box">
+    <div class="status-header">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
+      <h3>État du système</h3>
+      <span class="status-time" id="status-time">—</span>
+    </div>
+
+    <div class="status-grid">
+      <!-- Carte uptime -->
+      <div class="status-card">
+        <div class="status-card-icon" style="background:var(--blue-dim)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+          </svg>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-label">Uptime</div>
+          <div class="status-card-value" id="uptime-label">—</div>
+        </div>
+      </div>
+
+      <!-- Carte températures -->
+      <div class="status-card">
+        <div class="status-card-icon" style="background:var(--orange-dim)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4 4 0 1 0 5 0z"/>
+          </svg>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-label">Températures</div>
+          <div class="status-card-value" id="temps-label">T1: -- °C</div>
+          <div class="status-card-sub" id="tempsR-label">TRem: -- °C</div>
+        </div>
+      </div>
+
+      <!-- Carte conso globale -->
+      <div class="status-card">
+        <div class="status-card-icon" style="background:var(--green-dim)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+          </svg>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-label">Volume total</div>
+          <div class="status-card-value" id="litres-label">— L</div>
+          <div class="status-card-sub">
+            <span id="pulse-label">—</span> pulses ·
+            <span style="color:var(--blue);font-weight:600" id="flow-label">— L/min</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Carte mémoire / santé -->
+      <div class="status-card">
+        <div class="status-card-icon" style="background:var(--surface2)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="4" width="16" height="16" rx="2"/>
+            <rect x="9" y="9" width="6" height="6"/>
+            <line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/>
+            <line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>
+            <line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/>
+            <line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>
+          </svg>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-label">Santé ESP</div>
+          <div class="status-card-value" id="heap-label">— KB</div>
+          <div class="status-card-sub" id="wifi-label">WiFi —</div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Tableau compact conso par vanne -->
+    <div class="status-conso">
+      <div class="status-conso-header">
+        <span>💧 Consommation par vanne</span>
+        <button class="btn btn-ghost btn-sm" onclick="refreshConsumption()" title="Actualiser">↻</button>
+      </div>
+      <table class="tbl status-conso-tbl">
+        <thead>
+          <tr>
+            <th>Vanne</th>
+            <th>Nom</th>
+            <th style="text-align:right">Aujourd'hui</th>
+            <th style="text-align:right">Total</th>
+          </tr>
+        </thead>
+        <tbody id="status-cons-body">
+          <tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+
   <div class="valve-grid" id="valve-grid">
     <!-- cartes générées par JS -->
   </div>
@@ -807,20 +996,44 @@ function handleStatus(data) {
     const d = new Date(data.time * 1000);
     timeStr = d.toLocaleString('fr-FR',{hour: '2-digit', minute: '2-digit', second: '2-digit'});
   }
-  document.getElementById('uptime-label').textContent =
-    'Uptime: ' + fmtSec(data.uptime || 0) + '  |  Heure: ' + timeStr;
-  
+  // Bandeau "État du système" — nouvelle UI (cards au lieu d'un texte brut)
+  const upEl  = document.getElementById('uptime-label');
+  const timeEl = document.getElementById('status-time');
+  if (upEl)  upEl.textContent  = fmtSec(data.uptime || 0);
+  if (timeEl) timeEl.textContent = timeStr;
+
   if (document.getElementById('temps-label')) {
-    // CORRECTIF (bug 1) : data.tempR est maintenant bien envoyé par le
-    // firmware (buildStatusJson() inclut désormais doc["tempR"]).
     document.getElementById('temps-label').textContent =
-      `T1: ${data.temp1 !== undefined ? data.temp1 : '--'} °C | ` +
-      `TRem: ${data.tempR !== undefined ? data.tempR : '--'} °C`;
+      `T1: ${data.temp1 !== undefined ? Number(data.temp1).toFixed(2) : '--'} °C`;
+  }
+  const tempR = document.getElementById('tempsR-label');
+  if (tempR) {
+    tempR.textContent = `TRem: ${data.tempR !== undefined ? Number(data.tempR).toFixed(2) : '--'} °C`;
+  }
+  const litresEl = document.getElementById('litres-label');
+  if (litresEl) {
+    litresEl.textContent = (data.litres !== undefined ? Number(data.litres).toFixed(2) : '--') + ' L';
+  }
+  const pulseEl = document.getElementById('pulse-label');
+  if (pulseEl) {
+    pulseEl.textContent = (data.pulses !== undefined ? data.pulses : '--');
   }
   if (document.getElementById('flow-label')) {
-    const litres = data.litres !== undefined ? Number(data.litres).toFixed(2) : '--';
-    const flow = data.flow_lpm !== undefined ? Number(data.flow_lpm).toFixed(2) : '--';
-    document.getElementById('flow-label').textContent = `Litres: ${litres} L | Débit: ${flow} L/min`;
+    const flow = data.flow_lpm !== undefined ? Number(data.flow_lpm).toFixed(2) : '0.00';
+    document.getElementById('flow-label').textContent = flow + ' L/min';
+  }
+  // Carte "Santé ESP" : heap libre + état WiFi
+  const heapEl = document.getElementById('heap-label');
+  if (heapEl) {
+    const kb = (data.heap !== undefined ? Math.round(data.heap/1024) : '--');
+    heapEl.textContent = kb + ' KB libres';
+  }
+  const wifiEl = document.getElementById('wifi-label');
+  if (wifiEl) {
+    // data.heap est exposé par le firmware mais pas l'état WiFi directement ;
+    // on le déduit du badge WebSocket déjà mis à jour plus haut.
+    const wsDot = document.getElementById('ws-dot');
+    wifiEl.textContent = wsDot && wsDot.className === 'ok' ? 'WiFi connecté' : 'WiFi —';
   }
   // Badge MQTT (amélioration A) — reflète mqttConnected envoyé par le firmware
   const mqttDot = document.getElementById('mqtt-dot');
@@ -1380,11 +1593,17 @@ function fmtYMD(v){
 }
 
 function refreshConsumption(){
-  const tbody = document.getElementById('cons-body');
-  if(!tbody) return;
   api('GET','/api/consumption').then(d=>{
-    if(!d || !d.valves){ tbody.innerHTML = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:18px">Pas de données</td></tr>'; return; }
-    tbody.innerHTML = d.valves.map(v=>{
+    if(!d || !d.valves){
+      const msg = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:18px">Pas de données</td></tr>';
+      const tb1 = document.getElementById('cons-body');
+      const tb2 = document.getElementById('status-cons-body');
+      if(tb1) tb1.innerHTML = msg;
+      if(tb2) tb2.innerHTML = msg.replace('colspan="5"','colspan="4"');
+      return;
+    }
+    // Version longue pour la page Configuration (5 colonnes : nom + détails 14j)
+    const longHtml = d.valves.map(v=>{
       const detail = (v.history && v.history.length)
         ? v.history.slice().reverse().map(h=>`<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:4px;background:var(--surface2);color:var(--text);font-size:.72rem">${fmtYMD(h.ymd)}: <strong>${(h.litres||0).toFixed(1)} L</strong></span>`).join('')
         : '<span style="color:var(--text-muted)">—</span>';
@@ -1396,6 +1615,22 @@ function refreshConsumption(){
         <td>${detail}</td>
       </tr>`;
     }).join('');
+    // Version compacte pour la boîte "État du système" du dashboard
+    // (4 colonnes, sans l'historique détaillé — plus lisible sur petit écran).
+    const shortHtml = d.valves.map(v=>{
+      const today  = v.litresToday  || 0;
+      const total  = v.litresTotal  || 0;
+      return `<tr>
+        <td><strong>V${v.valve+1}</strong></td>
+        <td>${v.name||'Vanne '+(v.valve+1)}</td>
+        <td style="text-align:right;color:${today>0?'var(--blue)':'var(--text-muted)'};font-weight:600">${today.toFixed(2)} L</td>
+        <td style="text-align:right">${total.toFixed(2)} L</td>
+      </tr>`;
+    }).join('');
+    const tb1 = document.getElementById('cons-body');
+    const tb2 = document.getElementById('status-cons-body');
+    if(tb1) tb1.innerHTML = longHtml;
+    if(tb2) tb2.innerHTML = shortHtml || '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>';
   });
 }
 
