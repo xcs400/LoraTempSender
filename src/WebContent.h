@@ -711,6 +711,15 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
         <div><label>SSID</label><input id="cfg-ssid" type="text"></div>
         <div><label>Mot de passe</label><input id="cfg-wpass" type="password"></div>
       </div>
+      <!-- Bloc "réseaux détectés" : même fonction que la liste de la page
+           AP du portail captif (SSID + RSSI + type de chiffrement + barres
+           de signal), accessible ici depuis la page de configuration
+           principale quand l'ESP est déjà connecté en STA. -->
+      <div style="margin-top:10px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-ghost btn-sm" id="wifi-scan-btn" onclick="scanWifiNetworks()">📡 Réseaux détectés</button>
+        <span id="wifi-scan-status" style="font-size:.78rem;color:var(--text-muted)"></span>
+      </div>
+      <div id="wifi-networks" style="margin-top:8px"></div>
     </div>
 
     <div class="config-section">
@@ -1707,6 +1716,139 @@ function loadConfig() {
        <input type="text" id="vname-${i}" value="${n||'Vanne '+(i+1)}"/></div>`
     ).join('');
   });
+}
+
+// ──────────────────────────────────────────────────────────
+// Scan WiFi depuis la page de configuration principale
+// ──────────────────────────────────────────────────────────
+// Affiche la liste des réseaux visibles avec SSID + RSSI + type de
+// chiffrement + barres de signal (même esprit que la page AP du portail
+// captif). Le backend (MainIocan.cpp) gère un scan async : on interroge
+// /api/wifi/scan et si le scan est en cours on ré-interroge 1.5 s plus tard.
+function rssiToBars(rssi){
+  // Barres type Wi-Fi Android : mapping indicatif basé sur RSSI typique.
+  // -30 dBm = excellent, -90 dBm = limite. 5 niveaux.
+  if(rssi >= -55) return 5;
+  if(rssi >= -65) return 4;
+  if(rssi >= -75) return 3;
+  if(rssi >= -82) return 2;
+  return 1;
+}
+function rssiColor(rssi){
+  if(rssi >= -65) return 'var(--green)';
+  if(rssi >= -75) return 'var(--orange)';
+  return 'var(--red)';
+}
+function barsSvg(level){
+  // 5 barres, colorées jusqu'au niveau `level`, les autres en gris dim.
+  let s = '<svg width="22" height="14" viewBox="0 0 22 14" style="vertical-align:middle">';
+  const widths  = [2,4,6,8,10];
+  const heights = [3,5,7,9,11];
+  for(let i=0;i<5;i++){
+    const active = i < level;
+    const color  = active ? rssiColor(-55 - i*8) : '#3a3f47';
+    const h = heights[i];
+    const w = widths[i];
+    const y = 14 - h;
+    const x = i * 4;
+    s += `<rect x="${x}" y="${y}" width="${w}" height="${h}" rx="0.5" fill="${color}"/>`;
+  }
+  s += '</svg>';
+  return s;
+}
+function renderWifiNetworks(list){
+  const box = document.getElementById('wifi-networks');
+  if(!list || !list.length){
+    box.innerHTML = '<div style="font-size:.78rem;color:var(--text-muted);padding:6px 0">Aucun réseau détecté.</div>';
+    return;
+  }
+  // Met en évidence le SSID actuellement configuré pour faciliter le repérage.
+  const currentSsid = (window.sysConfig && sysConfig.ssid) ? sysConfig.ssid : '';
+  box.innerHTML = list.map(n => {
+    const isCurrent = (n.ssid === currentSsid);
+    return `
+      <div class="wifi-net-row" data-ssid="${escapeHtml(n.ssid)}"
+           style="display:flex;align-items:center;gap:10px;padding:7px 10px;
+                  background:var(--surface2);border:1px solid ${isCurrent ? 'var(--green)' : 'var(--border)'};
+                  border-radius:6px;margin-bottom:4px;cursor:pointer">
+        <div style="flex:0 0 auto">${barsSvg(rssiToBars(n.rssi))}</div>
+        <div style="flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:.88rem">
+          ${escapeHtml(n.ssid)}${isCurrent ? ' <span style="font-size:.7rem;color:var(--green)">(actuel)</span>' : ''}
+        </div>
+        <div style="flex:0 0 auto;font-size:.75rem;color:var(--text-muted)">
+          ${n.enc || ''}
+        </div>
+        <div style="flex:0 0 auto;font-size:.78rem;color:var(--text-muted);min-width:48px;text-align:right">
+          ${n.rssi} dBm
+        </div>
+      </div>`;
+  }).join('');
+  // Clic sur une ligne → remplit le champ SSID et focus le champ password.
+  box.querySelectorAll('.wifi-net-row').forEach(row => {
+    row.addEventListener('click', () => {
+      const ssid = row.getAttribute('data-ssid');
+      if(!ssid) return;
+      document.getElementById('cfg-ssid').value = ssid;
+      const pw = document.getElementById('cfg-wpass');
+      if(pw) pw.focus();
+    });
+  });
+}
+function escapeHtml(s){
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+}
+let wifiScanInFlight = false;
+function scanWifiNetworks(){
+  if(wifiScanInFlight) return;
+  wifiScanInFlight = true;
+  const btn    = document.getElementById('wifi-scan-btn');
+  const status = document.getElementById('wifi-scan-status');
+  const box    = document.getElementById('wifi-networks');
+  if(btn) btn.disabled = true;
+  if(status) status.textContent = 'Recherche…';
+  if(box) box.innerHTML = '<div style="font-size:.78rem;color:var(--text-muted);padding:6px 0">Scan en cours…</div>';
+
+  const tick = (attempt) => {
+    api('GET','/api/wifi/scan').then(d => {
+      if(!d || !d.ok){
+        const reason = (d && d.reason) || '';
+        const msg = reason === 'captive'
+          ? 'Portail captif actif — le scan est disponible sur sa page.'
+          : 'Scan indisponible (mode STA inactif).';
+        if(status) status.textContent = msg;
+        if(box)    box.innerHTML    = '';
+        wifiScanInFlight = false;
+        if(btn) btn.disabled = false;
+        return;
+      }
+      if(d.running){
+        // Pas encore prêt — on ré-interroge dans 1.5 s, max 8 tentatives (12 s)
+        if(attempt >= 8){
+          if(status) status.textContent = 'Scan trop long — réessayez.';
+          if(box)    box.innerHTML    = '';
+          wifiScanInFlight = false;
+          if(btn) btn.disabled = false;
+          return;
+        }
+        setTimeout(() => tick(attempt+1), 1500);
+        return;
+      }
+      // Résultat dispo
+      const list = d.networks || [];
+      if(status) status.textContent = list.length
+        ? `${list.length} réseau${list.length>1?'x':''} détecté${list.length>1?'s':''}.`
+        : 'Aucun réseau détecté.';
+      renderWifiNetworks(list);
+      wifiScanInFlight = false;
+      if(btn) btn.disabled = false;
+    }).catch(() => {
+      if(status) status.textContent = 'Erreur réseau lors du scan.';
+      if(box)    box.innerHTML    = '';
+      wifiScanInFlight = false;
+      if(btn) btn.disabled = false;
+    });
+  };
+  tick(0);
 }
 
 function saveConfig() {
