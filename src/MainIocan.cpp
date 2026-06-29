@@ -1,4 +1,4 @@
-#ifdef IOCAN
+﻿#ifdef IOCAN_One
 
 // ============================================================
 // MainIocan.cpp — Contrôleur d'arrosage professionnel 8 vannes
