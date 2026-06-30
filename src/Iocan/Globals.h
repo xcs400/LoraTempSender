@@ -342,6 +342,11 @@ void IRAM_ATTR pulse_isr(); // définie dans Globals.cpp — ISR du compteur d'i
 // Consommation par vanne
 extern ValveCons valveCons[];
 extern unsigned long lastDistributedTotal;
+// Marquage NVS "dirty" par vanne — cf. ConfigManager.h pour le rationnel.
+// valveConsDirty[v] = true signifie que la conso de la vanne v en RAM
+// n'a pas encore été flushée en NVS. Flush déclenché toutes les 30 s par
+// loop() (ou immédiatement sur transition d'état / reset).
+extern volatile bool valveConsDirty[];
 
 // Calibration débit
 extern CalibState calibState;

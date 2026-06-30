@@ -1,4 +1,4 @@
-#ifdef IOCAN
+#ifdef IOCAN1
 
 // ============================================================
 // MainIocan.cpp — Contrôleur d'arrosage professionnel 8 vannes
@@ -309,6 +309,17 @@ void loop(){
             lastSavedStep = step;
             char b[80]; snprintf(b,80, "Pulse sauvegardees: %lu (%.1f L)", persistedPulseCount, (double)persistedPulseCount / PULSES_PER_LITRE);
             logSys(b);
+        }
+    }
+
+    // ── Flush NVS conso par vanne (toutes les 30 s) — cf. ConfigManager.h
+    // pour le rationnel (anti-saturation NVS). Sans ce throttle, on flushe
+    // ~600×/min et la partition sature en quelques heures.
+    {
+        static unsigned long lastValveConsFlushMs = 0;
+        if(millis() - lastValveConsFlushMs >= 30000UL){
+            lastValveConsFlushMs = millis();
+            valveConsFlushDirty();
         }
     }
 

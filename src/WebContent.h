@@ -386,7 +386,6 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 <!-- HEADER -->
 <header>
   <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="#388bfd" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2z"/><path d="M12 6v6l4 2"/></svg>
-  <h1>IrrigPro</h1>
   <span class="badge">Mon Beau jardin bien arrosé</span>
   <div style="margin-left:auto;display:flex;align-items:center;gap:18px">
     <!-- Badge MQTT (amélioration A) -->

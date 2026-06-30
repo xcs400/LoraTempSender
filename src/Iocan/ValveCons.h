@@ -171,8 +171,12 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
         valveCons[i].todayPulses += shares[i];
     }
     lastDistributedTotal = totalPulsesGlobal;
-    // Sauvegarde NVS (peu coûteux : un put par vanne)
-    for(int i=0;i<VANNE_COUNT;i++) if(valves[i].isOpen) valveConsSaveOne(i);
+    // ── Throttling NVS (cf. ConfigManager.h) : on ne flushe PLUS en NVS à
+    // chaque tour de loop. On marque juste un flag `dirty` par vanne, et
+    // loop() appelle valveConsFlushDirty() toutes les 30s. Sauvegarde
+    // totale : ~3 put/vanne/min au lieu de ~600/min — divise l'usure NVS
+    // par 200× et élimine la cause du NOT_ENOUGH_SPACE.
+    for(int i=0;i<VANNE_COUNT;i++) if(valves[i].isOpen) valveConsMarkDirty(i);
 }
 
 // ============================================================

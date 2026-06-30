@@ -248,6 +248,57 @@ inline void valveConsSaveFlowCoeff(int v){
     prefs.end();
 }
 
+// ────────────────────────────────────────────────────────────────────
+// THROTTLING D'ÉCRITURE NVS POUR LA CONSO PAR VANNE
+// ────────────────────────────────────────────────────────────────────
+//
+// DIAGNOSTIC (cf. logs du user) : putString() retournait NOT_ENOUGH_SPACE
+// après quelques heures d'utilisation en irrigation réelle. Cause : le
+// `pulseDistribute()` (ValveCons.h) appelait `valveConsSaveOne(i)` à CHAQUE
+// tour de loop pour chaque vanne ouverte — soit ~10-20×/s × 5 vannes × ~17
+// clés par Preferences::put = plusieurs centaines de flashes par seconde.
+// La partition NVS (32 KB) sature en quelques heures à ce rythme, et tout
+// putString ultérieur (y compris pour le SSID WiFi) échoue silencieusement.
+// Symptôme observable : "le SSID semble ne pas se sauvegarder" alors que
+// `configSave()` est bien appelé — c'est `prefs.putString` qui échoue.
+//
+// SOLUTION : on n'écrit en NVS que quand c'est utile, c'est-à-dire :
+//   * Sur transition d'état vanne (ouvre/ferme) — appelle valveConsSaveOne()
+//     directement pour persister immédiatement l'état
+//   * Périodiquement (1×/30 s par vanne) tant qu'elle est ouverte
+//   * Sur demande explicite (reset compteur, reset config, reboot propre)
+//
+// Le reste du temps, on travaille en RAM et un `valveConsDirty` flag
+// marque les vannes qui ont besoin d'un flush. La perte maximale en cas
+// de crash subite (sans reboot propre) est de 30 s de conso sur les
+// vannes ouvertes — négligeable, et de toute façon rattrapable au reboot
+// suivant grâce au recalcul `lastDistributedTotal` (cf. setup()).
+//
+// NB : le carry fractionnaire (algorithme de répartition) est lui aussi
+// protégé : s'il n'est pas flush à temps, on perd < 1 pulse, ce qui est
+// insignifiant.
+extern volatile bool valveConsDirty[];  // défini dans Globals.cpp
+inline void valveConsMarkDirty(int v){
+    if(v<0||v>=VANNE_COUNT) return;
+    valveConsDirty[v] = true;
+}
+inline void valveConsFlushDirty(){
+    for(int v=0;v<VANNE_COUNT;v++){
+        if(valveConsDirty[v]){
+            valveConsSaveOne(v);
+            valveConsDirty[v] = false;
+        }
+    }
+}
+// Appelé au reboot propre (depuis ValveManager.h::valveHardClose pour
+// persister immédiatement la cloture, et depuis /api/pulse/reset pour
+// persister la RAZ). Force le flush d'une vanne spécifique.
+inline void valveConsFlushOne(int v){
+    if(v<0||v>=VANNE_COUNT) return;
+    valveConsSaveOne(v);
+    valveConsDirty[v] = false;
+}
+
 // Sauvegarde/chargement des programmes
 inline void schedSave(){
     prefs.begin("schedcfg", false);

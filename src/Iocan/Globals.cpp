@@ -47,6 +47,8 @@ void IRAM_ATTR pulse_isr(){
 // Consommation par vanne
 ValveCons valveCons[VANNE_COUNT];
 unsigned long lastDistributedTotal = 0;
+// Drity flags pour throttling d'écriture NVS (cf. ConfigManager.h)
+volatile bool valveConsDirty[VANNE_COUNT] = {false};
 
 // Calibration débit
 CalibState calibState;
