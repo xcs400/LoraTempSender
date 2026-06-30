@@ -327,15 +327,32 @@ void loop(){
         }
     }
 
-    // ── Flush NVS conso par vanne (toutes les 30 s) — cf. ConfigManager.h
-    // pour le rationnel (anti-saturation NVS). Sans ce throttle, on flushe
-    // ~600×/min et la partition sature en quelques heures.
+    // ── Flush NVS conso par vanne ──────────────────────────────────────────────────────
+    // Mode CONS_MQTT_ONLY (Globals.h) :
+    //   - NON actif (défaut) : flush toutes les 30 s — anti-saturation NVS
+    //     mais conserve un historique robuste en flash même après reboot brutal.
+    //   - Actif : le flush périodique est SKIPÉ ; seules les transitions
+    //     ouverture/fermeture de vanne persistant en NVS (via valveConsFlushOne
+    //     dans ValveManager.h). Réduit drastiquement l'usure de la flash NVS
+    //     au prix d'une perte possible des données "en vol" en cas de reboot
+    //     brutal pendant un arrosage (perte = litres non encore flushés depuis
+    //     la dernière fermeture de vanne). Voir Globals.h pour le détail.
     {
+#ifndef CONS_MQTT_ONLY
         static unsigned long lastValveConsFlushMs = 0;
         if(millis() - lastValveConsFlushMs >= 30000UL){
             lastValveConsFlushMs = millis();
             valveConsFlushDirty();
         }
+#else
+        // Mode économie flash : pas de flush NVS périodique.
+        // Un log unique au premier tour de loop() pour confirmer le mode actif.
+        static bool mqttOnlyLogged = false;
+        if(!mqttOnlyLogged){
+            mqttOnlyLogged = true;
+            logSys("[CONS] Mode CONS_MQTT_ONLY actif : flush NVS périodique désactivé");
+        }
+#endif
     }
 
     // ── Timers vannes (fermeture auto)

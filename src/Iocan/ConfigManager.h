@@ -290,9 +290,13 @@ inline void valveConsFlushDirty(){
         }
     }
 }
-// Appelé au reboot propre (depuis ValveManager.h::valveHardClose pour
-// persister immédiatement la cloture, et depuis /api/pulse/reset pour
-// persister la RAZ). Force le flush d'une vanne spécifique.
+// Flush immédiat de la conso d'une vanne spécifique en NVS.
+// Appelé depuis :
+//   - ValveManager.h::valveHardClose() — en mode CONS_MQTT_ONLY uniquement
+//     (voir Globals.h) : persiste immédiatement les litres de la session
+//     à chaque fermeture, puisque le flush périodique 30s est désactivé.
+//   - /api/pulse/reset (WebManager.h) : persiste la remise à zéro.
+//   - valveConsFlushDirty() : flush en lot (mode normal, toutes les 30s).
 inline void valveConsFlushOne(int v){
     if(v<0||v>=VANNE_COUNT) return;
     valveConsSaveOne(v);

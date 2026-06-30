@@ -33,6 +33,15 @@ inline void valveHardClose(int idx){
     v.priority     = PRIO_NONE;
     v.remainingSec = 0;
     v.openEndMs    = 0;
+#ifdef CONS_MQTT_ONLY
+    // Mode économie flash : flush NVS immédiat à chaque fermeture de vanne.
+    // Sans ce flush, aucune écriture NVS ne se déclencherait entre deux
+    // arrosages (le flush périodique de 30s étant désactivé), et la perte
+    // en cas de reboot brutal serait totale pour la session en cours.
+    // Ici, on capture les litres de chaque session dès la fermeture.
+    // Dépend de ConfigManager.h (include après ValveManager.h dans MainIocan_S.cpp)
+    valveConsFlushOne(idx);
+#endif
 }
 
 // Ouvre physiquement une vanne avec priorité et durée

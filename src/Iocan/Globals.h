@@ -182,6 +182,32 @@ const int BUTTON_PIN = 0;
 #define CONS_HISTORY_DAYS 14
 #define SAVE_LITRES_STEP 100.0f
 
+// ── Stratégie de persistance NVS pour la consommation des vannes ──────────────
+//
+// Par défaut (CONS_MQTT_ONLY non défini), la consommation est flushée en NVS
+// toutes les 30 secondes par valveConsFlushDirty() dans loop(). Avec 5 vannes
+// et ~17 clés par vanne, cela représente jusqu'à ~85 écritures NVS/min pendant
+// l'irrigation — ce qui use rapidement la flash (endurance ~100 000 cycles
+// par secteur NVS).
+//
+// Mode CONS_MQTT_ONLY (décommenter pour activer) :
+//   * Le flush NVS périodique toutes les 30s est DÉSACTIVÉ.
+//   * Seules les transitions critiques déclenchent une écriture NVS :
+//       - Fermeture de vanne (valveHardClose → valveConsFlushOne) : capture
+//         le total exact de la session arrosage juste après chaque arrosage.
+//       - Reset compteur (/api/pulse/reset) : persiste la remise à zéro.
+//   * Les valeurs publiées en MQTT (retained) sur le broker font office de
+//     mémoire secondaire pour Home Assistant. Les données "en cours d'arrosage"
+//     (non encore flushées) ne survivent PAS à un reboot brutal sans arrosage
+//     préalable — perte max = litres écoulés depuis la dernière fermeture
+//     de vanne. Acceptable si le broker MQTT est fiable et les valeurs
+//     retained sont consultées via l'historique HA.
+//   * L'historique journalier (14 jours) N'EST PAS mis à jour en NVS en cours
+//     de journée — seulement à chaque fermeture de vanne.
+//
+// DÉCOMMENTER la ligne suivante pour activer le mode économie flash :
+// #define CONS_MQTT_ONLY  1
+
 // ============================================================
 // SECTION 2 — TYPES & STRUCTURES
 // ============================================================
