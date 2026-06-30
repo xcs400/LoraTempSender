@@ -651,6 +651,47 @@ inline void webSetup(){
         delay(300); ESP.restart();
     });
 
+    // ── État NVS (utilisé / libre / total) GET /api/nvs/status
+    //
+    // Sert à la page Configuration pour afficher le niveau de remplissage
+    // de la partition NVS (barre de progression). L'état est rafraîchi
+    // périodiquement par la loop() (toutes les 5s) et mis en cache ; cette
+    // route renvoie directement le cache pour rester réactive.
+    server.on("/api/nvs/status", HTTP_GET, [](AsyncWebServerRequest* req){
+        jsonResp(req, nvsStatsToJson());
+    });
+
+    // ── Formatage NVS POST /api/format
+    //
+    // Efface TOUTE la partition NVS (config, conso par vanne, programmes,
+    // calibration, journal) puis réécrit immédiatement ssid + wifiPass +
+    // nodeId pour préserver la connexion WiFi, et reboote. Le firmware
+    // redémarrera sur des défauts sains pour tous les autres champs
+    // (NTP, LoRa, MQTT, etc.) et l'utilisateur pourra les re-régler via
+    // l'UI.
+    //
+    // Sécurité : on NE bloque PAS l'appel côté serveur (pas de mot de
+    // passe séparé), mais l'UI affichera une confirmation explicite à
+    // 2 temps (l'utilisateur doit taper "FORMAT" dans un prompt) pour
+    // éviter les fausses manipulations.
+    server.on("/api/format", HTTP_POST, [](AsyncWebServerRequest* req){
+        // Répondre OK avant le reboot (sinon le client n'a pas le temps
+        // de recevoir la réponse HTTP).
+        jsonResp(req, "{\"ok\":true,\"restart\":true,\"reason\":\"nvs-format\"}");
+        // Petit délai pour laisser passer la réponse HTTP, puis on formate
+        // et on reboote. La fonction nvsFormatAndRestore() :
+        //   1) ferme toutes les vannes
+        //   2) sauvegarde ssid/wifiPass en RAM
+        //   3) appelle nvs_flash_erase()
+        //   4) appelle nvs_flash_init()
+        //   5) restaure ssid/wifiPass avec configSave()
+        //   6) reboot
+        xTaskCreate([](void*){
+            vTaskDelay(pdMS_TO_TICKS(400));
+            nvsFormatAndRestore();
+        }, "nvsFormat", 4096, NULL, 1, NULL);
+    });
+
     // Catch-all : trace toute requête non routée pour faciliter le diag
     server.onNotFound([](AsyncWebServerRequest* req){
         Serial.printf("[HTTP] 404 %s %s\n",

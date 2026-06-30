@@ -167,6 +167,32 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 .btn-blue{background:var(--blue);color:#fff}
 .btn-sm{padding:5px 10px;font-size:.75rem}
 
+/* ── JAUGE NVS ──────────────────────────────────────────
+ * Petite barre horizontale qui affiche le remplissage de la partition
+ * NVS (utilisé / total). Couleur qui vire au rouge/orange au-dessus
+ * de 70% / 90% pour alerter visuellement. */
+.nvs-gauge-wrap{
+  display:flex;flex-direction:column;gap:6px;
+  padding:10px 12px;background:var(--surface2);
+  border:1px solid var(--border);border-radius:8px;
+}
+.nvs-gauge-label{
+  display:flex;justify-content:space-between;align-items:center;
+  font-size:.78rem;color:var(--text-muted);
+}
+.nvs-gauge-label .pct{font-weight:600;color:var(--text)}
+.nvs-gauge{
+  width:100%;height:8px;background:var(--border);
+  border-radius:4px;overflow:hidden;
+}
+.nvs-gauge-fill{
+  height:100%;width:0%;background:var(--green);
+  transition:width .3s ease, background-color .3s ease;
+}
+.nvs-gauge-fill.warn{background:var(--orange)}
+.nvs-gauge-fill.danger{background:var(--red)}
+.nvs-gauge-detail{font-size:.7rem;color:var(--text-muted);text-align:right}
+
 /* ── MODAL FORÇAGE ──────────────────────────────────── */
 .modal-overlay{
   display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:200;
@@ -815,6 +841,32 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
       </div>
     </div>
 
+    <!-- ── MAINTENANCE / ÉTAT NVS ──────────────────────────────
+         Jauge de remplissage de la partition NVS + bouton pour
+         formater (effacer toute la config persistée, mais en gardant
+         le SSID et mot de passe WiFi). Le rafraichissement se fait
+         toutes les 5s par le firmware (cache) + 1 appel à l'ouverture
+         de la page pour avoir la valeur immédiate. -->
+    <div class="config-section">
+      <h3>Maintenance — Mémoire flash (NVS)</h3>
+      <div class="nvs-gauge-wrap" id="nvs-gauge-wrap">
+        <div class="nvs-gauge-label">
+          <span>Remplissage partition NVS</span>
+          <span class="pct" id="nvs-pct">—</span>
+        </div>
+        <div class="nvs-gauge"><div class="nvs-gauge-fill" id="nvs-fill"></div></div>
+        <div class="nvs-gauge-detail" id="nvs-detail">Chargement…</div>
+      </div>
+      <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
+        <button class="btn btn-ghost btn-sm" onclick="loadNvsStatus()">↻ Actualiser l'état</button>
+        <button class="btn btn-red btn-sm" onclick="formatNvs()">⚠ Formater la mémoire flash</button>
+        <span style="font-size:.72rem;color:var(--text-muted);flex:1">
+          Le formatage efface toute la configuration (sauf le SSID et mot de passe WiFi qui sont recopiés immédiatement après).<br/>
+          Utile en cas de partition NVS saturée ou corrompue.
+        </span>
+      </div>
+    </div>
+
     <div style="display:flex;gap:10px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:18px">
       <button class="btn btn-ghost" onclick="loadConfig()">Annuler</button>
       <button class="btn btn-blue" onclick="saveConfig()">Sauvegarder</button>
@@ -1234,6 +1286,26 @@ function handleStatus(data) {
   if (mqttDot && mqttLabel && data.mqttConnected !== undefined) {
     mqttDot.className = data.mqttConnected ? 'ok' : 'off';
     mqttLabel.textContent = 'MQTT: ' + (data.mqttConnected ? 'connecté' : 'déconnecté');
+  }
+  // Jauge NVS — on l'actualise à chaque STATUS (≈1×/s par le WebSocket)
+  // pour que l'utilisateur suive l'évolution du remplissage en direct
+  // sans avoir à cliquer sur "Actualiser". On ne fait la mise à jour
+  // DOM QUE si la page Config est visible, pour ne pas manipuler
+  // inutilement des éléments cachés.
+  if (data.nvs && document.getElementById('page-config') &&
+      document.getElementById('page-config').classList.contains('active')) {
+    const pctEl = document.getElementById('nvs-pct');
+    const fill  = document.getElementById('nvs-fill');
+    const det   = document.getElementById('nvs-detail');
+    if(pctEl && fill && det){
+      const pct = data.nvs.usedPct || 0;
+      pctEl.textContent = pct + '%';
+      fill.style.width  = pct + '%';
+      fill.classList.remove('warn','danger');
+      if(pct >= 90)      fill.classList.add('danger');
+      else if(pct >= 70) fill.classList.add('warn');
+      det.textContent = `${data.nvs.used} / ${data.nvs.total} entrées utilisées (${data.nvs.free} libres)`;
+    }
   }
   // Ne reconstruit le select des vannes du modal programme QUE si ce
   // dernier n'est pas en cours d'édition — sinon la sélection de
@@ -1714,6 +1786,66 @@ function loadConfig() {
       `<div class="form-group"><label>Vanne ${i+1}</label>
        <input type="text" id="vname-${i}" value="${n||'Vanne '+(i+1)}"/></div>`
     ).join('');
+  });
+  // Charger aussi l'état NVS pendant qu'on est sur la page config
+  loadNvsStatus();
+}
+
+// ──────────────────────────────────────────────────────────
+// Maintenance NVS : jauge de remplissage + formatage flash
+// ──────────────────────────────────────────────────────────
+// Interroge /api/nvs/status et met à jour la jauge + le libellé.
+// Affiche la valeur en pourcentage et en nombre d'entrées utilisées
+// / totales. Change la couleur de la barre (vert < 70%, orange 70-90%,
+// rouge > 90%) pour alerter visuellement.
+function loadNvsStatus(){
+  api('GET','/api/nvs/status').then(s=>{
+    const pctEl = document.getElementById('nvs-pct');
+    const fill  = document.getElementById('nvs-fill');
+    const det   = document.getElementById('nvs-detail');
+    if(!s || !s.ok){
+      pctEl.textContent = 'N/A';
+      fill.style.width  = '0%';
+      det.textContent   = 'Indisponible';
+      return;
+    }
+    const pct = s.usedPct || 0;
+    pctEl.textContent = pct + '%';
+    fill.style.width  = pct + '%';
+    fill.classList.remove('warn','danger');
+    if(pct >= 90)      fill.classList.add('danger');
+    else if(pct >= 70) fill.classList.add('warn');
+    det.textContent = `${s.used} / ${s.total} entrées utilisées (${s.free} libres)`;
+  });
+}
+
+// Demande de formatage NVS. 2 confirmations successives pour éviter
+// les fausses manipulations : on affiche d'abord un texte d'avertissement
+// (l'utilisateur doit cliquer OK), puis on lui demande de retaper "FORMAT"
+// en majuscules (le prompt natif du navigateur) avant d'envoyer
+// réellement la requête au firmware. Le firmware répond OK puis reboote.
+function formatNvs(){
+  if(!confirm('⚠ Formater la mémoire flash (NVS) ?\n\n' +
+              'Toute la configuration sera effacée (programmes, conso, calibration, journal).\n' +
+              'Le SSID et le mot de passe WiFi seront recopiés immédiatement après.\n' +
+              'Le boîtier va redémarrer.')){
+    return;
+  }
+  const confirm2 = prompt('Pour confirmer, tapez exactement FORMAT (en majuscules) :');
+  if(confirm2 !== 'FORMAT'){
+    alert('Annulé.');
+    return;
+  }
+  // Feedback visuel : on désactive le bouton et on affiche un message
+  // avant que la requête parte. Le firmware répond puis reboot 400 ms
+  // après, on n'a donc pas besoin d'attendre longtemps côté UI.
+  const btn = event && event.target;
+  if(btn){ btn.disabled = true; btn.textContent = 'Formatage en cours…'; }
+  document.getElementById('nvs-detail').textContent = 'Formatage en cours, redémarrage imminent…';
+  api('POST','/api/format').then(r=>{
+    // Si on arrive ici c'est que la requête a abouti ; le firmware va
+    // rebooter dans 400 ms. On ne peut pas vraiment faire mieux côté UI
+    // (le WebSocket va se couper) — on laisse le message tel quel.
   });
 }
 

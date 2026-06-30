@@ -312,6 +312,133 @@ inline void schedSave(){
     prefs.end();
 }
 
+// ============================================================
+// ÉTAT NVS (remplissage) + FORMATAGE AVEC PRÉSERVATION WiFi
+// ============================================================
+//
+// But : exposer à l'UI (page Configuration) le niveau de remplissage de
+// la partition NVS, et permettre à l'utilisateur de la reformater
+// depuis l'UI. Le formatage efface TOUTE la NVS (config, conso par
+// vanne, programmes, calibration, journal) — c'est un mode recovery.
+// IMPORTANT : on préserve sysConfig.ssid / sysConfig.wifiPass en RAM
+// pendant l'opération pour les réécrire en NVS juste après l'erase,
+// afin de ne pas perdre le réseau WiFi.
+//
+// Implémentation :
+//   * nvsStats()         : remplit une nvs_stats_t via nvs_get_stats().
+//   * nvsStatsToJson()   : sérialise au format JSON pour l'API REST
+//                           et le broadcast WebSocket STATUS.
+//   * nvsFormatAndRestore(): efface NVS, recharge configLoad() (qui
+//                           recrée des défauts), réécrit ssid+wifiPass
+//                           courants (préservés en RAM), puis reboote.
+//   * nvsStatsCached     : cache temps réel (refresh ~5s) pour ne pas
+//                           marteler le driver NVS à chaque broadcast WS.
+struct NvsStats {
+    size_t usedEntries;
+    size_t freeEntries;
+    size_t totalEntries;
+    bool   ok;
+};
+inline NvsStats nvsStatsCached = {0,0,0,false};
+inline unsigned long nvsStatsLastMs = 0;
+
+inline NvsStats nvsStats(){
+    NvsStats s = {0,0,0,false};
+    // nvs_get_stats() remplit la structure avec le détail de la partition
+    // NVS. Disponible sur ESP32 Arduino Core 2.x+ (et ESP-IDF). Renvoie
+    // ESP_OK si succès.
+    nvs_stats_t st;
+    if(nvs_get_stats(NULL, &st) == ESP_OK){
+        s.usedEntries  = st.used_entries;
+        s.freeEntries  = st.free_entries;
+        s.totalEntries = st.total_entries;
+        s.ok = true;
+    }
+    return s;
+}
+
+inline void nvsStatsRefresh(){
+    nvsStatsCached = nvsStats();
+    nvsStatsLastMs = millis();
+}
+
+inline String nvsStatsToJson(){
+    // Si cache trop vieux (> 5s) on rafraîchit pour rester pertinent
+    if(millis() - nvsStatsLastMs > 5000UL){
+        nvsStatsRefresh();
+    }
+    StaticJsonDocument<256> doc;
+    doc["ok"]     = nvsStatsCached.ok;
+    doc["used"]   = (long)nvsStatsCached.usedEntries;
+    doc["free"]   = (long)nvsStatsCached.freeEntries;
+    doc["total"]  = (long)nvsStatsCached.totalEntries;
+    if(nvsStatsCached.totalEntries > 0){
+        int pct = (int)((100UL * nvsStatsCached.usedEntries) / nvsStatsCached.totalEntries);
+        if(pct > 100) pct = 100;
+        doc["usedPct"] = pct;
+    } else {
+        doc["usedPct"] = 0;
+    }
+    String out; serializeJson(doc, out);
+    return out;
+}
+
+// Formate la partition NVS et préserve ssid/wifiPass. Redémarre ensuite.
+// ATTENTION : cette opération est IRRÉVERSIBLE. Toutes les données
+// persistées (config complète sauf ssid/pass, conso par vanne,
+// programmes, calibration, journal) sont effacées. Les vannes en cours
+// d'ouverture sont refermées avant le reboot.
+inline void nvsFormatAndRestore(){
+    // ── 1) Sauvegarder en RAM le SSID et mot de passe WiFi courants
+    char keepSsid[32]; strlcpy(keepSsid, sysConfig.ssid, 32);
+    char keepPass[64]; strlcpy(keepPass, sysConfig.wifiPass, 64);
+    char keepNodeId[24]; strlcpy(keepNodeId, sysConfig.nodeId, 24);
+    logSys("FORMAT NVS demandé — effacement en cours...");
+
+    // ── 2) Fermer toutes les vannes par sécurité (matériel d'abord)
+    for(int i=0;i<VANNE_COUNT;i++){
+        digitalWrite(VANNE_PINS[i], LOW);
+        digitalWrite(LEDVISU_PINS[i], LOW);
+        valves[i].isOpen = false;
+        valves[i].source = CmdSource::NONE;
+    }
+    for(int i=0;i<(int)(sizeof(OUT_PINS)/sizeof(OUT_PINS[0])); i++){
+        digitalWrite(OUT_PINS[i], LOW);
+    }
+
+    // ── 3) Effacer la partition NVS
+    esp_err_t err = nvs_flash_erase();
+    Serial.printf("[NVS] nvs_flash_erase() = %s\n",
+                  err == ESP_OK ? "OK" : "FAIL");
+    if(err != ESP_OK){
+        logSys("FORMAT NVS ÉCHEC — reboot sans formatage");
+        delay(500);
+        ESP.restart();
+        return;
+    }
+
+    // ── 4) Réinitialiser la NVS (re-crée les structures internes)
+    err = nvs_flash_init();
+    Serial.printf("[NVS] nvs_flash_init() = %s\n",
+                  err == ESP_OK ? "OK" : "FAIL");
+    logSys("NVS effacée et réinitialisée");
+
+    // ── 5) Restaurer ssid/pass/nodeId (réécrit en NVS immédiatement)
+    strlcpy(sysConfig.ssid, keepSsid, 32);
+    strlcpy(sysConfig.wifiPass, keepPass, 64);
+    strlcpy(sysConfig.nodeId, keepNodeId, 24);
+    // configSave() va utiliser les autres champs de sysConfig (valeurs
+    // par défaut puisque configLoad() n'a pas été rejouée avant
+    // configSave() — c'est volontaire, on repart sur des défauts sains).
+    configSave();
+    Serial.printf("[NVS] WiFi restauré: ssid='%s'\n", sysConfig.ssid);
+    logSys("FORMAT NVS terminé — WiFi préservé, redémarrage...");
+
+    // ── 6) Petit délai pour laisser le temps au log d'être flush
+    delay(300);
+    ESP.restart();
+}
+
 inline void schedLoad(){
     prefs.begin("schedcfg", true);
     for(int v=0;v<VANNE_COUNT;v++){

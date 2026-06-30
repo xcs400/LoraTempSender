@@ -1,4 +1,4 @@
-#ifdef IOCAN1
+#ifdef IOCAN
 
 // ============================================================
 // MainIocan.cpp — Contrôleur d'arrosage professionnel 8 vannes
@@ -103,6 +103,11 @@ void setup(){
     // ── Charger config NVS
     configLoad();
     schedLoad();
+    // ── Initialise le cache d'état NVS (utilisé/free/total) pour l'UI.
+    // Le cache sera rafraîchi périodiquement dans la loop(), mais on
+    // prend un snapshot immédiat pour que la première requête /api/nvs/status
+    // ou le premier broadcast WebSocket ait une valeur valide.
+    nvsStatsRefresh();
 
     // ── Init vannes — FERMETURE SÉCURITÉ au boot
     for(int i=0;i<VANNE_COUNT;i++){
@@ -209,6 +214,16 @@ void setup(){
     // ── Watchdog
     esp_task_wdt_init(60, true);
     esp_task_wdt_add(nullptr);
+
+    // ── Rafraîchissement périodique du cache d'état NVS (toutes les 5s).
+    // On ne le fait PAS à chaque tour de loop (l'appel à nvs_get_stats()
+    // parcourt toutes les entrées, ce n'est pas gratuit) mais toutes les
+    // 5s c'est largement suffisant pour l'UI et reste imperceptible.
+    static unsigned long lastNvsStatsMs = 0;
+    if(millis() - lastNvsStatsMs >= 5000UL){
+        lastNvsStatsMs = millis();
+        nvsStatsRefresh();
+    }
 
     bootMs = millis();
     logSys("Système prêt");

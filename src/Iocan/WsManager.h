@@ -102,6 +102,26 @@ inline String buildStatusJson(){
     // sache si la liaison Home Assistant fonctionne sans avoir à consulter
     // les logs série.
     doc["mqttConnected"] = mqttConnected;
+    // AMÉLIORATION (NVS) : expose le niveau de remplissage de la partition
+    // NVS (utilisé / total + pourcentage) pour que l'UI puisse afficher
+    // une jauge dans la page Configuration et alerter l'utilisateur si la
+    // partition s'approche de la saturation. Les données proviennent du
+    // cache rafraîchi périodiquement (toutes les 5s) par la loop() pour
+    // éviter de marteler le driver NVS à chaque broadcast.
+    {
+        if(millis() - nvsStatsLastMs > 5000UL) nvsStatsRefresh();
+        JsonObject nvs = doc.createNestedObject("nvs");
+        nvs["used"]  = (long)nvsStatsCached.usedEntries;
+        nvs["free"]  = (long)nvsStatsCached.freeEntries;
+        nvs["total"] = (long)nvsStatsCached.totalEntries;
+        if(nvsStatsCached.totalEntries > 0){
+            int pct = (int)((100UL * nvsStatsCached.usedEntries) / nvsStatsCached.totalEntries);
+            if(pct > 100) pct = 100;
+            nvs["usedPct"] = pct;
+        } else {
+            nvs["usedPct"] = 0;
+        }
+    }
     // AMÉLIORATION (calibration débit) : résumé léger de l'état de
     // calibration pour que l'UI puisse suivre la progression en direct via
     // WebSocket, y compris après un reload de page (l'état vit côté
