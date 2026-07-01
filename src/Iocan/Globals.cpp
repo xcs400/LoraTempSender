@@ -25,6 +25,13 @@ AsyncMqttClient mqttClient;
 bool            mqttConnected = false;
 unsigned long   lastMqttPubMs = 0;
 unsigned long   lastMqttConnectAttemptMs = 0;
+// Récupération MQTT au boot (mode CONS_MQTT_ONLY) : fenêtre de 3s après
+// connexion pour récupérer les valeurs retained et mettre à jour la RAM.
+// mqttRecoveryDone passe à true à l'expiration de la fenêtre dans mqttLoop().
+#ifdef CONS_MQTT_ONLY
+bool            mqttRecoveryDone    = false;
+unsigned long   mqttRecoveryStartMs = 0;
+#endif
 
 // Vannes
 Valve  valves[VANNE_COUNT];
@@ -60,14 +67,18 @@ uint16_t  logCount = 0;
 
 // LoRa
 volatile bool loraRxFlag = false;
+volatile bool loraTxFlag = false;     // IRQ DIO1 = fin de TX
+volatile uint8_t loraMode = 0;        // 0 = idle/RX, 1 = TX en cours
 unsigned long lastLoraTx = 0;
 int           loraRxCount = 0;
+int           loraTxCount = 0;
 float         loraRssi = 0;
 
 // ISR DIO1 LoRa — on ne fait que poser un flag, le traitement se fait
 // dans la loop() (loraRxProcess). Doit résider en IRAM pour ESP32/Xtensa.
 void IRAM_ATTR loraSetFlag(){
-    loraRxFlag = true;
+    if(loraMode) loraTxFlag = true;   // fin de TX
+    else         loraRxFlag = true;   // paquet RX reçu
 }
 
 // Temps

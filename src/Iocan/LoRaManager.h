@@ -22,20 +22,20 @@
 // Construit la trame STATUS JSON
 inline String loraBuildStatus(){
     StaticJsonDocument<1024> doc;
+    doc["model"]   = "IRRIGATION";
     doc["id"]   = sysConfig.nodeId;
     doc["type"] = "STATUS";
-    doc["heap"]   = ESP.getFreeHeap();
-    doc["uptime"] = millis()/1000;
-    doc["rssi"]   = loraRssi;
+  //  doc["uptime"] = millis()/1000;
+  //  doc["rssi"]   = loraRssi;
     doc["alarm"]  = 0;
-    JsonArray vannesArr   = doc.createNestedArray("vannes");
-    JsonArray remArr      = doc.createNestedArray("remaining");
-    JsonArray srcArr      = doc.createNestedArray("source");
-    for(int i=0;i<VANNE_COUNT;i++){
-        vannesArr.add(valves[i].isOpen ? 1 : 0);
-        remArr.add(valves[i].remainingSec);
-        srcArr.add(srcStr(valves[i].source));
-    }
+  //  JsonArray vannesArr   = doc.createNestedArray("vannes");
+  //  JsonArray remArr      = doc.createNestedArray("remaining");
+  //  JsonArray srcArr      = doc.createNestedArray("source");
+ //   for(int i=0;i<VANNE_COUNT;i++){
+ //       vannesArr.add(valves[i].isOpen ? 1 : 0);
+ //       remArr.add(valves[i].remainingSec);
+ //       srcArr.add(srcStr(valves[i].source));
+ //   }
     String out; serializeJson(doc,out);
     return out;
 }
@@ -67,8 +67,20 @@ inline void loraProcessCmd(JsonDocument& doc){
     else if(strcmp(cmd,"GET_STATUS")==0){
         // Répondre immédiatement
         String msg = loraBuildStatus();
+        Serial.print("[LoRa TX CMD->GET_STATUS] len=");
+        Serial.print(msg.length());
+        Serial.print(" payload=");
+        Serial.println(msg);
         int st = radio.startTransmit(msg);
-        if(st != RADIOLIB_ERR_NONE) Serial.printf("LoRa TX err %d\n",st);
+        Serial.printf("[LoRa TX] startTransmit st=%d (0=OK)\n", st);
+        if(st != RADIOLIB_ERR_NONE) {
+            Serial.printf("[LoRa TX] ECHEC code=%d\n", st);
+            logSys(("LoRa TX err: " + String(st)).c_str());
+            int st2 = radio.startReceive();
+            Serial.printf("[LoRa TX] startReceive apres echec st=%d\n", st2);
+        } else {
+            loraMode = 1;   // ISR sait qu'on attend TX done
+        }
     }
     else if(strcmp(cmd,"CLOSE_ALL")==0){
         valveCloseAll(CmdSource::LORA);
@@ -77,6 +89,26 @@ inline void loraProcessCmd(JsonDocument& doc){
 
 // Réception LoRa (non-bloquant)
 inline void loraRxProcess(){
+    // Si on est en cours de TX, l'ISR a levé loraTxFlag — on traite ça
+    // séparément pour ne PAS interpréter la fin de TX comme un paquet RX.
+    if(loraTxFlag){
+        loraTxFlag = false;
+        loraMode = 0;
+        loraTxCount++;
+        int st = radio.finishTransmit();
+        Serial.printf("[LoRa TX] finishTransmit st=%d (0=OK), txCount=%d\n",
+                      st, loraTxCount);
+        if(st != RADIOLIB_ERR_NONE){
+            logSys(("LoRa finishTransmit err: " + String(st)).c_str());
+        }
+        // Reprendre RX immédiatement après TX
+        int st2 = radio.startReceive();
+        Serial.printf("[LoRa TX] startReceive apres TX st=%d\n", st2);
+        if(st2 != RADIOLIB_ERR_NONE){
+            logSys(("LoRa RX restart err: " + String(st2)).c_str());
+        }
+        return;
+    }
     if(!loraRxFlag) return;
     loraRxFlag = false;
     String msg;
@@ -126,11 +158,21 @@ inline void loraTxUpdate(){
     if(now - lastLoraTx < LORA_TX_INTERVAL_MS) return;
     lastLoraTx = now;
     String msg = loraBuildStatus();
+    Serial.print("[LoRa TX STATUS] len=");
+    Serial.print(msg.length());
+    Serial.print(" payload=");
+    Serial.println(msg);
     int st = radio.startTransmit(msg);
-    Serial.print("[LoRa TX STATUS] "); Serial.println(st==RADIOLIB_ERR_NONE?"OK":"FAIL");
-    // Reprendre RX après TX
-    delayMicroseconds(2000);  // mini pause hardware (non bloquant pour la logique)
-    radio.startReceive();
+    Serial.printf("[LoRa TX] startTransmit st=%d (0=OK)\n", st);
+    if(st != RADIOLIB_ERR_NONE) {
+        Serial.printf("[LoRa TX] ECHEC code=%d - on retente le RX\n", st);
+        logSys(("LoRa TX STATUS err: " + String(st)).c_str());
+        // Echec : on remet en RX
+        int st2 = radio.startReceive();
+        Serial.printf("[LoRa TX] startReceive apres echec st=%d\n", st2);
+    } else {
+        loraMode = 1;  // ISR sait qu'on attend TX done
+    }
 }
 
 #endif // IOCAN

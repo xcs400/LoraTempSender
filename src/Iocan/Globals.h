@@ -206,7 +206,7 @@ const int BUTTON_PIN = 0;
 //     de journée — seulement à chaque fermeture de vanne.
 //
 // DÉCOMMENTER la ligne suivante pour activer le mode économie flash :
-// #define CONS_MQTT_ONLY  1
+#define CONS_MQTT_ONLY  1
 
 // ============================================================
 // SECTION 2 — TYPES & STRUCTURES
@@ -354,6 +354,12 @@ extern unsigned long   lastMqttPubMs;
 extern unsigned long   lastMqttConnectAttemptMs;
 const unsigned long MQTT_PUB_INTERVAL_MS = 10000UL; // 10 s
 const unsigned long MQTT_RECONNECT_MS = 15000UL;
+// Récupération MQTT au boot (mode CONS_MQTT_ONLY)
+// Voir MqttManager.h pour la logique et Globals.cpp pour les définitions.
+#ifdef CONS_MQTT_ONLY
+extern bool            mqttRecoveryDone;
+extern unsigned long   mqttRecoveryStartMs;
+#endif
 
 // Vannes
 extern Valve  valves[];
@@ -384,8 +390,11 @@ extern uint16_t  logCount;
 
 // LoRa
 extern volatile bool loraRxFlag;
+extern volatile bool loraTxFlag;
+extern volatile uint8_t loraMode;
 extern unsigned long lastLoraTx;
 extern int           loraRxCount;
+extern int           loraTxCount;
 extern float         loraRssi;
 // ISR DIO1 du module LoRa — définie dans Globals.cpp (IRAM, ne pas inliner)
 void IRAM_ATTR loraSetFlag();

@@ -270,7 +270,7 @@ void loop(){
         if (pendingRestart) {
             if (millis() - pendingRestartMs > 2000) {
                 Serial.println("[CaptivePortal] Redémarrage de l'ESP...");
-                ESP.restart();
+                safeRestart("Redémarrage portail captif — WiFi mis à jour");
             }
             return; // Bloquer l'irrigation uniquement pendant le redémarrage (les 2 secondes de délai)
         }

@@ -145,6 +145,40 @@ inline void pulseSave(){
     prefs.end();
 }
 
+// Déclarations anticipées pour les helpers de consommation
+inline void valveConsFlushDirty();
+
+// ── Redémarrage sécurisé : flush NVS avant ESP.restart() ─────────────────
+//
+// À utiliser à la place d'un ESP.restart() nu partout où on peut l'anticiper
+// (reset Web, portail captif, timeout WiFi, etc.). Garantit que la conso en
+// RAM est persistée même si le flush périodique 30s n'a pas encore eu lieu.
+// NE protège PAS contre une coupure secteur (cas traité par la récupération
+// MQTT au boot, voir MqttManager.h).
+//
+// Séquence :
+//   1) Flush compteur pulse global (pulseSave) — toujours.
+//   2) Flush conso par vanne dirty (valveConsFlushDirty) — toujours.
+//   3) Petit délai pour laisser les transactions NVS terminer.
+//   4) ESP.restart().
+inline void safeRestart(const char* reason = nullptr){
+    if(reason && reason[0]) logSys(reason);
+    // Synchronise les pulses runtime avant d'écrire
+    {
+        unsigned long cnt;
+        noInterrupts(); cnt = pulseCount; interrupts();
+        unsigned long total = persistedPulseCount + cnt;
+        // On enregistre le total complet (pas seulement les paliers de SAVE_LITRES_STEP)
+        persistedPulseCount = total;
+    }
+    pulseSave();
+    valveConsFlushDirty();
+    Serial.println("[SAFE] Flush NVS avant restart OK");
+    delay(300);
+    ESP.restart();
+}
+
+
 // ── Date du jour au format YYYYMMDD (0 si pas sync NTP)
 inline uint16_t todayYMD(){
     struct tm ti;

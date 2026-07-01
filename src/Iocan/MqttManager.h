@@ -38,6 +38,8 @@
 #include "FlowMeter.h"
 #include "ValveManager.h"
 
+inline bool mqttDiscoveryPublished = false;
+
 inline String mqttTopic(const char* component, const char* objId){
     // ex: homeassistant/sensor/irrpro_hs3/temperature1
     String s;
@@ -61,6 +63,13 @@ inline String mqttTopicNode(){
     return s;
 }
 
+inline String mqttPayloadFloat(float value){
+    if(!isfinite(value)) return "unknown";
+    char buf[24];
+    snprintf(buf, sizeof(buf), "%.2f", value);
+    return String(buf);
+}
+
 // ── Publication d'un message "config" retained
 //
 // CORRECTIF CRITIQUE (entités absentes de Home Assistant) :
@@ -77,6 +86,7 @@ inline String mqttTopicNode(){
 inline void mqttPublishConfig(const char* component, const char* objId, const String& payload){
     if(!mqttConnected) return;
     String topic = mqttTopic(component, objId) + "/config";
+    Serial.printf("[MQTT] discovery -> %s\n", topic.c_str());
     // qos 0, retain true
     mqttClient.publish(topic.c_str(), 0, true, payload.c_str(), payload.length());
 }
@@ -122,11 +132,11 @@ inline void mqttPublishDiscovery(){
     };
     for(size_t i=0;i<sizeof(defs)/sizeof(defs[0]);i++){
         StaticJsonDocument<512> doc;
-        // CORRECTIF (dépréciation HA 2026.4) : "object_id" pour fixer l'entity_id
-        // est déprécié par Home Assistant ; le remplacement officiel est
-        // "default_entity_id" avec le préfixe de plateforme inclus (ex: "sensor.xxx").
+        // Payload minimal et largement compatible avec Home Assistant.
+        // On évite les champs plus controversés comme default_entity_id et on
+        // garde uniquement les clés reconnues de façon stable par l'intégration MQTT.
         doc["name"]           = defs[i].name;
-        doc["default_entity_id"] = "sensor." + String(sysConfig.mqttId) + "_" + defs[i].obj;
+        doc["object_id"]      = String(defs[i].obj);
         doc["unique_id"]      = String(sysConfig.mqttId) + "_" + defs[i].obj;
         doc["state_topic"]    = mqttTopic("sensor", defs[i].obj);
         doc["availability_topic"] = nodeTopic + "/availability";
@@ -150,7 +160,7 @@ inline void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_today",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — litres aujourd'hui";
-            doc["default_entity_id"] = "sensor." + String(sysConfig.mqttId) + "_" + oid;
+            doc["object_id"]      = String(oid);
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
             doc["state_topic"]    = mqttTopic("sensor", oid);
             doc["availability_topic"] = nodeTopic + "/availability";
@@ -168,7 +178,7 @@ inline void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_total",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — litres total";
-            doc["default_entity_id"] = "sensor." + String(sysConfig.mqttId) + "_" + oid;
+            doc["object_id"]      = String(oid);
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
             doc["state_topic"]    = mqttTopic("sensor", oid);
             doc["availability_topic"] = nodeTopic + "/availability";
@@ -186,7 +196,7 @@ inline void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — état";
-            doc["default_entity_id"] = "binary_sensor." + String(sysConfig.mqttId) + "_" + oid + "_state";
+            doc["object_id"]      = String(oid) + "_state";
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_state";
             doc["state_topic"]    = mqttTopic("binary_sensor", oid);
             doc["availability_topic"] = nodeTopic + "/availability";
@@ -203,7 +213,7 @@ inline void mqttPublishDiscovery(){
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
             StaticJsonDocument<512> doc;
             doc["name"]           = String(vname) + " — commande";
-            doc["default_entity_id"] = "switch." + String(sysConfig.mqttId) + "_" + oid + "_switch";
+            doc["object_id"]      = String(oid) + "_switch";
             doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_switch";
             doc["state_topic"]    = mqttTopic("switch", oid);
             doc["command_topic"]  = mqttTopic("switch", oid) + "/set";
@@ -235,8 +245,8 @@ inline void mqttPublishState(){
         String topic = mqttTopic(comp, oid);
         mqttClient.publish(topic.c_str(), 0, true, payload.c_str(), payload.length());
     };
-    pub("sensor","temperature1", String(temperature1,2));
-    pub("sensor","temperature_remote", String(temperatureRemote,2));
+    pub("sensor","temperature1", mqttPayloadFloat(temperature1));
+    pub("sensor","temperature_remote", mqttPayloadFloat(temperatureRemote));
     pub("sensor","pulse_total", String((unsigned long)totalPulses));
     pub("sensor","litres_total", String(litresTotal,2));
     // CORRECTIF : flow_lpm est désormais calculé via computeFlowLpm(), la même
@@ -262,10 +272,65 @@ inline void mqttPublishState(){
     }
 }
 
-// ── Handler des commandes switch venues de HA
+// ── Handler des commandes switch venues de HA + récupération des retained
 inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     String t(topic);
     String p(payload, len);
+
+#ifdef CONS_MQTT_ONLY
+    // ── Phase de récupération au boot : fenêtre de 3s après connexion MQTT.
+    // On lit les valeurs retained publiées lors de la session précédente et on
+    // met à jour la RAM si MQTT > NVS (un compteur ne peut que progresser).
+    // On ne traite pas comme commande switch pour ne pas interférer.
+    if(!mqttRecoveryDone){
+        String sensorBase = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/";
+        if(t.startsWith(sensorBase)){
+            String objId = t.substring(sensorBase.length());
+            float val = p.toFloat();
+            if(objId == "pulse_total"){
+                // pulse_total est publié en pulses bruts (entier)
+                unsigned long mqttPulses = (unsigned long)(val > 0 ? val : 0);
+                if(mqttPulses > persistedPulseCount){
+                    char b[80]; snprintf(b,sizeof(b),
+                        "[RECOVERY] pulse_total: NVS=%lu < MQTT=%lu — restauré",
+                        persistedPulseCount, mqttPulses);
+                    logSys(b);
+                    persistedPulseCount = mqttPulses;
+                    pulseSave();
+                }
+            } else {
+                // valve_N_litres_today ou valve_N_litres_total (publiés en litres)
+                int v = -1;
+                if(sscanf(objId.c_str(), "valve_%d_litres_total", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                    unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                    if(mqttPulses > valveCons[v].pulsesTotal){
+                        char b[80]; snprintf(b,sizeof(b),
+                            "[RECOVERY] V%d litres_total: NVS=%lu < MQTT=%lu pulses — restauré",
+                            v+1, valveCons[v].pulsesTotal, mqttPulses);
+                        logSys(b);
+                        valveCons[v].pulsesTotal = mqttPulses;
+                        valveConsMarkDirty(v);
+                    }
+                } else if(sscanf(objId.c_str(), "valve_%d_litres_today", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                    unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                    // Ne restaure todayPulses que si on est bien sur le même jour
+                    // (sinon une valeur d'hier remplacerait un zéro légitime).
+                    uint16_t today = todayYMD();
+                    if(today != 0 && valveCons[v].todayYmd == today && mqttPulses > valveCons[v].todayPulses){
+                        char b[80]; snprintf(b,sizeof(b),
+                            "[RECOVERY] V%d litres_today: NVS=%u < MQTT=%lu pulses — restauré",
+                            v+1, valveCons[v].todayPulses, mqttPulses);
+                        logSys(b);
+                        valveCons[v].todayPulses = (uint32_t)mqttPulses;
+                        valveConsMarkDirty(v);
+                    }
+                }
+            }
+            return; // message de récupération traité — pas une commande switch
+        }
+    }
+#endif
+
     // topic attendu : <prefix>/switch/<mqttId>/valve_N/set
     int idxSlash = t.lastIndexOf('/');
     if(idxSlash < 0) return;
@@ -291,27 +356,40 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
 
 inline void onMqttConnect(bool sessionPresent){
     mqttConnected = true;
+    mqttDiscoveryPublished = false;
     Serial.println("[MQTT] Connecté");
-    // CORRECTIF : le topic de souscription doit être construit EXACTEMENT
-    // comme le command_topic publié dans mqttPublishDiscovery(), c'est-à-dire
-    // mqttTopic("switch", oid) + "/set" = <prefix>/switch/<mqttId>/<oid>/set.
-    // L'ancienne version utilisait mqttTopicNode() + "/switch/+/set"
-    // (= <prefix>/<mqttId>/switch/+/set), un chemin différent qui ne
-    // correspondait à aucun message réellement publié par HA -> les
-    // commandes de Home Assistant n'arrivaient jamais à l'ESP32.
     String cmdTopic = String(sysConfig.mqttPrefix) + "/switch/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(cmdTopic.c_str(), 0);
     Serial.print("[MQTT] Abonné à: "); Serial.println(cmdTopic);
     // Publication disponibilité
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
-    // Discovery + état initial
+#ifdef CONS_MQTT_ONLY
+    // ── Lancer la récupération des valeurs retained ────────────────────────────
+    // On s'abonne à <prefix>/sensor/<mqttId>/+ pour recevoir TOUTES les
+    // valeurs retained publiées lors de la session précédente. Le broker
+    // les livre immédiatement sur chaque topic connu. mqttHandleMessage()
+    // s'en empare pendant la fenêtre mqttRecoveryDone==false.
+    // Après 3s (dans mqttLoop()), la fenêtre se ferme, on se désabonne et
+    // on flush les valeurs restaurées en NVS.
+    String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
+    mqttClient.subscribe(recovPattern.c_str(), 0);
+    mqttRecoveryDone    = false;
+    mqttRecoveryStartMs = millis();
+    Serial.print("[MQTT] Recovery MQTT activée, abonné à: "); Serial.println(recovPattern);
+    logSys("[CONS] Recovery MQTT démarrée (fenêtre 3s)");
+    // NB : on NE publie pas discovery ni state ici — on attend la fin de la
+    // fenêtre de récupération (mqttLoop) pour publier l'état fusionné juste.
+#else
+    // Discovery + état initial (mode normal)
     mqttPublishDiscovery();
     mqttPublishState();
+#endif
 }
 
 inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     mqttConnected = false;
+    mqttDiscoveryPublished = false;
     // Libellé lisible de la raison — pratique quand le broker refuse la
     // connexion (auth invalide, version protocole incompatible, etc.) ou
     // quand l'ESP n'arrive simplement pas à joindre le port TCP.
@@ -381,6 +459,7 @@ inline void mqttSetup(){
         }
     }
 
+    mqttClient.setClientId(sysConfig.mqttId);
     if(strlen(sysConfig.mqttUser)>0){
         mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
     }
@@ -444,9 +523,42 @@ inline void mqttLoop(){
     }
     if(mqttConnected){
         unsigned long now = millis();
+        if(!mqttDiscoveryPublished){
+            mqttDiscoveryPublished = true;
+            Serial.println("[MQTT] publication discovery forcée après connexion");
+            mqttPublishDiscovery();
+            mqttPublishState();
+            lastMqttPubMs = now;
+        }
+#ifdef CONS_MQTT_ONLY
+        // ── Fin de fenêtre de récupération (3 s après connexion) ─────────────
+        // On ferme la fenêtre, on flush les valeurs restaurées en NVS, on
+        // se désabonne du pattern sensor (pour ne plus recevoir les états
+        // futurs comme des retained de récupération), puis on publie
+        // la discovery et l'état fusionné final.
+        if(!mqttRecoveryDone && (now - mqttRecoveryStartMs >= 3000UL)){
+            mqttRecoveryDone = true;
+            // Désabonnement du pattern de recovery
+            String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
+            mqttClient.unsubscribe(recovPattern.c_str());
+            // Flush NVS des valeurs éventuellement restaurées
+            valveConsFlushDirty();
+            logSys("[CONS] Recovery MQTT terminée — NVS mis à jour");
+            // Publication discovery + état fusionné après récupération
+            mqttPublishDiscovery();
+            mqttPublishState();
+            lastMqttPubMs = now;
+        }
+#endif
         if(now - lastMqttPubMs > MQTT_PUB_INTERVAL_MS){
             lastMqttPubMs = now;
+#ifdef CONS_MQTT_ONLY
+            // En mode recovery, ne pas publier l'état avant la fin de la fenêtre
+            // (on ne voudrait pas retained avec des valeurs partielles sur le broker)
+            if(mqttRecoveryDone) mqttPublishState();
+#else
             mqttPublishState();
+#endif
         }
     }
 }

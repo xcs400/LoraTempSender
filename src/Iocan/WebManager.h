@@ -640,15 +640,13 @@ inline void webSetup(){
     // ── Reset POST /api/reset
     server.on("/api/reset", HTTP_POST, [](AsyncWebServerRequest* req){
         jsonResp(req,"{\"ok\":true}");
-        logSys("Redémarrage demandé via Web");
-        delay(300);
-        ESP.restart();
+        safeRestart("Redémarrage demandé via Web");
     });
 
     // ── Compat legacy /reset GET
     server.on("/reset", HTTP_GET, [](AsyncWebServerRequest* req){
         req->send(200,"text/plain","Redémarrage...");
-        delay(300); ESP.restart();
+        safeRestart("Redémarrage legacy /reset");
     });
 
     // ── État NVS (utilisé / libre / total) GET /api/nvs/status
