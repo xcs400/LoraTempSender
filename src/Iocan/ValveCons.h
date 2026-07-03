@@ -221,7 +221,7 @@ inline bool calibStart(uint16_t durationSec){
     for(int i=0;i<VANNE_COUNT;i++){
         if(valves[i].isOpen){
             snprintf(calibState.failReason, sizeof(calibState.failReason),
-                      "Vanne %d déjà ouverte — fermez tout avant calibration", i+1);
+                      "V%d déjà ouverte — fermez tout avant calibration", i);
             return false;
         }
     }

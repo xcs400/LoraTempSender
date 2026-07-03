@@ -39,7 +39,7 @@ inline void configLoad(){
     // Noms vannes
     for(int i=0;i<VANNE_COUNT;i++){
         char key[12]; snprintf(key,12,"vname%d",i);
-        char def[24]; snprintf(def,24,"Vanne %d",i+1);
+        char def[24]; snprintf(def,24,"V%d",i);
         prefs.getString(key, valves[i].name, 24);
         if(strlen(valves[i].name)==0) strlcpy(valves[i].name,def,24);
     }

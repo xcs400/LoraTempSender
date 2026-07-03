@@ -323,7 +323,7 @@ struct Valve {
     unsigned long lastUpdateMs = 0;
     Schedule  schedules[MAX_PROGRAMS];
 
-    Valve(){ snprintf(name,24,"Vanne X"); }
+    Valve(){ snprintf(name,24,"V0"); }
 };
 
 // --- Journal ---
@@ -695,7 +695,7 @@ void configLoad(){
     // Noms vannes
     for(int i=0;i<VANNE_COUNT;i++){
         char key[12]; snprintf(key,12,"vname%d",i);
-        char def[24]; snprintf(def,24,"Vanne %d",i+1);
+        char def[24]; snprintf(def,24,"V%d",i);
         prefs.getString(key, valves[i].name, 24);
         if(strlen(valves[i].name)==0) strlcpy(valves[i].name,def,24);
     }
@@ -1275,7 +1275,7 @@ bool calibStart(uint16_t durationSec){
     for(int i=0;i<VANNE_COUNT;i++){
         if(valves[i].isOpen){
             snprintf(calibState.failReason, sizeof(calibState.failReason),
-                      "Vanne %d déjà ouverte — fermez tout avant calibration", i+1);
+                      "V%d déjà ouverte — fermez tout avant calibration", i);
             return false;
         }
     }
@@ -1907,7 +1907,7 @@ static void mqttPublishDiscovery(){
     // ── Une entité par vanne : sensor (litres today+total) + binary_sensor + switch
     for(int v=0;v<VANNE_COUNT;v++){
         char objBuf[24];
-        const char* vname = (valves[v].name[0] ? valves[v].name : (snprintf(objBuf,sizeof(objBuf),"Vanne %d",v+1), objBuf));
+        const char* vname = (valves[v].name[0] ? valves[v].name : (snprintf(objBuf,sizeof(objBuf),"V%d",v), objBuf));
 
         // Sensor litres_today
         {

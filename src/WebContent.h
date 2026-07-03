@@ -1195,7 +1195,7 @@ function refreshCalibration(){
         const lpm = (c > 0 && window.PULSES_PER_LITRE) ? (c * 60 / window.PULSES_PER_LITRE).toFixed(2) : '—';
         const cdisp = c > 0 ? c.toFixed(3) : '<span style="color:var(--text-muted)">non calibré</span>';
         return `<tr>
-          <td><strong>V${i+1}</strong></td>
+          <td><strong>V${i}</strong></td>
           <td style="text-align:right;font-variant-numeric:tabular-nums">${cdisp}</td>
           <td style="text-align:right;color:var(--blue);font-weight:600">${lpm}</td>
         </tr>`;
@@ -1361,8 +1361,8 @@ function renderValveCards() {
     return `
     <div class="valve-card ${cardCls}" id="vc-${i}" style="--vcol:var(--vcol${i}); --vcol-fg:#fff">
       <div class="vc-header">
-        <span class="vc-name">${v.name||'Vanne '+(i+1)}</span>
-        <span class="vc-num" style="background:var(--vcol);color:var(--vcol-fg)">V${i+1}</span>
+        <span class="vc-name">${v.name||'V'+i}</span>
+        <span class="vc-num" style="background:var(--vcol);color:var(--vcol-fg)">V${i}</span>
       </div>
       ${badgeHtml}
       <div class="vc-remaining">${isOpen ? fmtSec(v.remainingSec) : '—'}</div>
@@ -1406,7 +1406,7 @@ function closeAll() {
 }
 function showForceModal(idx) {
   forceValveIdx = idx;
-  const name = (valves[idx]&&valves[idx].name) || 'V'+(idx+1);
+  const name = (valves[idx]&&valves[idx].name) || 'V'+idx;
   document.getElementById('force-modal-name').textContent = name;
   document.getElementById('force-duration').value = sysConfig.manualForceSec || 1800;
   document.getElementById('force-modal').classList.add('open');
@@ -1783,8 +1783,8 @@ function loadConfig() {
     // Noms vannes
     const grid = document.getElementById('valve-names-grid');
     grid.innerHTML = (cfg.valveNames||[]).map((n,i)=>
-      `<div class="form-group"><label>Vanne ${i+1}</label>
-       <input type="text" id="vname-${i}" value="${n||'Vanne '+(i+1)}"/></div>`
+      `<div class="form-group"><label>V${i}</label>
+       <input type="text" id="vname-${i}" value="${n||'V'+i}"/></div>`
     ).join('');
   });
   // Charger aussi l'état NVS pendant qu'on est sur la page config
@@ -1991,7 +1991,7 @@ function saveConfig() {
                    ? sysConfig.valveNames.length : VALVE_COUNT_FALLBACK;
   for(let i=0;i<nameCount;i++){
     const el=document.getElementById('vname-'+i);
-    valveNames.push(el?el.value:'Vanne '+(i+1));
+    valveNames.push(el?el.value:'V'+i);
   }
   const body = {
     ssid: document.getElementById('cfg-ssid').value,
@@ -2066,8 +2066,8 @@ function refreshConsumption(){
         ? v.history.slice().reverse().map(h=>`<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:4px;background:var(--surface2);color:var(--text);font-size:.72rem">${fmtYMD(h.ymd)}: <strong>${(h.litres||0).toFixed(1)} L</strong></span>`).join('')
         : '<span style="color:var(--text-muted)">—</span>';
       return `<tr>
-        <td><strong>V${v.valve+1}</strong></td>
-        <td>${v.name||'Vanne '+(v.valve+1)}</td>
+        <td><strong>V${v.valve}</strong></td>
+        <td>${v.name||'V'+v.valve}</td>
         <td style="color:var(--blue);font-weight:600">${(v.litresToday||0).toFixed(2)}</td>
         <td>${(v.litresTotal||0).toFixed(2)}</td>
         <td>${detail}</td>
@@ -2079,8 +2079,8 @@ function refreshConsumption(){
       const today  = v.litresToday  || 0;
       const total  = v.litresTotal  || 0;
       return `<tr>
-        <td><strong>V${v.valve+1}</strong></td>
-        <td>${v.name||'Vanne '+(v.valve+1)}</td>
+        <td><strong>V${v.valve}</strong></td>
+        <td>${v.name||'V'+v.valve}</td>
         <td style="text-align:right;color:${today>0?'var(--blue)':'var(--text-muted)'};font-weight:600">${today.toFixed(2)} L</td>
         <td style="text-align:right">${total.toFixed(2)} L</td>
       </tr>`;
@@ -2103,7 +2103,7 @@ function buildSchedValveSelect() {
   // status/config qui peuple le tableau valves[].
   const count = (valves && valves.length) ? valves.length : VALVE_COUNT_FALLBACK;
   const prev = sel.value;
-  sel.innerHTML = Array.from({length:count},(_,i)=>`<option value="${i}">${(valves[i]&&valves[i].name)?('V'+(i+1)+' — '+valves[i].name):('Vanne '+(i+1))}</option>`).join('');
+  sel.innerHTML = Array.from({length:count},(_,i)=>`<option value="${i}">${(valves[i]&&valves[i].name)?('V'+i+' — '+valves[i].name):('V'+i)}</option>`).join('');
   // restore previous selection if still valid
   if(prev !== undefined && prev !== null && prev !== ''){
     const opt = sel.querySelector(`option[value="${prev}"]`);

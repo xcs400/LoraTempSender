@@ -66,8 +66,8 @@ static const int FORCE_INPUT_PINS[INPUTCOUNT] = { 47 ,  //PB0
 
 // === Compteur d'impulsions (flow meter) connecté sur FORCE_INPUT_PINS[7]
 #define PULSE_DEBOUNCE_US 2000UL  // 2ms debounce
-#define PULSES_PER_LITRE 4.0f     // constante par défaut (ajuster selon capteur)
-
+#define PULSES_PER_LITRE 741.2f   //  sans calibre theorique:660.0f     // constante par défaut (ajuster selon capteur) 
+  
 /******************************************************************************
  * Wi-Fi LoRa 32 (ESP32) - PINOUT
  * Source : schéma "Wi-Fi LoRa 32 Pin Map"
@@ -265,7 +265,7 @@ struct Valve {
     unsigned long lastUpdateMs = 0;
     Schedule  schedules[MAX_PROGRAMS];
 
-    Valve(){ snprintf(name,24,"Vanne X"); }
+    Valve(){ snprintf(name,24,"V0"); }
 };
 
 // --- Journal ---

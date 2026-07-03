@@ -153,7 +153,7 @@ inline void mqttPublishDiscovery(){
     // ── Une entité par vanne : sensor (litres today+total) + binary_sensor + switch
     for(int v=0;v<VANNE_COUNT;v++){
         char objBuf[24];
-        const char* vname = (valves[v].name[0] ? valves[v].name : (snprintf(objBuf,sizeof(objBuf),"Vanne %d",v+1), objBuf));
+        const char* vname = (valves[v].name[0] ? valves[v].name : (snprintf(objBuf,sizeof(objBuf),"V%d",v), objBuf));
 
         // Sensor litres_today
         {
