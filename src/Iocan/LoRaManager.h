@@ -24,18 +24,18 @@ inline String loraBuildStatus(){
     StaticJsonDocument<1024> doc;
     doc["model"]   = "IRRIGATION";
     doc["id"]   = sysConfig.nodeId;
-    doc["type"] = "STATUS";
-  //  doc["uptime"] = millis()/1000;
+    doc["tempLocal"] = temperature1;      // température locale (DS18B20)
+    doc["uptime"] = millis()/1000;
   //  doc["rssi"]   = loraRssi;
     doc["alarm"]  = 0;
-  //  JsonArray vannesArr   = doc.createNestedArray("vannes");
-  //  JsonArray remArr      = doc.createNestedArray("remaining");
-  //  JsonArray srcArr      = doc.createNestedArray("source");
- //   for(int i=0;i<VANNE_COUNT;i++){
- //       vannesArr.add(valves[i].isOpen ? 1 : 0);
- //       remArr.add(valves[i].remainingSec);
- //       srcArr.add(srcStr(valves[i].source));
- //   }
+    JsonArray vannesArr   = doc.createNestedArray("vannes");
+    JsonArray remArr      = doc.createNestedArray("remaining");
+    JsonArray srcArr      = doc.createNestedArray("source");
+    for(int i=0;i<VANNE_COUNT;i++){
+        vannesArr.add(valves[i].isOpen ? 1 : 0);
+        remArr.add(valves[i].remainingSec);
+        srcArr.add(srcStr(valves[i].source));
+    }
     String out; serializeJson(doc,out);
     return out;
 }
