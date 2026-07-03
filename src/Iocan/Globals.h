@@ -175,8 +175,9 @@ const int BUTTON_PIN = 0;
 #define PRIO_NONE   99
 
 // Débitmètre lissé (voir FlowMeter.h)
-#define FLOW_WINDOW_MS  30000UL   // fenêtre de calcul = 30 secondes
-#define FLOW_SAMPLES    32        // 32 échantillons × 1s = 32s d'historique
+#define FLOW_WINDOW_MS  4000UL    // fenêtre de calcul = 4 secondes
+#define FLOW_SAMPLES    4         // 4 échantillons × 1s = 4s d'historique
+#define OLED_SCREENSAVER_TIMEOUT_MS 60000UL // 1 minutes avant veille OLED
 
 // Consommation par vanne (voir ValveCons.h)
 #define CONS_HISTORY_DAYS 14
@@ -417,7 +418,10 @@ extern bool  temp1Valid;
 // OLED
 extern unsigned long lastOledMs;
 extern int oledPage;
+extern int oledPreferredPage;
 extern unsigned long lastButtonPress;
+extern unsigned long oledLastActivityMs;
+extern unsigned long oledFlowPageStartPulseCount;
 
 // WDT
 extern unsigned long lastWdtMs;

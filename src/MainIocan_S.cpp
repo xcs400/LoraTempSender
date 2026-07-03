@@ -238,11 +238,18 @@ void setup(){
 // ============================================================
 
 void loop(){
+    unsigned long now = millis();
     // ── Bouton pour changer de page OLED
     if (digitalRead(BUTTON_PIN) == LOW) {
-        if (millis() - lastButtonPress > 300) { // debounce
-            oledPage = (oledPage + 1) % 4; // add dedicated IO page
-            lastButtonPress = millis();
+        if (now - lastButtonPress > 300) { // debounce
+            if (oledPage == 5) {
+                oledPage = oledPreferredPage;
+            } else {
+                oledPreferredPage = (oledPreferredPage + 1) % 5;
+                oledPage = oledPreferredPage;
+            }
+            lastButtonPress = now;
+            oledLastActivityMs = now;
             lastOledMs = 0; // force refresh
         }
     }
@@ -374,9 +381,9 @@ void loop(){
     oledUpdate();
 
     // ── Watchdog reset
-    unsigned long now = millis();
-    if(now - lastWdtMs >= 5000){
-        lastWdtMs = now;
+    unsigned long nowLoop = millis();
+    if(nowLoop - lastWdtMs >= 5000){
+        lastWdtMs = nowLoop;
         esp_task_wdt_reset();
     }
 

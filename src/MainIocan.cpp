@@ -2763,6 +2763,18 @@ void oledUpdate(){
     if(now - lastOledMs < 2000 && lastOledMs != 0) return;
     lastOledMs = now;
 
+    unsigned long currentTotalPulses = persistedPulseCount;
+    noInterrupts(); currentTotalPulses += pulseCount; interrupts();
+
+    bool flowActive = computeFlowLpm(0) > 0.01f;
+    if(flowActive && (oledPage != 4 || oledFlowPageStartPulseCount == 0)){
+        oledPage = 4;
+        oledLastActivityMs = now;
+        oledFlowPageStartPulseCount = currentTotalPulses;
+    } else if(!flowActive && now - oledLastActivityMs > OLED_SCREENSAVER_TIMEOUT_MS && oledPage != 5){
+        oledPage = 5;
+    }
+
     display.clear();
     display.setFont(ArialMT_Plain_10);
     display.setTextAlignment(TEXT_ALIGN_LEFT);
@@ -2873,6 +2885,34 @@ void oledUpdate(){
         noInterrupts(); cnt = pulseCount; interrupts();
         float litres = (float)cnt / PULSES_PER_LITRE;
         display.drawString(0, 48, String("Pulse:") + String(cnt) + " L:" + String(litres,3));
+    } else if (oledPage == 4) {
+        display.setTextAlignment(TEXT_ALIGN_CENTER);
+        display.setFont(ArialMT_Plain_24);
+        float flowLpm = computeFlowLpm(0);
+        display.drawString(64, 2, String(flowLpm, 1));
+
+        display.setFont(ArialMT_Plain_16);
+        float totalLitres = (float)(currentTotalPulses - oledFlowPageStartPulseCount) / PULSES_PER_LITRE;
+        display.drawString(64, 30, String(totalLitres, 1) + " L");
+
+        display.setFont(ArialMT_Plain_10);
+        display.drawString(64, 52, "L/min");
+    //    int openCount = 0;
+    //    for(int i=0;i<VANNE_COUNT;i++) if(valves[i].isOpen) openCount++;
+   //     display.drawString(0, 54, "Vannes ouvertes: " + String(openCount));
+    } else if (oledPage == 5) {
+        display.setFont(ArialMT_Plain_10);
+        display.drawString(0, 0, "Screen saver");
+        for(int i=0;i<8;i++){
+            int x1 = random(0, 128);
+            int y1 = random(0, 64);
+            int x2 = random(0, 128);
+            int y2 = random(0, 64);
+            display.drawLine(x1, y1, x2, y2);
+        }
+        display.drawCircle(64, 32, 10);
+        display.drawRect(random(20, 90), random(10, 45), 18 + random(0, 20), 12 + random(0, 20));
+        display.drawString(0, 52, "alive");
     }
     display.display();
 }
@@ -3344,11 +3384,18 @@ void setup(){
 // ============================================================
 
 void loop(){
+    unsigned long now = millis();
     // ── Bouton pour changer de page OLED
     if (digitalRead(BUTTON_PIN) == LOW) {
-        if (millis() - lastButtonPress > 300) { // debounce
-            oledPage = (oledPage + 1) % 4; // add dedicated IO page
-            lastButtonPress = millis();
+        if (now - lastButtonPress > 300) { // debounce
+            if (oledPage == 5) {
+                oledPage = oledPreferredPage;
+            } else {
+                oledPreferredPage = (oledPreferredPage + 1) % 5;
+                oledPage = oledPreferredPage;
+            }
+            lastButtonPress = now;
+            oledLastActivityMs = now;
             lastOledMs = 0; // force refresh
         }
     }

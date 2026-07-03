@@ -13,6 +13,20 @@ inline void oledUpdate(){
     if(now - lastOledMs < 2000 && lastOledMs != 0) return;
     lastOledMs = now;
 
+    unsigned long currentTotalPulses = persistedPulseCount;
+    noInterrupts(); currentTotalPulses += pulseCount; interrupts();
+
+    bool flowActive = computeFlowLpm(0) > 0.01f;
+    if(flowActive && (oledPage != 4 || oledFlowPageStartPulseCount == 0)){
+        oledPage = 4;
+        oledPreferredPage = 4;
+        oledLastActivityMs = now;
+        oledFlowPageStartPulseCount = currentTotalPulses;
+    } else if(!flowActive && now - oledLastActivityMs > OLED_SCREENSAVER_TIMEOUT_MS && oledPage != 5){
+        oledPage = 5;
+    }
+
+
     display.clear();
     display.setFont(ArialMT_Plain_10);
     display.setTextAlignment(TEXT_ALIGN_LEFT);
@@ -123,6 +137,32 @@ inline void oledUpdate(){
         noInterrupts(); cnt = pulseCount; interrupts();
         float litres = (float)cnt / PULSES_PER_LITRE;
         display.drawString(0, 48, String("Pulse:") + String(cnt) + " L:" + String(litres,3));
+    } else if (oledPage == 4) {
+        display.setTextAlignment(TEXT_ALIGN_CENTER);
+
+        display.setFont(ArialMT_Plain_24);
+        float flowLpm = computeFlowLpm(0);
+        display.drawString(64, 2, String(flowLpm, 1));
+
+        display.setFont(ArialMT_Plain_10);
+        display.drawString(64, 32, "L/min");
+
+        display.setFont(ArialMT_Plain_16);
+        display.drawString(64, 46, String((float)(currentTotalPulses - oledFlowPageStartPulseCount) / PULSES_PER_LITRE, 1) + " L");
+
+    } else if (oledPage == 5) {
+        display.setFont(ArialMT_Plain_10);
+
+        for(int i=0;i<4;i++){
+            int x1 = random(0, 128);
+            int y1 = random(0, 64);
+            int x2 = random(0, 128);
+            int y2 = random(0, 64);
+            display.drawLine(x1, y1, x2, y2);
+        }
+    
+    //    display.drawRect(random(20, 90), random(10, 45), 18 + random(0, 20), 12 + random(0, 20));
+    
     }
     display.display();
 }

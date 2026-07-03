@@ -99,7 +99,10 @@ bool temp1Valid = false;
 // OLED
 unsigned long lastOledMs = 0;
 int oledPage = 2; // 0=IP, 1=Temp, 2=Vanne (default)
+int oledPreferredPage = 2;
 unsigned long lastButtonPress = 0;
+unsigned long oledLastActivityMs = 0;
+unsigned long oledFlowPageStartPulseCount = 0;
 
 // WDT
 unsigned long lastWdtMs = 0;
