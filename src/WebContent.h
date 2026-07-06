@@ -145,12 +145,37 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 .badge-open{background:var(--green-dim);color:var(--green)}
 .badge-forced{background:var(--orange-dim);color:var(--orange)}
 .badge-alarm{background:var(--red-dim);color:var(--red)}
+/* Petit indicateur "débit calibré" affiché à côté du badge d'état.
+   Toujours visible (vanne ouverte ou fermée) pour rappeler la capacité
+   hydraulique de la ligne, indépendamment de l'état courant. */
+.vc-flow{
+  display:inline-block;font-size:.68rem;padding:2px 8px;border-radius:20px;
+  background:var(--blue-dim);color:var(--blue);font-weight:600;
+  font-variant-numeric:tabular-nums;margin-left:6px;vertical-align:middle;
+  border:1px solid color-mix(in srgb, var(--blue) 40%, transparent);
+}
+.vc-flow.uncal{background:var(--surface2);color:var(--text-muted);border-color:var(--border);font-weight:500}
 
 .valve-card .vc-remaining{font-size:1.4rem;font-weight:700;font-variant-numeric:tabular-nums;min-height:34px;color:var(--text)}
 /* make remaining time red when valve is open/forced/alarm */
 .valve-card.open .vc-remaining,
 .valve-card.forced .vc-remaining,
 .valve-card.alarm .vc-remaining{ color: var(--red); }
+/* ── Volume restant ─────────────────────────────────────────
+   Affiché sous le temps restant quand une vanne est ouverte.
+   Couleur bleue pour différencier visuellement du temps (rouge).
+   Calcul côté client : flowCoeff[i] (pulses/s) × remainingSec /
+   pulsesPerLitre = litres restants. Si pas de calibration, on retombe
+   sur l'estimation "1.0 pulse/s" (= 1.0 / PULSES_PER_LITRE L/s) ce qui
+   correspond au comportement par défaut avant toute calibration. */
+.valve-card .vc-remaining-l{
+  font-size:1rem;font-weight:600;font-variant-numeric:tabular-nums;
+  color:var(--blue);margin-top:2px;min-height:18px;
+}
+.valve-card .vc-remaining-l .vc-remaining-l-label{
+  font-size:.7rem;font-weight:500;color:var(--text-muted);
+  margin-right:6px;text-transform:uppercase;letter-spacing:.4px;
+}
 .valve-card .vc-meta{font-size:.75rem;color:var(--text-muted);margin:6px 0 14px}
 .valve-card .vc-actions{display:flex;gap:8px;flex-wrap:wrap}
 
@@ -951,16 +976,30 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
         <input type="time" id="sched-time" value="06:00"/>
       </div>
       <div class="form-group">
-        <label>Durée (s)</label>
-        <input type="number" id="sched-dur" value="900" min="30"/>
-      </div>
-      <div class="form-group">
         <label>Mode calendrier</label>
         <select id="sched-calmode" onchange="updateSchedCalMode()">
           <option value="0">Hebdomadaire</option>
           <option value="1">Intervalle</option>
           <option value="2">Saisonnier</option>
         </select>
+      </div>
+      <div class="form-group" style="grid-column: 1 / -1">
+        <label>Unité de la durée</label>
+        <div style="display:flex;gap:6px;flex-wrap:wrap">
+          <button type="button" class="day-btn sel" id="sched-unit-sec" onclick="setSchedUnit('sec')">⏱ Durée (s)</button>
+          <button type="button" class="day-btn" id="sched-unit-l"   onclick="setSchedUnit('L')">💧 Volume (L)</button>
+        </div>
+        <div id="sched-dur-row" class="form-group" style="margin-top:8px">
+          <label>Durée (s)</label>
+          <input type="number" id="sched-dur" value="900" min="30" oninput="syncSchedFromSec()"/>
+        </div>
+        <div id="sched-vol-row" class="form-group" style="margin-top:8px;display:none">
+          <label>Volume (L)</label>
+          <input type="number" id="sched-vol" value="20" min="0.1" step="0.1" oninput="syncSchedFromVol()"/>
+          <div id="sched-vol-hint" style="font-size:.72rem;color:var(--text-muted);margin-top:4px">
+            Conversion basée sur le coefficient de calibration de la vanne.
+          </div>
+        </div>
       </div>
     </div>
     <!-- Jours semaine (mode hebdo) -->
@@ -1227,11 +1266,27 @@ function refreshCalibration(){
     }
 
     // Tableau des coefficients — on lit depuis /api/consumption si dispo,
-    // sinon on prend d. flowCoeffs s'il est dans le payload
+    // sinon on prend d. flowCoeffs s'il est dans le payload.
+    // pulsesPerLitre est désormais fourni par le firmware dans le même
+    // payload (cf. calibStatusJson() côté C++) pour éviter tout
+    // désynchronisation entre la constante embarquée et la valeur utilisée
+    // par l'UI. On retombe sur la valeur par défaut (741.2, alignée sur
+    // PULSES_PER_LITRE dans Globals.h) si jamais le firmware ne la fournit
+    // pas (rétro-compat).
     const tbody = document.getElementById('calib-coeff-body');
     if(d.flowCoeffs && Array.isArray(d.flowCoeffs)){
+      // Mémorise les coeffs pour que le modal "Nouveau programme" puisse
+      // convertir une saisie en litres en secondes (sans avoir à faire un
+      // nouvel appel API). On stocke une copie pour éviter toute
+      // référence croisée avec le DOM.
+      window.__flowCoeffs = d.flowCoeffs.map(c => Number(c) || 0);
+      const ppl = (d.pulsesPerLitre && d.pulsesPerLitre > 0)
+                  ? d.pulsesPerLitre
+                  : (window.PULSES_PER_LITRE || 741.2);
+      // Mémorise pour les rafraîchissements successifs (debug / autres pages).
+      window.PULSES_PER_LITRE = ppl;
       tbody.innerHTML = d.flowCoeffs.map((c,i)=>{
-        const lpm = (c > 0 && window.PULSES_PER_LITRE) ? (c * 60 / window.PULSES_PER_LITRE).toFixed(2) : '—';
+        const lpm = (c > 0 && ppl > 0) ? (c * 60 / ppl).toFixed(2) : '—';
         const cdisp = c > 0 ? c.toFixed(3) : '<span style="color:var(--text-muted)">non calibré</span>';
         return `<tr>
           <td><strong>V${i}</strong></td>
@@ -1239,6 +1294,10 @@ function refreshCalibration(){
           <td style="text-align:right;color:var(--blue);font-weight:600">${lpm}</td>
         </tr>`;
       }).join('');
+      // Si le modal programme est ouvert, on doit aussi actualiser
+      // l'état "enabled" du toggle Volume pour la vanne courante
+      // (au cas où une nouvelle calibration vient de finir).
+      if(schedModalOpen) refreshSchedUnitAvailability();
     }
   });
 }
@@ -1390,13 +1449,52 @@ function renderValveCards() {
     const isOpen   = v.state === 1;
     const isForced = isOpen && (v.source === 'INPUT' || v.source === 'WEB');
     const cardCls  = isForced ? 'forced' : isOpen ? 'open' : '';
-    const badgeHtml = isForced
+    // Débit calibré (L/min) pour cette vanne, affiché à côté du badge
+    // d'état. Calcul identique à celui du tableau de calibration
+    // (refreshCalibration) : flowCoeff * 60 / pulsesPerLitre. Mis en
+    // cache par refreshCalibration() dans window.__flowCoeffs et
+    // window.PULSES_PER_LITRE. Si la vanne n'a jamais été calibrée,
+    // on affiche un libellé discret "non calibré" plutôt qu'une valeur
+    // inventée (cohérent avec le reste de l'UI).
+    // NOTE: doit être déclaré AVANT badgeHtml qui le référence —
+    // sinon "can't access lexical declaration ... before initialization".
+    const _fc = (window.__flowCoeffs && window.__flowCoeffs[i]) ? Number(window.__flowCoeffs[i]) : 0;
+    const _ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
+    const lpmHtml = (_fc > 0 && _ppl > 0)
+      ? `<span class="vc-flow" title="Débit calibré de la vanne">💧 ${(_fc * 60 / _ppl).toFixed(2)} L/min</span>`
+      : `<span class="vc-flow uncal" title="Cette vanne n'a pas encore été calibrée">— non calibré</span>`;
+    // Le badge L/min est accolé au badge d'état. Pour les vannes
+    // fermées : affichage "à côté du status fermé" (demande explicite).
+    // Pour les vannes ouvertes/forcées : idem, pour rappeler la capacité
+    // hydraulique de la ligne (utile à la lecture des litres restants).
+    const badgeHtml = (isForced
       ? `<span class="vc-badge badge-forced">⚡ Forcée (${v.source})</span>`
       : isOpen
         ? `<span class="vc-badge badge-open">● Ouverte (${v.source})</span>`
-        : `<span class="vc-badge badge-closed">◌ Fermée</span>`;
+        : `<span class="vc-badge badge-closed">◌ Fermée</span>`) + lpmHtml;
     const nextEv = getNextEventForValve(i);
     const nextHtml = nextEv ? ( (nextEv.sched && nextEv.sched.name ? (nextEv.sched.name+' — ') : '') + nextEv.text ) : '—';
+    // Volume restant = flowCoeff (pulses/s) × remainingSec / pulsesPerLitre
+    // flowCoeffs est mis en cache par refreshCalibration() dans window.__flowCoeffs
+    // (et pulsesPerLitre dans window.PULSES_PER_LITRE). Tant qu'aucune
+    // calibration n'a été faite, flowCoeff[i] = 0 (non significatif) — on
+    // NE montre PAS d'estimation trompeuse, on affiche "— L" jusqu'à la
+    // première calibration (cohérent avec la ligne "non calibré" du
+    // tableau de calibration). Cf. raisonnement dans refreshCalibration().
+    let remainingLitresHtml = '';
+    if(isOpen){
+      const fc = (window.__flowCoeffs && window.__flowCoeffs[i]) ? Number(window.__flowCoeffs[i]) : 0;
+      const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
+      if(fc > 0 && ppl > 0){
+        const l = (fc * (v.remainingSec || 0)) / ppl;
+        remainingLitresHtml = `<div class="vc-remaining-l"><span class="vc-remaining-l-label">💧 Restant</span>${l.toFixed(2)} L</div>`;
+      } else {
+        // Vanne ouverte mais pas (encore) calibrée : on affiche un libellé
+        // discret plutôt qu'une valeur inventée, pour rester honnête avec
+        // l'utilisateur. "calibrer" est cliquable vers la page calibration.
+        remainingLitresHtml = `<div class="vc-remaining-l" style="color:var(--text-muted);font-weight:500"><span class="vc-remaining-l-label">💧 Restant</span>— (non calibré)</div>`;
+      }
+    }
     return `
     <div class="valve-card ${cardCls}" id="vc-${i}" style="--vcol:var(--vcol${i}); --vcol-fg:#fff">
       <div class="vc-header">
@@ -1405,6 +1503,7 @@ function renderValveCards() {
       </div>
       ${badgeHtml}
       <div class="vc-remaining">${isOpen ? fmtSec(v.remainingSec) : '—'}</div>
+      ${remainingLitresHtml}
       <div class="vc-meta">Dernier démarrage: ${fmtEpoch(v.openedAt)}<br>
         Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
       <div style="margin: 4px 0 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
@@ -1478,10 +1577,44 @@ function requestStatus() {
 // PROGRAMMES
 // ══════════════════════════════════════════════════════════
 function exportSchedules() {
+  // Calcul du volume (en L) pour chaque programme, à partir de la
+  // durée stockée côté firmware et du coefficient de calibration de
+  // la vanne concernée :
+  //   litres = durationSec * flowCoeff[i] / pulsesPerLitre
+  // On inclut cette valeur dans l'export pour deux raisons :
+  //   1) Permettre à l'utilisateur de voir/retoucher une saisie qui
+  //      était à l'origine en litres, même si la calibration a changé
+  //      depuis (round-trip UI : édition en L → envoi en s au firmware
+  //      → on retrouve le L à la réimport).
+  //   2) Pouvoir réimporter le JSON sur une vanne AYANT UN COEFF
+  //      DIFFÉRENT en gardant la même "intention" en litres (on
+  //      recalcule alors durationSec à la volée à l'import).
+  // Si la vanne n'est pas calibrée (flowCoeff = 0), on stocke `null`
+  // et l'import se contente de conserver durationSec tel quel.
+  const fcArr = window.__flowCoeffs || [];
+  const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
   const payload = {
     exportedAt: new Date().toISOString(),
     version: 1,
-    schedules: (schedules || []).map(s => s ? {...s} : null).filter(Boolean)
+    pulsesPerLitre: ppl || null,
+    schedules: (schedules || []).map(s => {
+      if (!s) return null;
+      const out = {...s};
+      if (ppl > 0) {
+        const fc = (fcArr[s.valve] !== undefined) ? Number(fcArr[s.valve]) : 0;
+        if (fc > 0) {
+          // Arrondi à 2 décimales pour la lisibilité du JSON (la
+          // précision sub-millilitre n'a pas de sens physique sur un
+          // arrosage).
+          out.litres = Math.round(((s.durationSec * fc) / ppl) * 100) / 100;
+        } else {
+          out.litres = null;
+        }
+      } else {
+        out.litres = null;
+      }
+      return out;
+    }).filter(Boolean)
   };
   const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
   const url = URL.createObjectURL(blob);
@@ -1506,10 +1639,37 @@ function importSchedulesFromFile(evt) {
         alert('Fichier JSON invalide : aucune liste de programmes trouvée.');
         return;
       }
+      // Re-évaluation des durées : si l'entrée importée porte un
+      // champ `litres` ET que la vanne de destination a un flowCoeff
+      // connu, on RECALCULE durationSec à partir des litres et du
+      // coeff de la vanne cible. C'est ce qui permet de garder
+      // l'intention en litres de l'utilisateur même quand on importe
+      // sur une autre vanne (coeff différent). Si pas de litres, ou
+      // pas de coeff, on garde durationSec tel quel (rétro-compat).
+      // On utilise d'abord le pulsesPerLitre courant, puis en
+      // repli celui stocké dans l'export lui-même (pour qu'un
+      // export fait sur un autre appareil / firmware reste importable
+      // même si les constantes diffèrent — l'important est d'avoir
+      // un pulsesPerLitre cohérent avec l'export).
+      const fcArr = window.__flowCoeffs || [];
+      const ppl   = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0)
+                    ? window.PULSES_PER_LITRE
+                    : (data && data.pulsesPerLitre ? Number(data.pulsesPerLitre) : 0);
+      const normalized = imported.map(s => {
+        if (!s) return s;
+        const o = {...s};
+        if (o.litres !== undefined && o.litres !== null && Number(o.litres) > 0 && ppl > 0) {
+          const fc = (fcArr[o.valve] !== undefined) ? Number(fcArr[o.valve]) : 0;
+          if (fc > 0) {
+            o.durationSec = Math.max(1, Math.round((Number(o.litres) * ppl) / fc));
+          }
+        }
+        return o;
+      });
       if(!confirm('Remplacer tous les programmes actuels par le contenu du fichier sélectionné ?')) {
         return;
       }
-      api('POST','/api/schedules/import',{schedules: imported}).then(d=>{
+      api('POST','/api/schedules/import',{schedules: normalized}).then(d=>{
         if(d && d.ok){
           loadSchedules();
           alert('Import des programmes terminé.');
@@ -1612,10 +1772,12 @@ function openSchedModal() {
   document.getElementById('sched-name').value = '';
   document.getElementById('sched-time').value = '06:00';
   document.getElementById('sched-dur').value = 900;
+  document.getElementById('sched-vol').value = 20;
   document.getElementById('sched-calmode').value = 0;
   // interval start default = today
   const today = new Date();
   document.getElementById('sched-interval-start').value = today.toISOString().slice(0,10);
+  setSchedUnit('sec'); // par défaut on saisit en secondes
   updateSchedCalMode();
   // Reset jours
   document.querySelectorAll('.day-btn').forEach(b=>{
@@ -1658,6 +1820,44 @@ function editSched(flatIdx) {
     b.classList.toggle('sel', !!(s.weekDays & (1<<parseInt(b.dataset.d))));
   });
   updateSchedCalMode();
+  // Conversion volume : on tente d'abord le mode "Volume" (L) — la
+  // fonction setSchedUnit() rebascule automatiquement en mode durée
+  // si la vanne n'a pas de flowCoeff. L'utilisateur pourra toujours
+  // revenir à la saisie en secondes via le toggle.
+  setSchedUnit('L');
+  // Synchronise le champ litres à partir de la valeur stockée
+  // (fallback : on recalcule depuis durationSec, et inversement).
+  // PRÉFÉRENCE : si l'entrée porte un champ `litres` (export JSON
+  // qui préservait l'intention en litres), on l'utilise tel quel
+  // pour pré-remplir le champ Volume, plutôt que de recalculer à
+  // partir de durationSec (qui peut être en léger écart si les
+  // coeffs ont changé). C'est ce qui permet de garder la saisie
+  // originale de l'utilisateur même après un round-trip export/import.
+  const fc  = getCurrentValveFlowCoeff();
+  const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0)
+              ? window.PULSES_PER_LITRE : 0;
+  if(fc > 0 && ppl > 0){
+    let litres;
+    if (s.litres !== undefined && s.litres !== null && Number(s.litres) > 0) {
+      // Valeur exportée en litres : on l'utilise directement, même si
+      // elle ne correspond pas exactement à durationSec * fc / ppl
+      // (cas typique : la vanne a été recalibrée entre temps). Le
+      // champ secondes est juste re-synchronisé pour rester cohérent
+      // à l'affichage — la vraie valeur de référence au save() est
+      // l'unité actuellement sélectionnée (L ou sec).
+      litres = Number(s.litres);
+    } else {
+      litres = s.durationSec * fc / ppl;
+    }
+    document.getElementById('sched-vol').value = litres.toFixed(2);
+    document.getElementById('sched-dur').value = s.durationSec;
+  } else {
+    // Pas de calibration : on force l'affichage en secondes et on
+    // efface le champ litres pour éviter toute confusion.
+    setSchedUnit('sec');
+    document.getElementById('sched-dur').value = s.durationSec;
+    document.getElementById('sched-vol').value = '';
+  }
   document.getElementById('sched-modal').classList.add('open');
 }
 
@@ -1671,6 +1871,127 @@ function updateSchedCalMode() {
 document.querySelectorAll('.day-btn').forEach(b=>{
   b.addEventListener('click',()=>b.classList.toggle('sel'));
 });
+
+// ══════════════════════════════════════════════════════════
+// PROGRAMME — UNITÉ DURÉE / VOLUME + CONVERSION VIA COEFF
+// ══════════════════════════════════════════════════════════
+//
+// Le firmware ne stocke QUE la durée d'ouverture (durationSec, en
+// secondes). L'UI peut laisser l'utilisateur saisir indifféremment
+// une durée OU un volume en litres. La conversion litres<->secondes
+// utilise :
+//   • le coeff de calibration de la VANNE concernée (flowCoeff, en
+//     pulses/s) — exposé par /api/calibration/status ET /api/consumption
+//   • la constante d'étalonnage du capteur (pulsesPerLitre) — exposée
+//     par /api/calibration/status
+// Formules :
+//   flowLpm   = flowCoeff * 60 / pulsesPerLitre
+//   duration  = litres * pulsesPerLitre / flowCoeff     (litres → secondes)
+//   litres    = duration  * flowCoeff / pulsesPerLitre (secondes → litres)
+//
+// Si la vanne n'a pas encore de flowCoeff (calibration jamais faite),
+// le mode "Volume" est désactivé et un message invite l'utilisateur à
+// calibrer la vanne depuis l'onglet Calibration.
+
+let schedUnit = 'sec';   // 'sec' | 'L' — état UI, pas persisté
+
+function setSchedUnit(unit){
+  schedUnit = (unit === 'L') ? 'L' : 'sec';
+  const btnSec = document.getElementById('sched-unit-sec');
+  const btnL   = document.getElementById('sched-unit-l');
+  const rowSec = document.getElementById('sched-dur-row');
+  const rowL   = document.getElementById('sched-vol-row');
+  if(btnSec && btnL){
+    btnSec.classList.toggle('sel', schedUnit === 'sec');
+    btnL.classList.toggle('sel',   schedUnit === 'L');
+  }
+  if(rowSec) rowSec.style.display = (schedUnit === 'sec') ? 'block' : 'none';
+  if(rowL)   rowL.style.display   = (schedUnit === 'L')   ? 'block' : 'none';
+  // Re-applique l'état "enabled/disabled" du mode volume (selon que la
+  // vanne courante a un flowCoeff ou non).
+  refreshSchedUnitAvailability();
+  // Si on vient de basculer en mode volume, on synchronise le champ
+  // litres à partir de la valeur actuelle en secondes.
+  if(schedUnit === 'L') syncSchedFromSec();
+}
+
+// Renvoie le flowCoeff (pulses/s) de la vanne sélectionnée dans le modal,
+// ou 0 si indisponible / non calibré. Mémorise aussi la valeur pour
+// pouvoir être rappelée après une actualisation distante (WebSocket).
+function getCurrentValveFlowCoeff(){
+  const sel = document.getElementById('sched-valve');
+  if(!sel) return 0;
+  const v = parseInt(sel.value);
+  if(isNaN(v) || v < 0) return 0;
+  // window.__flowCoeffs[v] = flowCoeff en pulses/s, mis à jour par
+  // refreshCalibration() et refreshConsumption().
+  const fc = (window.__flowCoeffs && window.__flowCoeffs[v]) ? Number(window.__flowCoeffs[v]) : 0;
+  return (fc > 0) ? fc : 0;
+}
+
+function refreshSchedUnitAvailability(){
+  const btnL   = document.getElementById('sched-unit-l');
+  const volEl  = document.getElementById('sched-vol');
+  const hintEl = document.getElementById('sched-vol-hint');
+  if(!btnL || !volEl) return;
+  const fc = getCurrentValveFlowCoeff();
+  const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0)
+              ? window.PULSES_PER_LITRE : 0;
+  const canUseL = (fc > 0 && ppl > 0);
+  btnL.disabled = !canUseL;
+  btnL.style.opacity = canUseL ? '1' : '0.5';
+  btnL.style.cursor  = canUseL ? 'pointer' : 'not-allowed';
+  if(canUseL){
+    const lpm = (fc * 60 / ppl);
+    hintEl.innerHTML = `Conversion: ${fc.toFixed(2)} pulses/s → ${lpm.toFixed(2)} L/min.`;
+  } else {
+    hintEl.innerHTML = '⚠ Vanne non calibrée — allez sur l\'onglet <strong>Calibration</strong> pour mesurer le débit de cette vanne.';
+  }
+  // Si la vanne n'est pas calibrée ET qu'on est en mode volume, on rebascule
+  // automatiquement en mode durée (sinon l'utilisateur saisirait des litres
+  // fantaisie qui ne donneraient rien de cohérent).
+  if(!canUseL && schedUnit === 'L'){
+    setSchedUnit('sec');
+  }
+  volEl.disabled = !canUseL;
+}
+
+// Lit la valeur en secondes et synchronise le champ litres (si visible).
+function syncSchedFromSec(){
+  if(schedUnit !== 'sec') return; // pas de boucle, on ne fait rien si on est en mode L
+  const durEl = document.getElementById('sched-dur');
+  const volEl = document.getElementById('sched-vol');
+  if(!durEl || !volEl) return;
+  const sec = parseFloat(durEl.value);
+  if(!isFinite(sec) || sec <= 0){ volEl.value = ''; return; }
+  const fc  = getCurrentValveFlowCoeff();
+  const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0)
+              ? window.PULSES_PER_LITRE : 0;
+  if(fc > 0 && ppl > 0){
+    const litres = sec * fc / ppl;
+    volEl.value = litres.toFixed(2);
+  } else {
+    volEl.value = '';
+  }
+}
+
+// Lit la valeur en litres et synchronise le champ secondes (si visible).
+function syncSchedFromVol(){
+  if(schedUnit !== 'L') return;
+  const durEl = document.getElementById('sched-dur');
+  const volEl = document.getElementById('sched-vol');
+  if(!durEl || !volEl) return;
+  const litres = parseFloat(volEl.value);
+  if(!isFinite(litres) || litres <= 0){ return; }
+  const fc  = getCurrentValveFlowCoeff();
+  const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0)
+              ? window.PULSES_PER_LITRE : 0;
+  if(fc > 0 && ppl > 0){
+    // durée en secondes pour faire passer `litres` litres à fc pulses/s
+    const sec = Math.max(1, Math.round(litres * ppl / fc));
+    durEl.value = sec;
+  }
+}
 
 function saveSched() {
   const time = document.getElementById('sched-time').value.split(':');
@@ -1730,6 +2051,25 @@ function dupSched(flatIdx) {
     return;
   }
   
+  // On propage la valeur "litres" si elle existe sur le programme
+  // source : à l'enregistrement (saveSched) le modal fera la
+  // conversion inverse si la vanne cible a un flowCoeff différent.
+  // Si la vanne source a un flowCoeff connu et que le programme
+  // source n'a pas de litres, on en calcule un à la volée pour que
+  // l'intention "X litres sur la vanne source" survive à la copie
+  // vers une vanne avec un coeff potentiellement différent.
+  let litresToCarry = (s.litres !== undefined && s.litres !== null && Number(s.litres) > 0)
+                     ? Number(s.litres)
+                     : null;
+  if (litresToCarry === null) {
+    const srcFc = (window.__flowCoeffs && window.__flowCoeffs[s.valve] !== undefined)
+                  ? Number(window.__flowCoeffs[s.valve]) : 0;
+    const srcPpl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
+    if (srcFc > 0 && srcPpl > 0) {
+      litresToCarry = (s.durationSec * srcFc) / srcPpl;
+    }
+  }
+
   let body = {
     valve: destV,
     schedIdx: -1, // demande un nouvel emplacement
@@ -1748,6 +2088,7 @@ function dupSched(flatIdx) {
     seasonEndDay: s.seasonEndDay,
     name: (s.name ? (s.name + " (copie)") : "")
   };
+  if (litresToCarry !== null) body.litres = litresToCarry;
   
   api('POST', '/api/schedule/save', body).then(r => {
     if(!r.ok){
@@ -2242,6 +2583,25 @@ function refreshConsumption(){
       if(tb2) tb2.innerHTML = msg.replace('colspan="5"','colspan="4"');
       return;
     }
+    // Mémorise les flowCoeffs exposés par /api/consumption pour qu'ils
+    // soient disponibles au moment où l'utilisateur ouvre le modal
+    // "Nouveau programme" sans avoir à attendre un passage par l'onglet
+    // Calibration (autre source d'initialisation de window.__flowCoeffs).
+    if(Array.isArray(d.valves)){
+      // Initialise le tableau si pas déjà fait (sinon on conserve
+      // d'éventuelles valeurs plus précises venues de /api/calibration/status).
+      if(!window.__flowCoeffs || !window.__flowCoeffs.length){
+        window.__flowCoeffs = d.valves.map(v => Number(v.flowCoeff) || 0);
+      } else {
+        // Met à jour seulement les entrées qui étaient à 0 (pas calibrées) :
+        // la calibration reste la source de vérité la plus précise.
+        d.valves.forEach((v, i) => {
+          if(!window.__flowCoeffs[i] && v.flowCoeff && v.flowCoeff > 0){
+            window.__flowCoeffs[i] = Number(v.flowCoeff);
+          }
+        });
+      }
+    }
     // Version longue pour la page Configuration (5 colonnes : nom + détails 14j)
     const longHtml = d.valves.map(v=>{
       const detail = (v.history && v.history.length)
@@ -2291,6 +2651,24 @@ function buildSchedValveSelect() {
     const opt = sel.querySelector(`option[value="${prev}"]`);
     if(opt) sel.value = prev;
   }
+  // Listener "change" : à chaque changement de vanne, on ré-évalue
+  // la disponibilité du mode Volume (la vanne cible a son propre
+  // flowCoeff) et on resynchronise le champ litres↔secondes.
+  // On attache le listener en mode "une fois" pour ne pas empiler
+  // des handlers à chaque reconstruction du <select>.
+  if(!sel.dataset.listenerAttached){
+    sel.addEventListener('change', () => {
+      if(schedModalOpen){
+        refreshSchedUnitAvailability();
+        // Si on est en mode secondes, on recalcule le champ litres
+        // miroir ; si on est en mode litres, le champ secondes
+        // miroir (les deux fonctions no-op sur le mode opposé).
+        if(schedUnit === 'sec')      syncSchedFromSec();
+        else if(schedUnit === 'L')   syncSchedFromVol();
+      }
+    });
+    sel.dataset.listenerAttached = '1';
+  }
 }
 
 function init() {
@@ -2300,6 +2678,15 @@ function init() {
   refreshPulse();
   refreshConsumption();
   loadSchedules();
+  // Charge aussi les coefficients de calibration au boot : ils sont
+  // nécessaires au calcul du "volume restant" sur les cartes vanne du
+  // dashboard (cf. renderValveCards). Sans cet appel, le premier
+  // affichage après chargement de la page n'aurait que "— (non
+  // calibré)" pour toutes les vannes, même celles déjà calibrées.
+  // L'appel est léger (StaticJsonDocument de quelques centaines d'octets)
+  // et idempotent : refreshCalibration() se contente de mettre à jour
+  // window.__flowCoeffs et window.PULSES_PER_LITRE.
+  refreshCalibration();
   // Actualisation auto toutes les 10s si WS déconnecté
   setInterval(()=>{ if(!wsConn||wsConn.readyState!==1) requestStatus(); }, 10000);
   // La conso par vanne change lentement, on rafraîchit toutes les 30 s

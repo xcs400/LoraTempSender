@@ -52,6 +52,19 @@ void IRAM_ATTR pulse_isr(){
 }
 
 // Consommation par vanne
+// Initialisation : on part des coefficients de calibration mesurés
+// (FLOW_COEFF_DEFAULTS, voir Globals.h) à la place de la valeur 1.0f
+// codée en dur dans la struct. Sans ça, tant que valveConsLoad() n'a pas
+// écrasé les valeurs (mode normal) ou tant que la recovery MQTT n'a pas
+// livré les valeurs retained (mode CONS_MQTT_ONLY), la répartition des
+// pulses se ferait en parts ÉGALES — alors qu'on a des coefficients
+// réels mesurés pour cette installation.
+//
+// Le tableau valveCons[] est défini tel quel (l'initializer `= 1.0f` du
+// membre flowCoeff s'applique à chaque instance). L'application des
+// défauts FLOW_COEFF_DEFAULTS est faite dans setup() (voir
+// MainIocan_S.cpp) AVANT valveConsLoad() et avant tout pulseDistribute(),
+// en suivant l'ordre logique d'initialisation des compteurs.
 ValveCons valveCons[VANNE_COUNT];
 unsigned long lastDistributedTotal = 0;
 // Drity flags pour throttling d'écriture NVS (cf. ConfigManager.h)

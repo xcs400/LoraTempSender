@@ -203,6 +203,13 @@ void setup(){
 
     // Charger compteur persistant
     pulseLoad();
+    // Applique les coefficients de calibration par défaut (mesurés le
+    // 06/07/2026 sur l'installation réelle) AVANT valveConsLoad(), pour
+    // qu'une éventuelle valeur en NVS (calibration utilisateur ultérieure)
+    // prenne le dessus via valveConsLoad() → mode normal, ou que la NVS
+    // soit lue pour flowCoeff en mode CONS_MQTT_ONLY (les compteurs sont
+    // ignorés mais flowCoeff est conservé — voir ConfigManager.h).
+    applyFlowCoeffDefaults();
     valveConsLoad();
     // Aligne la distribution sur le total connu au boot (persistant + runtime courant)
     {

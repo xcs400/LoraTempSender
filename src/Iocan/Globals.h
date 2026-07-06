@@ -183,6 +183,34 @@ const int BUTTON_PIN = 0;
 #define CONS_HISTORY_DAYS 14
 #define SAVE_LITRES_STEP 100.0f
 
+// ── Coefficients de calibration débit par défaut (pulses/s mesurés SEUL) ─────
+//
+// Valeurs mesurées par calibration vanne par vanne, chacune ouverte seule
+// pendant la durée standard (cf. calibStart() dans ValveCons.h). Tant que
+// l'utilisateur n'a pas lancé /api/calibration/start, ces coefficients
+// servent de défaut à la place de 1.0f (répartition égale).
+//
+// Référence : calibration du 06/07/2026 sur l'installation réelle :
+//   V0 =  92.333 pulses/s
+//   V1 =  62.417 pulses/s
+//   V2 =  42.200 pulses/s
+//   V3 = 133.650 pulses/s
+//   V4 =  24.150 pulses/s
+// Somme = 354.75 pulses/s → la part relative de chaque vanne est
+// immédiate (V3 = 37.7%, V0 = 26.0%, etc.).
+//
+// IMPORTANT : en mode CONS_MQTT_ONLY, ces coefficients restent persistés
+// en NVS (valveConsSaveFlowCoeff) car ce sont des DONNÉES DE CONFIGURATION
+// (pas des compteurs). Si l'utilisateur relance une calibration, la valeur
+// mesurée écrase le défaut pour cette vanne.
+static const float FLOW_COEFF_DEFAULTS[VANNE_COUNT] = {
+    92.333f,   // V0
+    62.417f,   // V1
+    42.200f,   // V2
+   133.650f,   // V3
+    24.150f,   // V4
+};
+
 // ── Stratégie de persistance NVS pour la consommation des vannes ──────────────
 //
 // Par défaut (CONS_MQTT_ONLY non défini), la consommation est flushée en NVS
@@ -333,8 +361,11 @@ struct ValveCons {
     uint32_t todayPulses = 0;
     uint16_t todayIdx = 0;           // index d'écriture dans history (anneau)
     DayStat history[CONS_HISTORY_DAYS];
-    // Coefficient relatif de débit (mesuré seul pendant calibration). Défaut 1.0
-    // = répartition égale tant qu'aucune calibration n'a été faite.
+    // Coefficient relatif de débit (mesuré seul pendant calibration). La
+    // valeur par défaut est surchargée dans Globals.cpp à partir de
+    // FLOW_COEFF_DEFAULTS (calibration du 06/07/2026). Si l'utilisateur
+    // n'a jamais calibré, la répartition utilise ces coefficients mesurés
+    // au lieu de 1.0f (répartition égale) — bien plus juste dès le boot.
     float flowCoeff = 1.0f;
     // Résidu fractionnaire accumulé d'un appel de pulseDistribute() à l'autre
     // (voir ValveCons.h::pulseDistribute() pour le détail de l'algorithme).
@@ -401,6 +432,19 @@ extern unsigned long lastDistributedTotal;
 // n'a pas encore été flushée en NVS. Flush déclenché toutes les 30 s par
 // loop() (ou immédiatement sur transition d'état / reset).
 extern volatile bool valveConsDirty[];
+
+// Applique les coefficients de calibration par défaut (mesurés le
+// 06/07/2026 sur l'installation réelle, voir FLOW_COEFF_DEFAULTS plus
+// haut) à valveCons[]. À appeler dans setup() AVANT valveConsLoad() pour
+// que la NVS ait la priorité si elle contient déjà une calibration
+// utilisateur (mode normal), ou pour initialiser en mode CONS_MQTT_ONLY
+// (où flowCoeff reste la seule chose lue en NVS — les compteurs sont
+// ré-hydratés par la recovery MQTT).
+inline void applyFlowCoeffDefaults(){
+    for(int i=0;i<VANNE_COUNT;i++){
+        valveCons[i].flowCoeff = FLOW_COEFF_DEFAULTS[i];
+    }
+}
 
 // Calibration débit
 extern CalibState calibState;

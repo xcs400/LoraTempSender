@@ -366,6 +366,10 @@ inline String calibStatusJson(){
     for(int i=0;i<VANNE_COUNT;i++) res.add(calibState.resultCoeff[i]);
     JsonArray coeffs = doc.createNestedArray("flowCoeffs");
     for(int i=0;i<VANNE_COUNT;i++) coeffs.add(valveCons[i].flowCoeff);
+    // Constante de calibration (pulses/litre) : exposée au frontend pour qu'il
+    // puisse convertir les flowCoeffs (en pulses/s) en L/min côté UI, sans
+    // hardcoder la valeur dans la SPA. Source de vérité = firmware.
+    doc["pulsesPerLitre"] = (float)PULSES_PER_LITRE;
     String out; serializeJson(doc, out);
     return out;
 }
