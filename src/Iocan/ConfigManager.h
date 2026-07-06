@@ -134,18 +134,38 @@ inline bool nvsSelfTestAndRecover(){
     return true;
 }
 
-// Charger et sauvegarder le compteur d'impulsions persisté
+// Charger et sauvegarder le compteur d'impulsions persisté.
+//
+// En mode CONS_MQTT_ONLY (Globals.h) : pulseLoad/pulseSave sont des NO-OPS.
+// Le compteur de pulses total n'est PAS persisté en NVS — uniquement la
+// valeur runtime `pulseCount` en RAM. Au reboot, on repart donc de zéro
+// pour `pulse_total`, et la valeur publiée en MQTT retained (par HA) reste
+// la référence de persistance. Ça élimine l'auto-empoisonnement observé :
+// avant, si HA retenait une valeur buggée (ex: 4 294 957 568), la recovery
+// MQTT au boot écrasait la NVS avec cette valeur à chaque reboot → cycle
+// vicieux. Voir MqttManager.h pour le détail.
+//
+// NB : `lastDistributedTotal` (utilisé par pulseDistribute) est initialisé
+// à 0 dans le setup() en cohérence (voir MainIocan_S.cpp).
+#ifdef CONS_MQTT_ONLY
+inline void pulseLoad(){
+    persistedPulseCount = 0UL; // pas de persistance en mode CONS_MQTT_ONLY
+}
+inline void pulseSave(){
+    // no-op : pas de persistance en mode CONS_MQTT_ONLY
+}
+#else
 inline void pulseLoad(){
     prefs.begin("irrigcfg", false);
     persistedPulseCount = prefs.getULong("pulseCnt", 0UL);
     prefs.end();
 }
-
 inline void pulseSave(){
     prefs.begin("irrigcfg", false);
     prefs.putULong("pulseCnt", persistedPulseCount);
     prefs.end();
 }
+#endif
 
 // Déclarations anticipées pour les helpers de consommation
 inline void valveConsFlushDirty();
@@ -165,6 +185,12 @@ inline void valveConsFlushDirty();
 //   4) ESP.restart().
 inline void safeRestart(const char* reason = nullptr){
     if(reason && reason[0]) logSys(reason);
+#ifdef CONS_MQTT_ONLY
+    // Mode CONS_MQTT_ONLY : on ne synchronise PAS persistedPulseCount avec
+    // pulseCount avant écriture — pulseSave() est un no-op de toute façon,
+    // et on ne veut surtout pas réintroduire de persistance du compteur
+    // global (cause de l'auto-empoisonnement).
+#else
     // Synchronise les pulses runtime avant d'écrire
     {
         unsigned long cnt;
@@ -174,6 +200,7 @@ inline void safeRestart(const char* reason = nullptr){
         persistedPulseCount = total;
     }
     pulseSave();
+#endif
     valveConsFlushDirty();
     Serial.println("[SAFE] Flush NVS avant restart OK");
     delay(300);
@@ -200,7 +227,44 @@ inline uint32_t todayYMD(){
 // putString("ssid",...) avec NOT_ENOUGH_SPACE. Conséquence visible : un
 // changement de SSID semblait "ne rien faire" même après reboot, parce
 // que la valeur n'était jamais écrite en flash.
+//
+// ── Mode CONS_MQTT_ONLY (Globals.h) ─────────────────────────────────────
+// Les COMPTEURS par vanne (pulsesTotal / todayPulses / carry / historique)
+// ne sont PLUS persistés en NVS. Les compteurs vivent uniquement en RAM
+// et sont ré-hydratés au boot via la recovery MQTT (voir
+// MqttManager.h::mqttHandleMessage — les blocs "[RECOVERY] Vx litres_*"
+// utilisent les valeurs retained publiées par HA lors de la session
+// précédente). C'est la même stratégie que pour `pulse_total` (voir
+// pulseLoad/pulseSave plus haut), appliquée à chaque vanne.
+//
+// En contrepartie, le coefficient de calibration `flowCoeff` reste
+// persisté en NVS (valveConsSaveFlowCoeff ci-dessous) car c'est une
+// donnée de configuration, pas un compteur. Une calibration perdue
+// forcerait l'utilisateur à la refaire.
+//
+// Avantage : élimine l'auto-empoisonnement observé sur `pulse_total` ET
+// sur les compteurs par vanne. Si HA retenait une valeur buggée
+// (4.29G observée sur `pulse_total`), on n'écrasera plus la NVS avec à
+// chaque reboot — mais on continue de récupérer la valeur MQTT (qui peut
+// toujours être incorrecte). Le contrôle anti-poison dans la recovery
+// (rejet si > 4.29G) reste donc essentiel, voir MqttManager.h.
 inline void valveConsLoad(){
+#ifdef CONS_MQTT_ONLY
+    // Mode CONS_MQTT_ONLY : aucune lecture NVS. Les compteurs sont à 0
+    // au boot et seront ré-hydratés par la recovery MQTT dans
+    // mqttHandleMessage() dès que le broker livrera les valeurs retained.
+    // flowCoeff reste géré par valveConsSaveFlowCoeff (donnée de config).
+    for(int v=0;v<VANNE_COUNT;v++){
+        valveCons[v].pulsesTotal = 0UL;
+        valveCons[v].todayYmd    = 0;
+        valveCons[v].todayPulses = 0;
+        valveCons[v].carry       = 0.0f;
+        for(int d=0;d<CONS_HISTORY_DAYS;d++){
+            valveCons[v].history[d] = {0, 0, 0.0f};
+        }
+        valveCons[v].todayIdx    = 0;
+    }
+#else
     prefs.begin("irrcons", false);
     for(int v=0;v<VANNE_COUNT;v++){
         char key[24];
@@ -248,9 +312,15 @@ inline void valveConsLoad(){
         }
         valveCons[v].todayIdx = idx;
     }
+#endif
 }
 
 inline void valveConsSaveOne(int v){
+#ifdef CONS_MQTT_ONLY
+    // Mode CONS_MQTT_ONLY : pas de persistance NVS des compteurs.
+    // La valeur vit en RAM et sera publiée en MQTT retained (HA fait foi).
+    (void)v; // éviter warning unused
+#else
     prefs.begin("irrcons", false);
     char key[24];
     snprintf(key,sizeof(key),"v%d_pc",v);
@@ -269,6 +339,7 @@ inline void valveConsSaveOne(int v){
         prefs.putBytes(key, &valveCons[v].history[d], sizeof(DayStat));
     }
     prefs.end();
+#endif
 }
 
 // Sauvegarde dédiée du coefficient de calibration débit, séparée de

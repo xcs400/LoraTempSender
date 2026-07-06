@@ -193,18 +193,34 @@ const int BUTTON_PIN = 0;
 //
 // Mode CONS_MQTT_ONLY (décommenter pour activer) :
 //   * Le flush NVS périodique toutes les 30s est DÉSACTIVÉ.
-//   * Seules les transitions critiques déclenchent une écriture NVS :
-//       - Fermeture de vanne (valveHardClose → valveConsFlushOne) : capture
-//         le total exact de la session arrosage juste après chaque arrosage.
-//       - Reset compteur (/api/pulse/reset) : persiste la remise à zéro.
+//   * PLUS IMPORTANT : les compteurs `pulse_total` (ConfigManager.h::pulseSave
+//     et pulseLoad) ET les compteurs par vanne (valveConsSaveOne et
+//     valveConsLoad) sont des NO-OPS — RIEN n'est persisté en NVS.
+//   * Seules les données de CONFIGURATION (SSID, schedules, coefficients
+//     de calibration) restent persistées en NVS, via les namespaces
+//     "irrigcfg" et "schedcfg". Le namespace "irrcons" (conso par vanne)
+//     n'est plus utilisé du tout en CONS_MQTT_ONLY.
+//   * Les compteurs vivent uniquement en RAM. Au reboot, ils sont à zéro
+//     puis ré-hydratés par la recovery MQTT (MqttManager.h), qui lit les
+//     valeurs retained publiées par HA lors de la session précédente.
 //   * Les valeurs publiées en MQTT (retained) sur le broker font office de
-//     mémoire secondaire pour Home Assistant. Les données "en cours d'arrosage"
-//     (non encore flushées) ne survivent PAS à un reboot brutal sans arrosage
-//     préalable — perte max = litres écoulés depuis la dernière fermeture
-//     de vanne. Acceptable si le broker MQTT est fiable et les valeurs
-//     retained sont consultées via l'historique HA.
-//   * L'historique journalier (14 jours) N'EST PAS mis à jour en NVS en cours
-//     de journée — seulement à chaque fermeture de vanne.
+//     mémoire secondaire pour Home Assistant. Les données "en cours
+//     d'arrosage" (non encore publiées) ne survivent PAS à un reboot brutal
+//     sans flushing MQTT périodique (10s par défaut) — perte max = 10s de
+//     conso sur les vannes ouvertes. Acceptable si le broker MQTT est fiable.
+//   * L'historique journalier (14 jours) N'EST PAS conservé entre reboots
+//     en mode CONS_MQTT_ONLY (les compteurs repartent de 0). Les données
+//     historiques restent consultables via l'historique long-terme de HA.
+//
+// MOTIF (anti-empoisonnement) : avant ce mode, le firmware chargeait la
+// valeur NVS de `pulse_total` au boot puis écrasait la NVS avec la valeur
+// MQTT si cette dernière était "plus grande" (logique binaire). Si HA
+// retenait une valeur buggée (4 294 957 568 ≈ 4.29G observée), la NVS
+// était ré-écrite avec cette valeur à chaque reboot, puis le firmware
+// republiait 4.29G en MQTT retained → cycle vicieux d'auto-empoisonnement.
+// En CONS_MQTT_ONLY, la NVS n'est plus jamais lue/écrite pour les compteurs,
+// donc impossible de ré-injecter la valeur buggée depuis la NVS. La
+// recovery MQTT (rejet > 4.29G) reste en place comme garde-fou.
 //
 // DÉCOMMENTER la ligne suivante pour activer le mode économie flash :
 #define CONS_MQTT_ONLY  1

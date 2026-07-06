@@ -321,6 +321,7 @@ void loop(){
         // persistant par vanne, voir ValveCons.h::pulseDistribute())
         pulseDistribute(totalPulses);
         float totalLitres = (float)totalPulses / PULSES_PER_LITRE;
+#ifndef CONS_MQTT_ONLY
         static unsigned long lastSavedStep = 0;
         unsigned long step = (unsigned long)(floor(totalLitres / SAVE_LITRES_STEP));
         if(step > lastSavedStep){
@@ -332,6 +333,14 @@ void loop(){
             char b[80]; snprintf(b,80, "Pulse sauvegardees: %lu (%.1f L)", persistedPulseCount, (double)persistedPulseCount / PULSES_PER_LITRE);
             logSys(b);
         }
+#else
+        // Mode CONS_MQTT_ONLY : pas de persistance NVS de pulse_total.
+        // Le compteur total vit uniquement en RAM (pulseCount) et repart
+        // donc de 0 à chaque reboot — la valeur MQTT retained dans HA
+        // fait office de persistance secondaire. Voir Globals.h /
+        // ConfigManager.h pour le détail du fix anti-empoisonnement.
+        (void)totalLitres; // éviter warning unused
+#endif
     }
 
     // ── Flush NVS conso par vanne ──────────────────────────────────────────────────────

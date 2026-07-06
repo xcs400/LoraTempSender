@@ -291,7 +291,12 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 }
 .toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
 .toggle-row label{font-size:.85rem}
-.toggle{position:relative;width:44px;height:24px}
+/* Toggle standard (44×24) — utilisé dans le modal programme.
+   Le toggle "compact" du tableau (36×20) est surchargé ci-dessous pour
+   garder un fond visible (le rond blanc doit laisser au moins ~3 px de
+   piste de chaque côté, sinon il masque quasi totalement la couleur
+   "actif" sur les petits écrans). */
+.toggle{position:relative;width:44px;height:24px;flex:0 0 auto}
 .toggle input{opacity:0;width:0;height:0}
 .toggle-slider{
   position:absolute;cursor:pointer;inset:0;background:var(--border);
@@ -303,6 +308,23 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 }
 .toggle input:checked+.toggle-slider{background:var(--green)}
 .toggle input:checked+.toggle-slider::before{transform:translateX(20px)}
+
+/* Variante compacte pour la colonne "Actif" du tableau Programmes.
+   Par défaut, le toggle global est 44×24, mais en colonne de table on
+   l'inline à 36×20 : avec les valeurs standards, le curseur rond (18px)
+   ne laisse que 1 px de piste verticale et 3 px latéraux → le fond
+   "actif" vert est quasi invisible. On adapte le rond à 14 px pour
+   qu'il reste une bande colorée visible de chaque côté. */
+.toggle.compact{width:36px;height:20px}
+.toggle.compact .toggle-slider{border-radius:10px}
+.toggle.compact .toggle-slider::before{
+  height:14px;width:14px;left:3px;bottom:3px;
+  box-shadow:0 1px 2px rgba(0,0,0,.25) /* léger relief pour le voir
+    sur fond clair quand même */
+}
+.toggle.compact input:checked+.toggle-slider::before{
+  transform:translateX(16px) /* 36 - 14 - 3*2 = 16 */
+}
 
 /* ── RESPONSIVE ─────────────────────────────────────── */
 @media(max-width:640px){
@@ -1386,13 +1408,14 @@ function renderValveCards() {
       <div class="vc-meta">Dernier démarrage: ${fmtEpoch(v.openedAt)}<br>
         Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
       <div style="margin: 4px 0 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
-        <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue)">
+        <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue);display:flex;align-items:center;gap:6px">
           💧 Aujourd'hui: <strong>${(v.litresToday||0).toFixed(2)} L</strong>
+          <button class="btn" style="padding:0 4px;height:18px;font-size:0.6rem;font-weight:bold;background:var(--blue);color:#fff;border:none;border-radius:10px" onclick="resetValveCons(${i}, 'today')" title="Remettre le jour à zéro">RAZ</button>
         </span>
-        <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--surface2);color:var(--text-muted)">
+        <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--surface2);color:var(--text-muted);display:flex;align-items:center;gap:6px">
           Total: <strong style="color:var(--text)">${(v.litresTotal||0).toFixed(2)} L</strong>
+          <button class="btn" style="padding:0 4px;height:18px;font-size:0.6rem;font-weight:bold;background:var(--border);color:var(--text);border:none;border-radius:10px" onclick="resetValveCons(${i}, 'total')" title="Remettre le total à zéro">RAZ</button>
         </span>
-        <button class="btn" style="padding:2px 6px;height:22px;margin-left:auto;font-size:0.7rem;background:transparent;color:var(--text-muted);border:1px solid var(--border)" onclick="resetValveCons(${i})" title="Remettre à zéro la consommation de cette vanne">↺ RAZ</button>
       </div>
       <div style="margin: 8px 0 14px; padding: 8px 12px; background: var(--surface2); border-radius: 6px; border-left: 3px solid var(--blue); font-size: .8rem;">
         <span style="color:var(--text-muted);font-size:.75rem;display:block;margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px">Prochain événement</span>
@@ -1414,9 +1437,12 @@ function closeValve(idx) {
   api('POST','/api/valve/close',{valve:idx,source:'WEB'})
     .then(()=>requestStatus());
 }
-function resetValveCons(idx) {
-  if(!confirm('Remettre à zéro la consommation de cette vanne (aujourd\'hui et total) ?')) return;
-  api('POST','/api/valve/reset_cons',{valve:idx}).then(()=>{
+function resetValveCons(idx, type) {
+  const msg = (type === 'today') 
+    ? 'Remettre à zéro la consommation d\'aujoudui pour cette vanne ?'
+    : 'Remettre à zéro la consommation TOTALE (et l\'historique) de cette vanne ?';
+  if(!confirm(msg)) return;
+  api('POST','/api/valve/reset_cons',{valve:idx, type:type}).then(()=>{
     requestStatus();
     if (document.getElementById('page-config').classList.contains('active')) refreshConsumption();
   });
@@ -1561,14 +1587,15 @@ function renderSchedules() {
       </td>
       <td><span style="font-size:.75rem;color:var(--text-muted)">${CAL_MODES[s.calMode||0]}</span></td>
       <td>
-        <label class="toggle" style="width:36px;height:20px">
+        <label class="toggle compact" title="${s.active?'Programme actif':'Programme inactif'}">
           <input type="checkbox" ${s.active?'checked':''} onchange="toggleSched(${s.valve},${s.schedIdx},this.checked)">
           <span class="toggle-slider"></span>
         </label>
       </td>
       <td>
         <button class="btn btn-ghost btn-sm" onclick="editSched(${flatIdx})">Éditer</button>
-        <button class="btn btn-red btn-sm" onclick="deleteSched(${s.valve},${s.schedIdx})">Suppr.</button>
+        <button class="btn btn-ghost btn-sm" onclick="dupSched(${flatIdx})" title="Dupliquer ce programme sur une vanne" style="margin-left:4px">Copier</button>
+        <button class="btn btn-red btn-sm" onclick="deleteSched(${s.valve},${s.schedIdx})" style="margin-left:4px">Suppr.</button>
       </td>
     </tr>`;
   }
@@ -1685,6 +1712,50 @@ function saveSched() {
 function deleteSched(valve, schedIdx) {
   if(!confirm('Supprimer ce programme ?')) return;
   api('POST','/api/schedule/delete',{valve,schedIdx}).then(()=>loadSchedules());
+}
+
+function dupSched(flatIdx) {
+  const s = schedules[flatIdx];
+  let msg = "Sur quelle vanne voulez-vous dupliquer ce programme ? (Entrez le numéro) :\n\n";
+  valves.forEach((v, i) => {
+    msg += (i + 1) + " — " + (v.name || ('Vanne ' + (i + 1))) + "\n";
+  });
+  
+  let destStr = prompt(msg, (s.valve + 1));
+  if (!destStr) return; // annulé
+  
+  let destV = parseInt(destStr, 10) - 1;
+  if (isNaN(destV) || destV < 0 || destV >= valves.length) {
+    alert("Numéro de vanne invalide.");
+    return;
+  }
+  
+  let body = {
+    valve: destV,
+    schedIdx: -1, // demande un nouvel emplacement
+    active: s.active,
+    hour: s.hour,
+    minute: s.minute,
+    durationSec: s.durationSec,
+    weekDays: s.weekDays,
+    calMode: s.calMode,
+    intervalDays: s.intervalDays,
+    intervalStartMonth: s.intervalStartMonth,
+    intervalStartDay: s.intervalStartDay,
+    seasonStartMonth: s.seasonStartMonth,
+    seasonStartDay: s.seasonStartDay,
+    seasonEndMonth: s.seasonEndMonth,
+    seasonEndDay: s.seasonEndDay,
+    name: (s.name ? (s.name + " (copie)") : "")
+  };
+  
+  api('POST', '/api/schedule/save', body).then(r => {
+    if(!r.ok){
+      if(r.reason === 'full') alert("Impossible : plus de place libre sur cette vanne.");
+      else alert("Erreur lors de la duplication.");
+    }
+    return loadSchedules();
+  });
 }
 
 function toggleSched(valve, schedIdx, active) {

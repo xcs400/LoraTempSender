@@ -34,12 +34,16 @@ inline void valveHardClose(int idx){
     v.remainingSec = 0;
     v.openEndMs    = 0;
 #ifdef CONS_MQTT_ONLY
-    // Mode économie flash : flush NVS immédiat à chaque fermeture de vanne.
-    // Sans ce flush, aucune écriture NVS ne se déclencherait entre deux
-    // arrosages (le flush périodique de 30s étant désactivé), et la perte
-    // en cas de reboot brutal serait totale pour la session en cours.
-    // Ici, on capture les litres de chaque session dès la fermeture.
-    // Dépend de ConfigManager.h (include après ValveManager.h dans MainIocan_S.cpp)
+    // Mode CONS_MQTT_ONLY : pas de flush NVS ici. En mode CONS_MQTT_ONLY,
+    // valveConsFlushOne() est un no-op (les compteurs par vanne ne sont
+    // pas persistés en NVS — ConfigManager.h). La fermeture de vanne
+    // publie simplement l'état MQTT à la prochaine itération de
+    // mqttLoop() (mqttPublishState), qui sera retained sur HA. La
+    // cohérence "valeur MQTT après reboot = valeur de la session
+    // précédente" reste ainsi garantie via le broker, sans aucune
+    // écriture NVS.
+    // (L'appel à valveConsFlushOne est conservé par compatibilité de
+    // chemin de code, mais n'effectue rien en CONS_MQTT_ONLY.)
     valveConsFlushOne(idx);
 #endif
 }

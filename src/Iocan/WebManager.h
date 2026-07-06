@@ -242,19 +242,26 @@ inline void webSetup(){
             StaticJsonDocument<128> doc;
             if(deserializeJson(doc,data,len)){jsonResp(req,"{\"ok\":false}",400);return;}
             int v = doc["valve"] | -1;
+            String type = doc["type"] | "all";
             if(v<0||v>=VANNE_COUNT){jsonResp(req,"{\"ok\":false}",400);return;}
-            valveCons[v].pulsesTotal = 0;
-            valveCons[v].todayPulses = 0;
-            valveCons[v].carry = 0.0f;
-            for(int d=0;d<CONS_HISTORY_DAYS;d++){
-                valveCons[v].history[d].ymd = 0;
-                valveCons[v].history[d].pulses = 0;
-                valveCons[v].history[d].litres = 0;
+            
+            if(type == "today") {
+                valveCons[v].todayPulses = 0;
+                logAdd(v, "Compteur jour remis a zero");
+            } else {
+                valveCons[v].pulsesTotal = 0;
+                valveCons[v].todayPulses = 0;
+                valveCons[v].carry = 0.0f;
+                for(int d=0;d<CONS_HISTORY_DAYS;d++){
+                    valveCons[v].history[d].ymd = 0;
+                    valveCons[v].history[d].pulses = 0;
+                    valveCons[v].history[d].litres = 0;
+                }
+                logAdd(v, "Compteur consommation remis a zero");
             }
             valveConsFlushOne(v);
             lastMqttPubMs = 0; // Force MAJ MQTT immédiate
             jsonResp(req,"{\"ok\":true}");
-            logAdd(v, "Compteur de consommation remis a zero");
         }
     );
 
