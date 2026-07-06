@@ -284,7 +284,12 @@ struct SysConfig {
     char    nodeId[24]    = NODE_ID_DEFAULT;
     float   loraFreq      = LORA_FREQ_DEF;
     int8_t  loraPower     = LORA_POWER_DEF;
-    int32_t tzOffset      = 3600;         // UTC+1
+    int32_t tzOffset      = 3600;         // UTC+1 hiver (conservé pour compatibilité UI)
+    // Chaîne POSIX TZ — gère automatiquement heure été/hiver (DST).
+    // France : CET-1CEST,M3.5.0,M10.5.0/3
+    // Autres : voir https://github.com/nayarsystems/posix_tz_db
+    // Si vide, on retombe sur configTime(tzOffset, 0, ...) sans DST.
+    char    tzPosix[48]   = "CET-1CEST,M3.5.0,M10.5.0/3";
     char    ntpServer[48] = "pool.ntp.org";
     uint8_t irrigMode     = MODE_PARALLEL;
     uint32_t maxOpenSec   = 3600;
@@ -301,14 +306,14 @@ struct SysConfig {
 
 // --- Consommation par vanne ---
 struct DayStat {
-    uint16_t ymd;       // ex: 20260624
+    uint32_t ymd;       // ex: 20260624 (YYYYMMDD — nécessite uint32_t, max uint16_t=65535)
     uint32_t pulses;    // pulses attribués ce jour-là
     float    litres;    // = pulses / PULSES_PER_LITRE
 };
 
 struct ValveCons {
     unsigned long pulsesTotal = 0;   // total cumulé (persisté)
-    uint16_t todayYmd = 0;
+    uint32_t todayYmd = 0;           // YYYYMMDD (nécessite uint32_t, max uint16_t=65535)
     uint32_t todayPulses = 0;
     uint16_t todayIdx = 0;           // index d'écriture dans history (anneau)
     DayStat history[CONS_HISTORY_DAYS];

@@ -27,6 +27,7 @@ inline String configToJson(){
     doc["ssid"]         = sysConfig.ssid;
     doc["ntpServer"]    = sysConfig.ntpServer;
     doc["tzOffset"]     = sysConfig.tzOffset;
+    doc["tzPosix"]      = sysConfig.tzPosix;
     doc["loraFreq"]     = sysConfig.loraFreq;
     doc["loraPower"]    = sysConfig.loraPower;
     doc["nodeId"]       = sysConfig.nodeId;
@@ -70,12 +71,32 @@ inline String schedulesToJson(){
                            + (size_t)VANNE_COUNT * MAX_PROGRAMS * (JSON_OBJECT_SIZE(16) + perSchedule)
                            + 512; // marge fixe (clé "schedules" + alignement)
     DynamicJsonDocument doc(capacity);
+    // Champ méta: nombre total de slots et nombre utilisés (actifs ou nommés).
+    JsonObject meta = doc.createNestedObject("meta");
+    meta["vanneCount"]   = VANNE_COUNT;
+    meta["maxPerValve"]  = MAX_PROGRAMS;
+    int usedCount = 0;
+    for(int v=0;v<VANNE_COUNT;v++){
+        for(int p=0;p<MAX_PROGRAMS;p++){
+            Schedule& s = valves[v].schedules[p];
+            if(s.active || s.name[0] != '\0') usedCount++;
+        }
+    }
+    meta["usedCount"] = usedCount;
+
     JsonArray arr = doc.createNestedArray("schedules");
     for(int v=0;v<VANNE_COUNT;v++){
         for(int p=0;p<MAX_PROGRAMS;p++){
             Schedule& s = valves[v].schedules[p];
-            // N'exporter que les actifs OU toutes (pour édition)
+            // Indicateur explicite de validité: un slot est "utilisé" dès
+            // qu'il est actif OU qu'il porte un nom (même si désactivé).
+            bool used = s.active || (s.name[0] != '\0');
+            // On n'exporte que les slots utilisés pour éviter le bruit dans
+            // le JSON (et fournir un export "humainement" lisible). Le frontend
+            // peut distinguer un slot libre via l'absence d'entrée.
+            if(!used) continue;
             JsonObject o = arr.createNestedObject();
+            o["valid"]            = true;   // marqueur explicite (lecture/import)
             o["valve"]            = v;
             o["schedIdx"]         = p;
             o["active"]           = s.active;
@@ -209,9 +230,33 @@ inline void webSetup(){
             valveConsSaveOne(v);
         }
         lastDistributedTotal = 0;
+        lastMqttPubMs = 0; // Force la publication immédiate des zéros sur MQTT
         req->send(200, "application/json", String("{\"ok\":true}"));
         logSys("Compteur impulsions + suivi par vanne remis a zero");
     });
+
+    // ── Reset compteur conso d'une vanne POST /api/valve/reset_cons
+    server.on("/api/valve/reset_cons", HTTP_POST, [](AsyncWebServerRequest* req){},
+        nullptr,
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+            StaticJsonDocument<128> doc;
+            if(deserializeJson(doc,data,len)){jsonResp(req,"{\"ok\":false}",400);return;}
+            int v = doc["valve"] | -1;
+            if(v<0||v>=VANNE_COUNT){jsonResp(req,"{\"ok\":false}",400);return;}
+            valveCons[v].pulsesTotal = 0;
+            valveCons[v].todayPulses = 0;
+            valveCons[v].carry = 0.0f;
+            for(int d=0;d<CONS_HISTORY_DAYS;d++){
+                valveCons[v].history[d].ymd = 0;
+                valveCons[v].history[d].pulses = 0;
+                valveCons[v].history[d].litres = 0;
+            }
+            valveConsFlushOne(v);
+            lastMqttPubMs = 0; // Force MAJ MQTT immédiate
+            jsonResp(req,"{\"ok\":true}");
+            logAdd(v, "Compteur de consommation remis a zero");
+        }
+    );
 
     // ── Consommation par vanne (GET /api/consumption)
     server.on("/api/consumption", HTTP_GET, [](AsyncWebServerRequest* req){
@@ -303,6 +348,60 @@ inline void webSetup(){
     server.on("/api/schedules", HTTP_GET, [](AsyncWebServerRequest* req){
         jsonResp(req, schedulesToJson());
     });
+
+    // ── Import global des programmes depuis JSON
+    server.on("/api/schedules/import", HTTP_POST, [](AsyncWebServerRequest* req){},
+        nullptr,
+        [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
+            DynamicJsonDocument doc(16384);
+            DeserializationError err = deserializeJson(doc, data, len);
+            if(err){ jsonResp(req, "{\"ok\":false,\"reason\":\"json\"}", 400); return; }
+
+            JsonArray arr;
+            if(doc.is<JsonArray>()){
+                arr = doc.as<JsonArray>();
+            } else if(doc.containsKey("schedules") && doc["schedules"].is<JsonArray>()){
+                arr = doc["schedules"].as<JsonArray>();
+            } else if(doc.containsKey("programmes") && doc["programmes"].is<JsonArray>()){
+                arr = doc["programmes"].as<JsonArray>();
+            } else {
+                jsonResp(req, "{\"ok\":false,\"reason\":\"format\"}", 400); return;
+            }
+
+            for(int v=0;v<VANNE_COUNT;v++){
+                for(int p=0;p<MAX_PROGRAMS;p++){
+                    valves[v].schedules[p] = Schedule();
+                }
+            }
+
+            for(JsonVariant item : arr){
+                if(!item.is<JsonObject>()) continue;
+                int v = item["valve"] | -1;
+                int idx = item["schedIdx"] | -1;
+                if(v<0 || v>=VANNE_COUNT || idx<0 || idx>=MAX_PROGRAMS) continue;
+
+                Schedule s = Schedule();
+                s.active           = item["active"]           | false;
+                s.hour             = item["hour"]             | 6;
+                s.minute           = item["minute"]           | 0;
+                s.durationSec      = item["durationSec"]      | 900;
+                s.weekDays         = item["weekDays"]         | 0b0111111;
+                s.calMode          = item["calMode"]          | 0;
+                s.intervalDays     = item["intervalDays"]     | 2;
+                s.intervalStartMonth = item["intervalStartMonth"] | s.intervalStartMonth;
+                s.intervalStartDay   = item["intervalStartDay"]   | s.intervalStartDay;
+                s.seasonStartMonth = item["seasonStartMonth"] | 4;
+                s.seasonStartDay   = item["seasonStartDay"]   | 1;
+                s.seasonEndMonth   = item["seasonEndMonth"]   | 10;
+                s.seasonEndDay     = item["seasonEndDay"]     | 31;
+                if(item.containsKey("name")) strlcpy(s.name, item["name"], sizeof(s.name));
+                valves[v].schedules[idx] = s;
+            }
+
+            schedSave();
+            jsonResp(req, "{\"ok\":true}");
+        }
+    );
 
     // ── Sauver programme POST /api/schedule/save
     //
@@ -471,6 +570,7 @@ inline void webSetup(){
             // les flags qu'on veut pouvoir remettre à 0, on testerait
             // containsKey() à la place.
             sysConfig.tzOffset       = doc["tzOffset"]       | sysConfig.tzOffset;
+            if((v = doc["tzPosix"] | (const char*)nullptr)) strlcpy(sysConfig.tzPosix, v, sizeof(sysConfig.tzPosix));
             sysConfig.loraFreq       = doc["loraFreq"]       | sysConfig.loraFreq;
             sysConfig.loraPower      = doc["loraPower"]      | sysConfig.loraPower;
             sysConfig.irrigMode      = doc["irrigMode"]      | sysConfig.irrigMode;

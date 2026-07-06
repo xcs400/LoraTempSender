@@ -150,6 +150,23 @@ inline void mqttPublishDiscovery(){
         mqttPublishConfig("sensor", defs[i].obj, out);
     }
 
+    // Bouton de réinitialisation compteur global
+    {
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "Remise à zéro conso globale";
+        doc["object_id"]      = "pulse_total_reset";
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_pulse_total_reset";
+        doc["command_topic"]  = mqttTopic("button", "pulse_total_reset") + "/set";
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["payload_press"]  = "PRESS";
+        doc["icon"]           = "mdi:water-minus";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("button", "pulse_total_reset", out);
+    }
+
     // ── Une entité par vanne : sensor (litres today+total) + binary_sensor + switch
     for(int v=0;v<VANNE_COUNT;v++){
         char objBuf[24];
@@ -226,6 +243,23 @@ inline void mqttPublishDiscovery(){
             injectDevice(doc.as<JsonObject>());
             String out; serializeJson(doc, out);
             mqttPublishConfig("switch", oid, out);
+        }
+        // Bouton de RAZ pour cette vanne
+        {
+            char oid[32]; snprintf(oid,sizeof(oid),"valve_%d_reset_cons",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — Remise à zéro conso";
+            doc["object_id"]      = String(oid);
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["command_topic"]  = mqttTopic("button", oid) + "/set";
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["payload_press"]  = "PRESS";
+            doc["icon"]           = "mdi:water-minus";
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("button", oid, out);
         }
     }
     Serial.println("[MQTT] Discovery publié");
@@ -331,26 +365,64 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     }
 #endif
 
-    // topic attendu : <prefix>/switch/<mqttId>/valve_N/set
+    // topic attendu : <prefix>/<component>/<mqttId>/<objId>/set
     int idxSlash = t.lastIndexOf('/');
     if(idxSlash < 0) return;
     String leaf = t.substring(idxSlash+1); // "set" attendu
     if(leaf != "set") return;
-    int v = -1;
-    // parser ".../valve_<N>" juste avant "/set"
-    String base = t.substring(0, idxSlash); // retire /set
+
+    // Isoler le chemin de base et le composant (switch ou button)
+    String base = t.substring(0, idxSlash); // ex: homeassistant/switch/irrpro_hs3/valve_0
     int s = base.lastIndexOf('/');
     if(s < 0) return;
-    String obj = base.substring(s+1); // ex: valve_2
-    if(sscanf(obj.c_str(),"valve_%d",&v)!=1) return;
-    if(v<0||v>=VANNE_COUNT) return;
-    bool on = (p.indexOf("ON")>=0);
-    if(on){
-        valveHardOpen(v, CmdSource::WEB, sysConfig.maxOpenSec);
-        logAdd(v, "Ouverte via Home Assistant");
-    }else{
-        valveHardClose(v);
-        logAdd(v, "Fermée via Home Assistant");
+    String obj = base.substring(s+1); // ex: valve_0 ou pulse_total_reset
+    
+    // Identifier composant
+    String componentStr = sysConfig.mqttPrefix;
+    bool isSwitch = t.startsWith(componentStr + "/switch/");
+    bool isButton = t.startsWith(componentStr + "/button/");
+
+    if(isSwitch) {
+        int v = -1;
+        if(sscanf(obj.c_str(),"valve_%d",&v)==1 && v>=0 && v<VANNE_COUNT){
+            bool on = (p.indexOf("ON")>=0);
+            if(on){
+                valveHardOpen(v, CmdSource::WEB, sysConfig.maxOpenSec);
+                logAdd(v, "Ouverte via Home Assistant");
+            }else{
+                valveHardClose(v);
+                logAdd(v, "Fermée via Home Assistant");
+            }
+        }
+    } 
+    else if(isButton && p.indexOf("PRESS")>=0) {
+        if(obj == "pulse_total_reset") {
+            noInterrupts(); pulseCount = 0; interrupts();
+            persistedPulseCount = 0;
+            for(int vv=0;vv<VANNE_COUNT;vv++){
+                valveCons[vv].pulsesTotal = 0;
+                valveCons[vv].todayPulses = 0;
+                valveCons[vv].carry = 0.0f;
+                for(int d=0;d<CONS_HISTORY_DAYS;d++) valveCons[vv].history[d] = {0,0,0.0f};
+                valveConsSaveOne(vv);
+            }
+            pulseSave();
+            lastDistributedTotal = 0;
+            lastMqttPubMs = 0; // Force update MQTT
+            logSys("Compteur global remis a zero via Home Assistant");
+        } 
+        else {
+            int v = -1;
+            if(sscanf(obj.c_str(),"valve_%d_reset_cons",&v)==1 && v>=0 && v<VANNE_COUNT){
+                valveCons[v].pulsesTotal = 0;
+                valveCons[v].todayPulses = 0;
+                valveCons[v].carry = 0.0f;
+                for(int d=0;d<CONS_HISTORY_DAYS;d++) valveCons[v].history[d] = {0,0,0.0f};
+                valveConsFlushOne(v);
+                lastMqttPubMs = 0; // Force update MQTT
+                logAdd(v, "Compteur conso remis a zero via HA");
+            }
+        }
     }
 }
 
@@ -360,7 +432,10 @@ inline void onMqttConnect(bool sessionPresent){
     Serial.println("[MQTT] Connecté");
     String cmdTopic = String(sysConfig.mqttPrefix) + "/switch/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(cmdTopic.c_str(), 0);
+    String btnTopic = String(sysConfig.mqttPrefix) + "/button/" + sysConfig.mqttId + "/+/set";
+    mqttClient.subscribe(btnTopic.c_str(), 0);
     Serial.print("[MQTT] Abonné à: "); Serial.println(cmdTopic);
+    Serial.print("[MQTT] Abonné à: "); Serial.println(btnTopic);
     // Publication disponibilité
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);

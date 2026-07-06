@@ -36,7 +36,9 @@ inline String logToJson(uint16_t last=200){
         out+="{\"ts\":"+String(e.tsMs);
         out+=",\"epoch\":"+String((long)e.epoch);
         if(e.valveIdx==0xFF) out+=",\"valve\":\"SYS\"";
-        else out+=",\"valve\":"+String(e.valveIdx+1);
+        // Convention 0-based (valves[0] = V0) pour rester cohérent avec
+        // l'UI (qui numérote V0..VN-1) et avec les JSON d'export.
+        else out+=",\"valve\":"+String((int)e.valveIdx);
         String m=String(e.msg);
         m.replace("\"","\\\"");
         out+=",\"msg\":\""+m+"\"}";

@@ -25,6 +25,7 @@ inline void configLoad(){
     sysConfig.loraFreq     = prefs.getFloat("lFreq",  LORA_FREQ_DEF);
     sysConfig.loraPower    = prefs.getChar("lPow",    LORA_POWER_DEF);
     sysConfig.tzOffset     = prefs.getInt("tzOff",    3600);
+    prefs.getString("tzPosix", sysConfig.tzPosix, 48);
     sysConfig.irrigMode    = prefs.getUChar("iMode",  MODE_PARALLEL);
     sysConfig.maxOpenSec   = prefs.getUInt("maxOpen", 3600);
     sysConfig.manualForceSec = prefs.getUShort("mForce", FORCE_MANUAL_DUR_S);
@@ -56,6 +57,7 @@ inline void configSave(){
     prefs.putFloat("lFreq",   sysConfig.loraFreq);
     prefs.putChar("lPow",     sysConfig.loraPower);
     prefs.putInt("tzOff",     sysConfig.tzOffset);
+    if(sysConfig.tzPosix[0]) prefs.putString("tzPosix", sysConfig.tzPosix);
     prefs.putUChar("iMode",   sysConfig.irrigMode);
     prefs.putUInt("maxOpen",  sysConfig.maxOpenSec);
     prefs.putUShort("mForce", sysConfig.manualForceSec);
@@ -180,10 +182,10 @@ inline void safeRestart(const char* reason = nullptr){
 
 
 // ── Date du jour au format YYYYMMDD (0 si pas sync NTP)
-inline uint16_t todayYMD(){
+inline uint32_t todayYMD(){
     struct tm ti;
     if(!getLocalTime(&ti,5)) return 0;
-    return (uint16_t)((ti.tm_year+1900)*10000 + (ti.tm_mon+1)*100 + ti.tm_mday);
+    return (uint32_t)((ti.tm_year+1900)*10000 + (ti.tm_mon+1)*100 + ti.tm_mday);
 }
 
 // ── Consommation par vanne — chargement / sauvegarde NVS
@@ -207,7 +209,7 @@ inline void valveConsLoad(){
         valveCons[v].pulsesTotal = prefs.getULong(key, 0UL);
         // Index jour courant + pulses du jour
         snprintf(key,sizeof(key),"v%d_td",v);
-        valveCons[v].todayYmd = prefs.getUShort(key, 0);
+        valveCons[v].todayYmd = prefs.getUInt(key, 0);  // uint32_t — YYYYMMDD dépasse uint16_t
         snprintf(key,sizeof(key),"v%d_tp",v);
         valveCons[v].todayPulses = prefs.getUInt(key, 0);
         // Coefficient de calibration débit (défaut 1.0 = répartition égale,
@@ -254,7 +256,7 @@ inline void valveConsSaveOne(int v){
     snprintf(key,sizeof(key),"v%d_pc",v);
     prefs.putULong(key, valveCons[v].pulsesTotal);
     snprintf(key,sizeof(key),"v%d_td",v);
-    prefs.putUShort(key, valveCons[v].todayYmd);
+    prefs.putUInt(key, valveCons[v].todayYmd);  // uint32_t
     snprintf(key,sizeof(key),"v%d_tp",v);
     prefs.putUInt(key, valveCons[v].todayPulses);
     // Persiste le carry à chaque sauvegarde de routine (cet appel a lieu

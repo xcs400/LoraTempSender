@@ -562,7 +562,12 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   <div class="card">
     <div class="card-header">
       <h2>Programmes d'arrosage</h2>
-      <button class="btn btn-blue btn-sm" onclick="openSchedModal()">+ Ajouter</button>
+      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+        <button class="btn btn-ghost btn-sm" onclick="exportSchedules()">⬇ Export JSON</button>
+        <button class="btn btn-blue btn-sm" onclick="document.getElementById('sched-import-file').click()">⬆ Import JSON</button>
+        <input id="sched-import-file" type="file" accept="application/json,.json" style="display:none" onchange="importSchedulesFromFile(event)">
+        <button class="btn btn-blue btn-sm" onclick="openSchedModal()">+ Ajouter</button>
+      </div>
     </div>
     <div style="overflow-x: auto;">
       <table class="tbl" id="sched-table">
@@ -751,7 +756,17 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
       <h3>NTP / Heure</h3>
       <div class="config-row">
         <div><label>Serveur NTP</label><input id="cfg-ntp" type="text"></div>
-        <div><label>Fuseau horaire (secondes)</label><input id="cfg-tz" type="number"></div>
+        <div><label>Fuseau horaire (secondes, hiver)</label><input id="cfg-tz" type="number"></div>
+      </div>
+      <div class="config-row" style="margin-top:8px">
+        <div style="flex:1">
+          <label>Fuseau POSIX (heure été/hiver automatique) <a href="https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv" target="_blank" style="font-size:.75rem;color:var(--blue)">[aide]</a></label>
+          <input id="cfg-tz-posix" type="text" placeholder="ex: CET-1CEST,M3.5.0,M10.5.0/3">
+          <div style="font-size:.72rem;color:var(--text-muted);margin-top:3px">
+            🇫🇷 France (Paris) : <code style="color:var(--blue);cursor:pointer" onclick="document.getElementById('cfg-tz-posix').value=this.textContent">CET-1CEST,M3.5.0,M10.5.0/3</code>
+            &nbsp;—&nbsp;Si renseigné, prend la priorité sur le champ secondes ci-dessus.
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1085,10 +1100,12 @@ function getNextEventForValve(idx){
   const days = Math.floor(ms/86400000);
   const hours = Math.floor((ms%86400000)/3600000);
   const minutes = Math.floor((ms%3600000)/60000);
+  const seconds = Math.floor((ms%60000)/1000);
   let text='';
   if(days>0) text = `dans ${days} j${days>1?'s':''} à ${String(best.dt.getHours()).padStart(2,'0')}h${String(best.dt.getMinutes()).padStart(2,'0')}`;
   else if(hours>0) text = `dans ${hours} h ${minutes} m`;
-  else text = `dans ${minutes} m`;
+  else if(minutes>0) text = `dans ${minutes} m ${seconds} s`;
+  else text = `dans ${seconds} s`;
   return {text,dt:best.dt,sched:best.sched};
 }
 
@@ -1170,9 +1187,9 @@ function refreshCalibration(){
     if(phase === 'running'){
       progBox.style.display = 'block';
       launchBox.style.display = 'none';
-      const v = (d.currentValve !== undefined ? d.currentValve : -1) + 1;
+      const v = (d.currentValve !== undefined ? d.currentValve : -1);
       const total = (window.VANNE_COUNT_FALLBACK || 5);
-      document.getElementById('calib-current-valve').textContent = (v > 0 ? 'V'+v : '—');
+      document.getElementById('calib-current-valve').textContent = (v >= 0 ? 'V'+v : '—');
       const remain = d.remainingSec !== undefined ? d.remainingSec : 0;
       document.getElementById('calib-remaining').textContent = remain + ' s';
       document.getElementById('calib-progress-valve').textContent = v;
@@ -1368,13 +1385,14 @@ function renderValveCards() {
       <div class="vc-remaining">${isOpen ? fmtSec(v.remainingSec) : '—'}</div>
       <div class="vc-meta">Dernier démarrage: ${fmtEpoch(v.openedAt)}<br>
         Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
-      <div style="margin: 4px 0 10px; display:flex; gap:8px; flex-wrap:wrap;">
+      <div style="margin: 4px 0 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
         <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue)">
           💧 Aujourd'hui: <strong>${(v.litresToday||0).toFixed(2)} L</strong>
         </span>
         <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--surface2);color:var(--text-muted)">
           Total: <strong style="color:var(--text)">${(v.litresTotal||0).toFixed(2)} L</strong>
         </span>
+        <button class="btn" style="padding:2px 6px;height:22px;margin-left:auto;font-size:0.7rem;background:transparent;color:var(--text-muted);border:1px solid var(--border)" onclick="resetValveCons(${i})" title="Remettre à zéro la consommation de cette vanne">↺ RAZ</button>
       </div>
       <div style="margin: 8px 0 14px; padding: 8px 12px; background: var(--surface2); border-radius: 6px; border-left: 3px solid var(--blue); font-size: .8rem;">
         <span style="color:var(--text-muted);font-size:.75rem;display:block;margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px">Prochain événement</span>
@@ -1395,6 +1413,13 @@ function openValve(idx) {
 function closeValve(idx) {
   api('POST','/api/valve/close',{valve:idx,source:'WEB'})
     .then(()=>requestStatus());
+}
+function resetValveCons(idx) {
+  if(!confirm('Remettre à zéro la consommation de cette vanne (aujourd\'hui et total) ?')) return;
+  api('POST','/api/valve/reset_cons',{valve:idx}).then(()=>{
+    requestStatus();
+    if (document.getElementById('page-config').classList.contains('active')) refreshConsumption();
+  });
 }
 // CORRECTIF (bug 4) : "Tout fermer" coupe toutes les vannes y compris
 // celles forcées manuellement ou en cours de programme — action destructive
@@ -1426,6 +1451,54 @@ function requestStatus() {
 // ══════════════════════════════════════════════════════════
 // PROGRAMMES
 // ══════════════════════════════════════════════════════════
+function exportSchedules() {
+  const payload = {
+    exportedAt: new Date().toISOString(),
+    version: 1,
+    schedules: (schedules || []).map(s => s ? {...s} : null).filter(Boolean)
+  };
+  const blob = new Blob([JSON.stringify(payload, null, 2)], {type:'application/json'});
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `programmes-${new Date().toISOString().slice(0,19).replace(/:/g,'-')}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function importSchedulesFromFile(evt) {
+  const file = evt && evt.target && evt.target.files && evt.target.files[0];
+  if(!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const data = JSON.parse(reader.result);
+      const imported = Array.isArray(data) ? data : (data && Array.isArray(data.schedules) ? data.schedules : null);
+      if(!imported) {
+        alert('Fichier JSON invalide : aucune liste de programmes trouvée.');
+        return;
+      }
+      if(!confirm('Remplacer tous les programmes actuels par le contenu du fichier sélectionné ?')) {
+        return;
+      }
+      api('POST','/api/schedules/import',{schedules: imported}).then(d=>{
+        if(d && d.ok){
+          loadSchedules();
+          alert('Import des programmes terminé.');
+        } else {
+          alert('Échec de l\'import des programmes.');
+        }
+      });
+    } catch (err) {
+      alert('Fichier JSON invalide : ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+  evt.target.value = '';
+}
+
 function loadSchedules() {
   return api('GET','/api/schedules').then(data=>{
     schedules = data.schedules || [];
@@ -1687,7 +1760,9 @@ function renderCalendar() {
       for(let sd of scheds){
         const title = ((sd.name||'') + ' ' + String(sd.hour).padStart(2,'0')+':'+String(sd.minute).padStart(2,'0') + ' ('+fmtSec(sd.durationSec)+')').replace(/"/g,'&quot;');
         // use data-tip for custom tooltip and data-valve for coloring
-        badges += `<span class="cal-badge" data-valve="${sd.valve}" data-tip="${title}" style="background:var(--vcol${sd.valve});">V${sd.valve+1}</span>`;
+        // Convention 0-based (sd.valve=0 → "V0") cohérente avec le reste
+        // de l'UI et avec les JSON d'export programmes.
+        badges += `<span class="cal-badge" data-valve="${sd.valve}" data-tip="${title}" style="background:var(--vcol${sd.valve});">V${sd.valve}</span>`;
       }
       badges += '</div>';
     }
@@ -1766,6 +1841,7 @@ function loadConfig() {
     document.getElementById('cfg-wpass').value   = '';
     document.getElementById('cfg-ntp').value     = cfg.ntpServer||'pool.ntp.org';
     document.getElementById('cfg-tz').value      = cfg.tzOffset||3600;
+    document.getElementById('cfg-tz-posix').value = cfg.tzPosix||'CET-1CEST,M3.5.0,M10.5.0/3';
     document.getElementById('cfg-lfreq').value   = cfg.loraFreq||868.0;
     document.getElementById('cfg-lpow').value    = cfg.loraPower||10;
     document.getElementById('cfg-nodeid').value  = cfg.nodeId||'IRRIGATION01';
@@ -1837,16 +1913,50 @@ function formatNvs(){
     return;
   }
   // Feedback visuel : on désactive le bouton et on affiche un message
-  // avant que la requête parte. Le firmware répond puis reboot 400 ms
-  // après, on n'a donc pas besoin d'attendre longtemps côté UI.
+  // avant que la requête parte. Le firmware répond puis reboot ~400 ms
+  // après, on attend donc explicitement la réponse pour pouvoir informer
+  // l'utilisateur (sinon l'UI reste bloquée sur "Formatage en cours…").
   const btn = event && event.target;
   if(btn){ btn.disabled = true; btn.textContent = 'Formatage en cours…'; }
-  document.getElementById('nvs-detail').textContent = 'Formatage en cours, redémarrage imminent…';
-  api('POST','/api/format').then(r=>{
-    // Si on arrive ici c'est que la requête a abouti ; le firmware va
-    // rebooter dans 400 ms. On ne peut pas vraiment faire mieux côté UI
-    // (le WebSocket va se couper) — on laisse le message tel quel.
-  });
+  const det = document.getElementById('nvs-detail');
+  if(det) det.textContent = 'Formatage en cours, redémarrage imminent…';
+
+  // On n'utilise PAS api() ici car elle avale les erreurs réseau. Le reboot
+  // ferme brutalement la socket TCP, ce qui ferait passer le résultat pour
+  // un succès (r === {} → r.ok undefined). On fetch directement pour pouvoir
+  // distinguer "réponse OK du firmware avant reboot" de "socket coupée".
+  let answered = false;
+  const ctrl = new AbortController();
+  const timeoutId = setTimeout(()=>{
+    if(answered) return;
+    ctrl.abort();
+    if(det) det.textContent = 'Pas de réponse du boîtier (timeout). Vérifiez l\'alimentation et la connexion WiFi.';
+    if(btn){ btn.disabled = false; btn.textContent = '⚠ Formater la mémoire flash'; }
+  }, 5000);
+
+  fetch('/api/format', { method: 'POST', signal: ctrl.signal })
+    .then(r => r.json().then(j => ({ status: r.status, body: j })))
+    .then(({ status, body })=>{
+      answered = true;
+      clearTimeout(timeoutId);
+      if(body && body.ok){
+        if(btn) btn.textContent = '✓ Formatage OK — redémarrage…';
+        if(det) det.textContent = 'Formatage terminé. Le boîtier redémarre, la page sera inaccessible quelques secondes.';
+      } else {
+        const reason = (body && body.reason) ? body.reason : 'inconnue';
+        if(btn){ btn.disabled = false; btn.textContent = '⚠ Formater la mémoire flash'; }
+        if(det) det.textContent = 'Échec du formatage : ' + reason;
+        alert('Échec du formatage : ' + reason);
+      }
+    })
+    .catch(err=>{
+      // Si on a déjà reçu une réponse, ignorer une erreur tardive (race).
+      if(answered) return;
+      answered = true;
+      clearTimeout(timeoutId);
+      if(btn) btn.textContent = '⏳ Redémarrage…';
+      if(det) det.textContent = 'Le boîtier ne répond plus (normal pendant le reboot). Patientez 10-20 s puis rechargez la page.';
+    });
 }
 
 // ──────────────────────────────────────────────────────────
@@ -1998,6 +2108,7 @@ function saveConfig() {
     wifiPass: document.getElementById('cfg-wpass').value||undefined,
     ntpServer: document.getElementById('cfg-ntp').value,
     tzOffset: parseInt(document.getElementById('cfg-tz').value),
+    tzPosix: document.getElementById('cfg-tz-posix').value||undefined,
     loraFreq: parseFloat(document.getElementById('cfg-lfreq').value),
     loraPower: parseInt(document.getElementById('cfg-lpow').value),
     nodeId: document.getElementById('cfg-nodeid').value,
