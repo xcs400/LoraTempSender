@@ -3,7 +3,6 @@
 // ============================================================
 // WsManager.h — WebSocket broadcast (buildStatusJson)
 // ============================================================
-// Correspond à la SECTION 11 du fichier d'origine.
 //
 // buildStatusJson() est LA fonction d'état centrale : elle alimente à la
 // fois le broadcast WebSocket périodique (wsBroadcastStatus) et la
@@ -25,12 +24,6 @@ inline String buildStatusJson(){
     doc["uptime"] = millis()/1000;
     doc["heap"]   = ESP.getFreeHeap();
     doc["temp1"]  = temperature1;
-    // CORRECTIF (bug "TRem: -- °C" permanent) : ce champ avait été retiré
-    // du STATUS lors d'un refactor précédent, mais le frontend (WebContent.h,
-    // handleStatus()) lit toujours data.tempR pour l'afficher sur le dashboard.
-    // Sans ce champ, la température distante reçue par LoRa n'était jamais
-    // visible dans l'UI, même quand temperatureRemote contenait une valeur
-    // valide. On le réintègre pour rétablir l'affichage.
     doc["tempR"]  = temperatureRemote;
     // add current local time for UI
     time_t nowt = nowEpoch();
@@ -101,30 +94,23 @@ inline String buildStatusJson(){
     doc["pulses"] = totalPulses;
     float litresTotal = (float)totalPulses / PULSES_PER_LITRE;
     doc["litres"] = litresTotal;
-    // CORRECTIF : calcul de débit désormais partagé avec MQTT via computeFlowLpm()
-    // (auparavant dupliqué ici avec des statics locales invisibles depuis mqttPublishState()).
-    // On force 2 décimales via la chaîne (ArduinoJson tronque parfois les
-    // .0 quand la valeur tombe pile sur un entier ; on sérialise en string
-    // pour garantir la cohérence de l'affichage UI).
+
     {
         float f = computeFlowLpm(totalPulses);
         char buf[16];
         snprintf(buf, sizeof(buf), "%.2f", (double)f);
         doc["flow_lpm"] = buf;
     }
-    // AMÉLIORATION : expose l'état de connexion MQTT pour affichage d'un badge
-    // dans l'UI (à côté du badge WebSocket existant), pour que l'utilisateur
-    // sache si la liaison Home Assistant fonctionne sans avoir à consulter
-    // les logs série.
+
     doc["mqttConnected"] = mqttConnected;
     // AMÉLIORATION (NVS) : expose le niveau de remplissage de la partition
     // NVS (utilisé / total + pourcentage) pour que l'UI puisse afficher
     // une jauge dans la page Configuration et alerter l'utilisateur si la
     // partition s'approche de la saturation. Les données proviennent du
-    // cache rafraîchi périodiquement (toutes les 5s) par la loop() pour
+    // cache rafraîchi périodiquement (toutes les 10s) par la loop() pour
     // éviter de marteler le driver NVS à chaque broadcast.
     {
-        if(millis() - nvsStatsLastMs > 5000UL) nvsStatsRefresh();
+        if(millis() - nvsStatsLastMs > 10000UL) nvsStatsRefresh();
         JsonObject nvs = doc.createNestedObject("nvs");
         nvs["used"]  = (long)nvsStatsCached.usedEntries;
         nvs["free"]  = (long)nvsStatsCached.freeEntries;

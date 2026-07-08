@@ -25,6 +25,11 @@ AsyncMqttClient mqttClient;
 bool            mqttConnected = false;
 unsigned long   lastMqttPubMs = 0;
 unsigned long   lastMqttConnectAttemptMs = 0;
+// Initialisation du watchdog MQTT et du compteur d'échecs à 0. Le watchdog
+// est armé par onMqttConnect() (mets à jour mqttLastActivityMs) ; tant
+// qu'aucune connexion n'a eu lieu, il reste à 0 et n'a aucun effet.
+unsigned long   mqttLastActivityMs        = 0;
+uint8_t         mqttConsecutiveFailures   = 0;
 // Récupération MQTT au boot (mode CONS_MQTT_ONLY) : fenêtre de 3s après
 // connexion pour récupérer les valeurs retained et mettre à jour la RAM.
 // mqttRecoveryDone passe à true à l'expiration de la fenêtre dans mqttLoop().

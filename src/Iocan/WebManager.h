@@ -3,8 +3,7 @@
 // ============================================================
 // WebManager.h — Routes REST (AsyncWebServer)
 // ============================================================
-// Correspond à la SECTION 12 du fichier d'origine.
-// ============================================================
+
 
 #include "Globals.h"
 #include "LoggerManager.h"
@@ -12,7 +11,7 @@
 #include "ValveManager.h"
 #include "ValveCons.h"
 #include "WsManager.h"
-#include "WebContent.h"   // SPA HTML — seul fichier séparé (inchangé)
+#include "WebContent.h"   // SPA HTML — seul fichier séparé 
 
 // Helper: réponse JSON 200
 inline void jsonResp(AsyncWebServerRequest* req, const String& body, int code=200){
@@ -49,15 +48,7 @@ inline String configToJson(){
 
 // Construit le JSON des programmes (flat list)
 //
-// IMPORTANT (correctif bug "V3/V4 invisibles dans les programmes") :
-// Avec VANNE_COUNT vannes × MAX_PROGRAMS slots × ~16 champs par programme,
-// l'ancien buffer StaticJsonDocument<4096> était sous-dimensionné (besoin
-// réel de l'ordre de 8-10 Ko avec VANNE_COUNT=4, et bien plus avec 8 vannes).
-// ArduinoJson ne signale pas d'erreur quand le pool mémoire est plein : les
-// objets ajoutés après saturation sont silencieusement vides ou tronqués.
-// Comme la boucle remplit V1 puis V2 puis V3 puis V4 dans cet ordre, ce sont
-// les DERNIÈRES vannes traitées (V3, V4, ...) qui se retrouvaient amputées —
-// exactement le symptôme observé : leurs programmes "n'apparaissaient pas".
+// IMPORTANT  :
 // On utilise donc un DynamicJsonDocument dimensionné dynamiquement selon
 // VANNE_COUNT et MAX_PROGRAMS, avec une marge de sécurité, et on vérifie
 // explicitement le résultat de overflowed() pour journaliser le problème
@@ -214,13 +205,6 @@ inline void webSetup(){
             valveCons[v].todayPulses = 0;
             valveCons[v].todayYmd = todayYMD();
             valveCons[v].todayIdx = 0;
-            // CORRECTIF répartition : remettre le carry à zéro aussi. Sans
-            // ça, un résidu fractionnaire accumulé avant le reset (donc
-            // basé sur d'anciens pulses déjà remis à zéro par ailleurs)
-            // fausserait légèrement la toute première distribution après
-            // le reset (léger à-coup, pas une perte de bilan global, mais
-            // autant repartir propre puisque l'utilisateur attend un vrai
-            // zéro partout).
             valveCons[v].carry = 0.0f;
             for(int d=0;d<CONS_HISTORY_DAYS;d++){
                 valveCons[v].history[d].ymd = 0;
@@ -315,11 +299,7 @@ inline void webSetup(){
     });
 
     // ── Calibration débit : démarrer POST /api/calibration/start {durationSec}
-    //
-    // Sécurité : calibStart() refuse si une vanne est déjà ouverte (peu
-    // importe la source) — pas de fermeture automatique, conformément au
-    // choix de sécurité maximale. La réponse {ok:false, reason:"..."} permet
-    // à l'UI d'afficher le message d'erreur exact à l'utilisateur.
+
     server.on("/api/calibration/start", HTTP_POST, [](AsyncWebServerRequest* req){},
         nullptr,
         [](AsyncWebServerRequest* req, uint8_t* data, size_t len, size_t, size_t){
@@ -345,10 +325,7 @@ inline void webSetup(){
     });
 
     // ── Calibration débit : statut GET /api/calibration/status
-    // Utilisé par l'UI pour suivre la progression en polling (en complément
-    // du résumé léger inclus dans le STATUS WebSocket), et pour retrouver
-    // l'état exact après un reload de page puisque la calibration vit
-    // entièrement côté firmware.
+
     server.on("/api/calibration/status", HTTP_GET, [](AsyncWebServerRequest* req){
         jsonResp(req, calibStatusJson());
     });

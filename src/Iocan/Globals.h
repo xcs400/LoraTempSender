@@ -408,8 +408,26 @@ extern AsyncMqttClient mqttClient;
 extern bool            mqttConnected;
 extern unsigned long   lastMqttPubMs;
 extern unsigned long   lastMqttConnectAttemptMs;
-const unsigned long MQTT_PUB_INTERVAL_MS = 10000UL; // 10 s
-const unsigned long MQTT_RECONNECT_MS = 15000UL;
+// Watchdog MQTT : timestamp de la dernière activité (connect/ping/pong/pub/sub/receive).
+// Si on dépasse MQTT_WATCHDOG_MS (120s = 2 × keepalive) sans activité alors qu'on
+// était connecté, on force une déconnexion/reconnexion. Corrige le cas où
+// AsyncTCP perd un paquet keepalive pendant la nuit (routeur qui a oublié
+// l'association STA, coupure RF brève, etc.) et n'envoie jamais
+// onMqttDisconnect() → mqttConnected reste à true mais aucun message ne passe
+// → HA affiche l'appareil "online" mais ne reçoit plus rien (et inversement
+// côté ESP, on continue à croire qu'on est connecté).
+extern unsigned long   mqttLastActivityMs;
+// Compteur d'échecs CONSÉCUTIFS de connect() — utilisé pour le backoff
+// exponentiel (5s, 10s, 20s, 40s, 60s max) afin de ne pas marteler un
+// broker qui ne répond plus, tout en restant réactif quand le réseau
+// revient. Remis à 0 dans onMqttConnect() et dans mqttLoop() quand le
+// WiFi est KO (on ne doit pas pénaliser un échec de cause WiFi).
+extern uint8_t        mqttConsecutiveFailures;
+const unsigned long MQTT_PUB_INTERVAL_MS    = 10000UL;  // 10 s
+const unsigned long MQTT_RECONNECT_MS       = 15000UL;  // 15 s entre tentatives (throttle simple)
+const unsigned long MQTT_WATCHDOG_MS        = 120000UL; // 2 min sans activité → reconnexion forcée
+const unsigned long MQTT_BACKOFF_MIN_MS     = 5000UL;   // 5 s avant retry après 1er échec
+const unsigned long MQTT_BACKOFF_MAX_MS     = 60000UL;  // 60 s max entre retries (backoff)
 // Récupération MQTT au boot (mode CONS_MQTT_ONLY)
 // Voir MqttManager.h pour la logique et Globals.cpp pour les définitions.
 #ifdef CONS_MQTT_ONLY

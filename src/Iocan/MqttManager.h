@@ -208,6 +208,43 @@ inline void mqttPublishDiscovery(){
             String out; serializeJson(doc, out);
             mqttPublishConfig("sensor", oid, out);
         }
+        // Sensor pulses_today (valeur brute, sans conversion en litres)
+        // Utile pour le debug et les automations qui veulent raisonner
+        // directement en nombre d'impulsions (notamment quand la valeur
+        // convertie en litres est suspecte — arrondi, overflow, etc.).
+        {
+            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_pulses_today",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — pulses aujourd'hui";
+            doc["object_id"]      = String(oid);
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["state_topic"]    = mqttTopic("sensor", oid);
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["unit_of_measurement"] = "pulses";
+            doc["state_class"]    = "total_increasing";
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("sensor", oid, out);
+        }
+        // Sensor pulses_total (valeur brute, sans conversion en litres)
+        {
+            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_pulses_total",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — pulses total";
+            doc["object_id"]      = String(oid);
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["state_topic"]    = mqttTopic("sensor", oid);
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["unit_of_measurement"] = "pulses";
+            doc["state_class"]    = "total_increasing";
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("sensor", oid, out);
+        }
         // Sensor instant_flow_lpm : débit instantané PAR VANNE, lissé sur
         // FLOW_WINDOW_MS (4s) — publié à chaque mqttPublishState() (~10s)
         // via valveCons[v].instantFlowLpm (mis à jour 1×/s par
@@ -340,6 +377,25 @@ inline void mqttPublishState(){
         } else {
             pub("sensor", oid, String(litresTotV,2));
         }
+        // Valeurs brutes (pulses) par vanne, miroir de valveCons[v].pulsesTotal
+        // et valveCons[v].todayPulses. Mêmes garde-fous > 4.29G que pour la
+        // version litres : un unsigned long 32 bits ne peut pas représenter
+        // plus de ~4.29×10^9, donc on n'envoie PAS la valeur retenue dans
+        // ce cas (Home Assistant recevrait "4294967295" qui empoisonnerait
+        // ses statistiques "total_increasing" sur le long terme).
+        snprintf(oid,sizeof(oid),"valve_%d_pulses_today",v);
+        if (valveCons[v].todayPulses > 4290000000UL) {
+            // Rejet silencieux (cohérent avec litres_today)
+        } else {
+            pub("sensor", oid, String((unsigned long)valveCons[v].todayPulses));
+        }
+        snprintf(oid,sizeof(oid),"valve_%d_pulses_total",v);
+        if (valveCons[v].pulsesTotal > 4290000000UL) {
+            char b[80]; snprintf(b,80,"[MQTT] Rejet ecriture V%d_pulses_total > 4.29G", v+1);
+            logSys(b);
+        } else {
+            pub("sensor", oid, String((unsigned long)valveCons[v].pulsesTotal));
+        }
         snprintf(oid,sizeof(oid),"valve_%d_flow_lpm",v);
         // Débit instantané par vanne, calculé en RAM par
         // valveFlowUpdateAll() à 1 Hz. On formate à 2 décimales (idem
@@ -360,6 +416,8 @@ inline void mqttPublishState(){
 inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     String t(topic);
     String p(payload, len);
+    // Tout message reçu = activité sur la socket → reset du watchdog.
+    mqttLastActivityMs = millis();
 
 #ifdef CONS_MQTT_ONLY
     // ── Phase de récupération au boot : fenêtre de 3s après connexion MQTT.
@@ -417,6 +475,36 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                             if(today != 0 && valveCons[v].todayYmd == today && mqttPulses > valveCons[v].todayPulses){
                                 char b[80]; snprintf(b,sizeof(b),
                                     "[RECOVERY] V%d litres_today: NVS=%u < MQTT=%lu pulses — restauré",
+                                    v+1, valveCons[v].todayPulses, mqttPulses);
+                                logSys(b);
+                                valveCons[v].todayPulses = (uint32_t)mqttPulses;
+                                valveConsMarkDirty(v);
+                            }
+                        }
+                    } else if(sscanf(objId.c_str(), "valve_%d_pulses_total", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                        // Valeur brute en pulses (pas de conversion depuis des litres).
+                        // Mêmes règles : on ne récupère que si MQTT > NVS et < 4.29G.
+                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                        if(mqttPulses > 4290000000UL){
+                            char b[80]; snprintf(b,80,"[MQTT] Rejet V%d_pulses_total > 4.29G", v+1);
+                            logSys(b);
+                        } else if(mqttPulses > valveCons[v].pulsesTotal){
+                            char b[80]; snprintf(b,sizeof(b),
+                                "[RECOVERY] V%d pulses_total: NVS=%lu < MQTT=%lu — restauré",
+                                v+1, valveCons[v].pulsesTotal, mqttPulses);
+                            logSys(b);
+                            valveCons[v].pulsesTotal = mqttPulses;
+                            valveConsMarkDirty(v);
+                        }
+                    } else if(sscanf(objId.c_str(), "valve_%d_pulses_today", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                        if(mqttPulses > 4290000000UL){
+                            // Ignorer tacitement
+                        } else {
+                            uint16_t today = todayYMD();
+                            if(today != 0 && valveCons[v].todayYmd == today && mqttPulses > valveCons[v].todayPulses){
+                                char b[80]; snprintf(b,sizeof(b),
+                                    "[RECOVERY] V%d pulses_today: NVS=%u < MQTT=%lu — restauré",
                                     v+1, valveCons[v].todayPulses, mqttPulses);
                                 logSys(b);
                                 valveCons[v].todayPulses = (uint32_t)mqttPulses;
@@ -494,16 +582,25 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
 inline void onMqttConnect(bool sessionPresent){
     mqttConnected = true;
     mqttDiscoveryPublished = false;
+    // Reset du compteur d'échecs et armement du watchdog d'inactivité.
+    // Le watchdog a besoin d'un timestamp d'activité fraîche à chaque
+    // connexion réussie, sinon il considérerait immédiatement la connexion
+    // comme morte.
+    mqttConsecutiveFailures = 0;
+    mqttLastActivityMs      = millis();
     Serial.println("[MQTT] Connecté");
     String cmdTopic = String(sysConfig.mqttPrefix) + "/switch/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(cmdTopic.c_str(), 0);
+    mqttLastActivityMs = millis(); // subscribe = activité
     String btnTopic = String(sysConfig.mqttPrefix) + "/button/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(btnTopic.c_str(), 0);
+    mqttLastActivityMs = millis(); // subscribe = activité
     Serial.print("[MQTT] Abonné à: "); Serial.println(cmdTopic);
     Serial.print("[MQTT] Abonné à: "); Serial.println(btnTopic);
     // Publication disponibilité
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
+    mqttLastActivityMs = millis(); // publish = activité
 #ifdef CONS_MQTT_ONLY
     // ── Lancer la récupération des valeurs retained ────────────────────────────
     // On s'abonne à <prefix>/sensor/<mqttId>/+ pour recevoir TOUTES les
@@ -530,6 +627,25 @@ inline void onMqttConnect(bool sessionPresent){
 inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     mqttConnected = false;
     mqttDiscoveryPublished = false;
+    // ── RESET DU THROTTLE DE RECONNEXION ──
+    // lastMqttConnectAttemptMs est remis à 0 pour que la prochaine boucle
+    // mqttLoop() puisse retenter IMMÉDIATEMENT (sous réserve du backoff
+    // exponentiel ci-dessous). Sans ce reset, si la dernière tentative
+    // vient d'être lancée et qu'onMqttDisconnect arrive dans la même
+    // seconde, on attendrait 15s de plus pour rien (le throttle utilise
+    // "now - last > 15000", et last vient d'être posé).
+    lastMqttConnectAttemptMs = 0;
+    mqttLastActivityMs = 0; // désarmement du watchdog (rien à surveiller tant qu'on n'est pas connecté)
+    // ── BACKOFF EXPONENTIEL ──
+    // On incrémente le compteur d'échecs CONSÉCUTIFS. mqttLoop() s'en sert
+    // pour calculer le délai avant la prochaine tentative : 5s, 10s, 20s,
+    // 40s, 60s (plafond). Remis à 0 dans onMqttConnect() lors d'une
+    // reconnexion réussie.
+    if(mqttConsecutiveFailures < 10) mqttConsecutiveFailures++;
+    Serial.printf("[MQTT] Échecs consécutifs: %u (prochain retry dans %lu s)\n",
+                  (unsigned)mqttConsecutiveFailures,
+                  (unsigned long)(min(MQTT_BACKOFF_MAX_MS,
+                                      MQTT_BACKOFF_MIN_MS * (1UL << min((int)mqttConsecutiveFailures-1, 4)))) / 1000UL);
     // Libellé lisible de la raison — pratique quand le broker refuse la
     // connexion (auth invalide, version protocole incompatible, etc.) ou
     // quand l'ESP n'arrive simplement pas à joindre le port TCP.
@@ -653,21 +769,71 @@ inline void mqttSetup(){
 
 inline void mqttLoop(){
     if(!sysConfig.mqttEnabled){ mqttConnected = false; return; }
-    if(!mqttConnected && WiFi.status()==WL_CONNECTED){
-        unsigned long now = millis();
-        if(now - lastMqttConnectAttemptMs > MQTT_RECONNECT_MS){
+
+    unsigned long now = millis();
+    bool wifiUp = (WiFi.status() == WL_CONNECTED);
+
+    // ── RESET DU COMPTEUR D'ÉCHECS QUAND LE WIFI EST KO ──
+    // Si on a une rafale d'échecs MQTT, c'est potentiellement à cause
+    // d'une perte WiFi transitoire. Tant que le WiFi n'est pas rétabli,
+    // on n'incrémente pas le compteur d'échecs (la pile TCP refusera
+    // toujours le connect()). Sans ce reset, on accumulerait des
+    // échecs fantômes pendant la coupure WiFi et on aurait un backoff
+    // de 60s APRÈS le retour du WiFi — exactement le bug observé
+    // "ça reste KO toute la nuit".
+    if(!wifiUp){
+        mqttConsecutiveFailures = 0;
+    }
+
+    // ── WATCHDOG D'INACTIVITÉ ──
+    // Si on se croit connecté (mqttConnected=true) mais qu'aucune
+    // activité (publish, subscribe, message reçu) n'a eu lieu depuis
+    // MQTT_WATCHDOG_MS, c'est que la socket TCP est probablement
+    // morte dans un état zombie (routeur qui a perdu l'association
+    // STA, coupure RF brève, broker rebooté silencieusement, etc.).
+    // AsyncMqttClient n'a pas de mécanisme de ping natif visible côté
+    // firmware, donc on simule : on force la déconnexion, onMqttDisconnect
+    // est appelé, le compteur d'échecs s'incrémente, et la logique
+    // de backoff prend le relais.
+    if(mqttConnected && mqttLastActivityMs > 0
+       && (now - mqttLastActivityMs) > MQTT_WATCHDOG_MS){
+        Serial.printf("[MQTT] ⚠ Watchdog: aucune activité depuis %lu s — forçage reconnexion\n",
+                      (unsigned long)((now - mqttLastActivityMs) / 1000UL));
+        logSys("[MQTT] Watchdog inactivité — reconnexion forcée");
+        mqttClient.disconnect();
+        // On force mqttConnected à false ici, en plus de onMqttDisconnect,
+        // pour que la branche de reconnexion ci-dessous s'exécute tout
+        // de suite au prochain tour de loop() (disconnect() étant
+        // asynchrone, onMqttDisconnect peut arriver après).
+        mqttConnected = false;
+        mqttLastActivityMs = 0;
+    }
+
+    if(!mqttConnected && wifiUp){
+        // ── CALCUL DU DÉLAI DE RETRY (backoff exponentiel) ──
+        // Pour 1 échec : 5s ; 2 échecs : 10s ; 3 : 20s ; 4 : 40s ; 5+ : 60s
+        unsigned long backoffDelay = MQTT_RECONNECT_MS;
+        if(mqttConsecutiveFailures > 0){
+            unsigned long shift = min((unsigned long)mqttConsecutiveFailures - 1, 4UL);
+            unsigned long candidate = MQTT_BACKOFF_MIN_MS * (1UL << shift);
+            backoffDelay = min(candidate, MQTT_BACKOFF_MAX_MS);
+        }
+        if(now - lastMqttConnectAttemptMs > backoffDelay){
             lastMqttConnectAttemptMs = now;
-            Serial.println("[MQTT] Reconnexion…");
+            Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
+                          (unsigned)mqttConsecutiveFailures,
+                          (unsigned long)(backoffDelay / 1000UL));
             mqttClient.connect();
         }
     }
+
     if(mqttConnected){
-        unsigned long now = millis();
         if(!mqttDiscoveryPublished){
             mqttDiscoveryPublished = true;
             Serial.println("[MQTT] publication discovery forcée après connexion");
             mqttPublishDiscovery();
             mqttPublishState();
+            mqttLastActivityMs = millis(); // activity
             lastMqttPubMs = now;
         }
 #ifdef CONS_MQTT_ONLY
@@ -681,12 +847,14 @@ inline void mqttLoop(){
             // Désabonnement du pattern de recovery
             String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
             mqttClient.unsubscribe(recovPattern.c_str());
+            mqttLastActivityMs = millis(); // activity
             // Flush NVS des valeurs éventuellement restaurées
             valveConsFlushDirty();
             logSys("[CONS] Recovery MQTT terminée — NVS mis à jour");
             // Publication discovery + état fusionné après récupération
             mqttPublishDiscovery();
             mqttPublishState();
+            mqttLastActivityMs = millis(); // activity
             lastMqttPubMs = now;
         }
 #endif
@@ -699,6 +867,7 @@ inline void mqttLoop(){
 #else
             mqttPublishState();
 #endif
+            mqttLastActivityMs = millis(); // activity
         }
     }
 }

@@ -74,6 +74,34 @@
 //    dupliqué au global), en ajustant si besoin la vanne dont le carry est
 //    le plus avancé en cas de micro-dérive de calcul flottant cumulée sur
 //    le très long terme.
+//
+//    ────────────────────────────────────────────────────────────────────
+//    CORRECTIF (bug "pulsesTotal explose vers ~2^31 après quelques
+//    minutes de test avec ouvertures/fermetures rapprochées"). Diagnostiqué
+//    sur relevé terrain : valve_2_pulses_total = 2147487330, soit très
+//    précisément 0x80000000 + 3682. Cause : le garde-fou ci-dessus, dans
+//    le cas `diff>0`, fait `carry[best] -= (float)diff` SANS jamais
+//    vérifier que `carry[best]` (toujours < 1.0 par construction, puisque
+//    c'est un résidu déjà passé par un floor) reste >= diff. Le carry
+//    devient alors négatif — et RESTE négatif, car il persiste d'un appel
+//    à l'autre par design. Ce cas n'est pas rare : il se produit dès qu'un
+//    tour ne fait franchir le seuil entier à AUCUNE vanne ouverte alors
+//    que delta > 0 (typique avec un débitmètre basse résolution et 2+
+//    vannes ouvertes en même temps), donc en pratique dès les premières
+//    minutes d'un test avec plusieurs vannes.
+//    Au tour suivant, si carry reste négatif (ou est encore décrémenté par
+//    une nouvelle occurrence du même cas sur la même vanne), la ligne
+//    `(unsigned long)valveCons[i].carry` dans la boucle principale devient
+//    un cast d'un float négatif vers unsigned long — comportement INDÉFINI
+//    en C++. Sur la cible, ce cast ne clamp pas à 0 : il produit un motif
+//    binaire proche de 0x80000000, ajouté tel quel à pulsesTotal.
+//    Fix : clamper `carry` à 0.0f à deux endroits (après la correction
+//    diff>0, et défensivement juste après `carry += exact` dans la boucle
+//    principale, avant le cast). Voir marqueurs "FIX carry négatif"
+//    ci-dessous. Contrepartie acceptée : dans le cas rare où ce clamp
+//    s'active, l'égalité stricte assignedSum == delta au tour courant peut
+//    dériver de ±1 pulse — trade-off très largement préférable à un
+//    pulsesTotal corrompu à ~2 milliards.
 inline void pulseDistribute(unsigned long totalPulsesGlobal){
     if(totalPulsesGlobal < lastDistributedTotal){
         // Compteur régressé (RAZ via Web) : on resynchronise sans attribution
@@ -129,6 +157,13 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
         if(c <= 0.0f) c = 1.0f;
         float exact = (float)delta * (c / coeffSum);
         valveCons[i].carry += exact;
+        // FIX carry négatif : garde-fou défensif. `carry` ne devrait
+        // normalement jamais être négatif ici, mais si un tour précédent a
+        // laissé un résidu négatif (voir le 2e garde-fou plus bas), on ne
+        // veut à AUCUN prix caster une valeur négative en unsigned long
+        // (comportement indéfini en C++, cause racine du bug
+        // pulsesTotal ~ 2^31 observé sur le terrain).
+        if(valveCons[i].carry < 0.0f) valveCons[i].carry = 0.0f;
         unsigned long share = (unsigned long)valveCons[i].carry; // partie entière accumulée
         valveCons[i].carry -= (float)share;
         shares[i] = share;
@@ -149,6 +184,14 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
         if(best>=0 && diff>0){
             shares[best] += (unsigned long)diff;
             valveCons[best].carry -= (float)diff;
+            // FIX carry négatif : `diff` peut dépasser `carry[best]` (qui est
+            // toujours < 1.0 par construction, car déjà passé par un floor
+            // juste au-dessus). Sans ce clamp, carry devient négatif et LE
+            // RESTE (il persiste d'un appel à l'autre par design) jusqu'à
+            // provoquer, au tour suivant, le cast UB décrit en tête de
+            // fonction. C'est la cause racine confirmée du bug
+            // "pulsesTotal explose vers ~2^31".
+            if(valveCons[best].carry < 0.0f) valveCons[best].carry = 0.0f;
         } else if(best>=0 && diff<0){
             unsigned long take = (unsigned long)(-diff);
             if(shares[best] >= take) shares[best] -= take;
