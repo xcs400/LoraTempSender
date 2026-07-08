@@ -116,8 +116,8 @@ inline void loraRxProcess(){
     if(st == RADIOLIB_ERR_NONE && radio.getPacketLength()>0){
         loraRssi = radio.getRSSI();
         loraRxCount++;
-        Serial.print("[LoRa RX] "); Serial.println(msg);
-        logSys(("LoRa reçu: "+msg.substring(0,40)).c_str());
+   //     Serial.print("[LoRa RX] "); Serial.println(msg);
+   //     logSys(("LoRa reçu: "+msg.substring(0,40)).c_str());
 
         StaticJsonDocument<512> doc;
         if(deserializeJson(doc,msg) == DeserializationError::Ok){

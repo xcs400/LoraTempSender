@@ -195,6 +195,41 @@ inline void startCaptivePortal() {
 
     // Servir la page de config sur le serveur dédié (port 80)
     auto servePortal = [](AsyncWebServerRequest* req) {
+        // ── GARDE-FOU (bug "page portail servie à 192.168.1.29") ─────────
+        // Le symptôme : après une coupure STA brève (typiquement pendant
+        // un OTA), la loop() appelait startCaptivePortal() qui bindait
+        // captiveServer sur le port 80. Quand le STA revenait, on faisait
+        // bien WiFi.softAPdisconnect(true) mais on ne libérait jamais
+        // les handlers de captiveServer → ses routes (et le onNotFound
+        // ultra-agressif) restaient actives sur le port 80 et servaient
+        // le HTML du portail à n'importe quel client du LAN STA.
+        //
+        // Filet de sécurité : si on reçoit une requête alors que le STA
+        // est connecté ET que le client n'est PAS dans le subnet de l'AP
+        // (192.168.4.x), c'est forcément une requête du LAN qui doit être
+        // servie par `server` (SPA), pas par le portail. On renvoie une
+        // 302 vers l'IP STA pour forcer le navigateur à réémettre contre
+        // le bon serveur. Le 302 fait perdre la méthode POST du formulaire
+        // /save, mais c'est intentionnel : un client STA ne doit PAS
+        // pouvoir poster sur le portail de toute façon.
+        if(WiFi.status() == WL_CONNECTED && !captivePortalActive){
+            IPAddress clientIP = req->client()->remoteIP();
+            IPAddress apIP = WiFi.softAPIP();
+            // Si l'AP n'est plus annoncé (softAPIP == 0.0.0.0) OU si le
+            // client n'est pas dans le subnet 192.168.4.x, on redirige.
+            bool apSubnetClient = (apIP != IPAddress(0,0,0,0))
+                                && (clientIP[0] == apIP[0])
+                                && (clientIP[1] == apIP[1])
+                                && (clientIP[2] == apIP[2]);
+            if(!apSubnetClient){
+                String sta = WiFi.localIP().toString();
+                Serial.printf("[CaptivePortal] Garde-fou: client STA %s -> redirection 302 vers %s\n",
+                              clientIP.toString().c_str(), sta.c_str());
+                req->redirect("http://" + sta + "/");
+                return;
+            }
+        }
+
         String options = "";
         if(!captivePortalScanAvailable){
             options = "<option value=\"\">Scan indisponible — saisir le r&eacute;seau ci-dessous</option>";
@@ -299,6 +334,63 @@ inline void startCaptivePortal() {
 
     captiveServer.begin();
     Serial.println("[CaptivePortal] Serveur HTTP portail démarré");
+}
+
+// ============================================================
+// stopCaptivePortal() — Nettoyage COMPLET du portail captif
+// ============================================================
+//
+// À appeler quand le STA redevient prioritaire (WiFi reconnecté) ou quand
+// le timeout 2 min expire. Sans ce ménage, les handlers de captiveServer
+// (et notamment le onNotFound(servePortal) ultra-agressif) restent actifs
+// sur le port 80 et continuent à servir le HTML du portail à n'importe
+// quel client du LAN STA — y compris après le reboot de fin d'OTA quand
+// l'utilisateur tape 192.168.1.29 dans son navigateur. Voir le commentaire
+// dans servePortal() pour le détail du symptôme.
+//
+// Séquence de nettoyage :
+//   1) dnsServer.stop()        — libère le port 53 (sinon il capture
+//                                 toutes les requêtes DNS et répond par
+//                                 l'IP de l'AP, même si l'AP est mort)
+//   2) captiveServer.end()     — libère les handlers sur le port 80 et
+//                                 ferme la socket TCP du serveur
+//   3) WiFi.softAPdisconnect() — coupe l'annonce radio de l'AP (SSID
+//                                 n'apparaît plus dans les scans WiFi)
+//   4) WiFi.mode(WIFI_STA)     — sort du mode AP_STA et confirme qu'on
+//                                 est en STA pur (l'AP garde une
+//                                 présence interne tant qu'on n'a pas
+//                                 basculé le mode)
+//   5) Flags remis à false     — captivePortalActive + scanAvailable
+//
+// Idempotent : peut être appelé plusieurs fois sans danger (les méthodes
+// end/stop sont safe sur un objet déjà stoppé côté ESP-IDF).
+inline void stopCaptivePortal(){
+    if(!captivePortalActive) return;
+
+    Serial.println("[CaptivePortal] stopCaptivePortal() — nettoyage complet");
+
+    // 1) DNS
+    dnsServer.stop();
+
+    // 2) Serveur HTTP du portail
+    captiveServer.end();
+
+    // 3) AP radio
+    WiFi.softAPdisconnect(true);
+
+    // 4) Mode WiFi : retour en STA pur. Nécessaire car WiFi.mode() garde
+    //    l'état AP_STA tant qu'on n'a pas explicitement basculé, et un
+    //    AP "fantôme" peut continuer à répondre sur sa propre IP interne
+    //    même après softAPdisconnect().
+    if(WiFi.status() == WL_CONNECTED){
+        WiFi.mode(WIFI_STA);
+    }
+
+    // 5) Flags
+    captivePortalActive = false;
+    captivePortalScanAvailable = false;
+
+    Serial.println("[CaptivePortal] Portail arrêté — STA prioritaire");
 }
 
 #endif // IOCAN

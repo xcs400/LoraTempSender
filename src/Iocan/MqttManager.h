@@ -117,6 +117,17 @@ inline void injectDevice(JsonObject doc){
     }
 }
 
+
+inline bool parseValveObjId(const String& objId, const char* suffix, int& vOut){
+    if(!objId.startsWith("valve_") || !objId.endsWith(suffix)) return false;
+    String mid = objId.substring(6, objId.length() - strlen(suffix));
+    if(mid.length() == 0) return false;
+    for(size_t i=0;i<mid.length();i++) if(!isDigit(mid[i])) return false;
+    vOut = mid.toInt();
+    return vOut >= 0 && vOut < VANNE_COUNT;
+}
+
+
 inline void mqttPublishDiscovery(){
     if(!mqttConnected) return;
     String nodeTopic = mqttTopicNode(); // pour avail_topic et command_topic racine
@@ -419,41 +430,87 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     // Tout message reçu = activité sur la socket → reset du watchdog.
     mqttLastActivityMs = millis();
 
+
+  //  char b[200];
+  //  snprintf(b, sizeof(b), "MQTT RX : %s = %s",
+  //          topic,
+   //         p.c_str());
+//
+  //  logSys(b);
+
 #ifdef CONS_MQTT_ONLY
     // ── Phase de récupération au boot : fenêtre de 3s après connexion MQTT.
     // On lit les valeurs retained publiées lors de la session précédente et on
     // met à jour la RAM si MQTT > NVS (un compteur ne peut que progresser).
     // On ne traite pas comme commande switch pour ne pas interférer.
     //
-    // ATTENTION : `pulse_total` est INTENTIONNELLEMENT EXCLU de cette
-    // récupération (voir le bloc `if(objId == "pulse_total")` ci-dessous).
-    // Raison : le mode CONS_MQTT_ONLY ne persiste PAS pulse_total en NVS
-    // (ConfigManager.h::pulseLoad/pulseSave sont des no-ops), et on n'écrit
-    // JAMAIS `persistedPulseCount` à partir de MQTT retenu. C'est le fix
-    // anti-empoisonnement : si HA retenait une valeur buggée (4.29G
-    // observée), on ne la ré-injecterait plus dans la NVS à chaque reboot.
-    // Les compteurs par vanne (valve_N_litres_total/today) sont en
-    // revanche toujours récupérés depuis MQTT (leur persistance NVS est
-    // toujours active, c'est juste la persistance NVS du total global qui
-    // a été supprimée pour casser le cycle).
+    // NOTE : `pulse_total` et `litres_total` (compteur global) SONT
+    // récupérés depuis MQTT retained au boot, au même titre que les
+    // compteurs par vanne. En mode CONS_MQTT_ONLY, rien n'est persisté
+    // en NVS pour le total (ConfigManager.h::pulseLoad/pulseSave sont
+    // des no-ops), donc MQTT retained EST la source de vérité après
+    // chaque reboot.
+    //
+    // Garde-fous appliqués (identiques aux vannes) :
+    //   - rejet si valeur > 4.29G (= UINT32_MAX) pour ne pas polluer
+    //     persistedPulseCount avec une éventuelle valeur buggée retenue
+    //     par HA ;
+    //   - récupération UNIQUEMENT si MQTT > (persistedPulseCount +
+    //     pulseCount) — un compteur ne peut que progresser entre deux
+    //     sessions, donc une valeur MQTT plus basse que notre RAM est
+    //     forcément anormale et on conserve notre valeur locale.
     if(!mqttRecoveryDone){
         String sensorBase = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/";
         if(t.startsWith(sensorBase)){
             String objId = t.substring(sensorBase.length());
             float val = p.toFloat();
             if(objId == "pulse_total"){
-                    // Mode CONS_MQTT_ONLY : pulse_total n'est PAS persisté en NVS
-                    // (voir Globals.h / ConfigManager.h). On ignore donc totalement
-                    // la valeur MQTT retained ici : pas de "recovery" possible.
-                    // La valeur publiée par HA reste sa propre référence ; le
-                    // firmware repart de 0 à chaque reboot pour pulse_total.
-                    // (l'auto-empoisonnement observé venait précisément de ce
-                    // mécanisme : la valeur buggée 4.29G retenue par HA
-                    // écrasait la NVS à chaque reboot).
+                // Compteur global en pulses (source de vérité, plus précise
+                // que litres_total qui n'a que 2 décimales). En CONS_MQTT_ONLY
+                // rien n'est persisté en NVS pour le total, donc MQTT retained
+                // EST la seule référence entre deux boots.
+                unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                if(mqttPulses > 4290000000UL){
+                    logSys("[MQTT] Rejet pulse_total > 4.29G");
                 } else {
+                    unsigned long cnt;
+                    noInterrupts(); cnt = pulseCount; interrupts();
+                    unsigned long liveTotal = persistedPulseCount + cnt;
+                    if(mqttPulses > liveTotal){
+                        char b[120]; snprintf(b,sizeof(b),
+                            "[RECOVERY] pulse_total: live=%lu < MQTT=%lu — restauré",
+                            liveTotal, mqttPulses);
+                        logSys(b);
+                        persistedPulseCount = mqttPulses;
+                        // pas de pulseSave() : no-op en CONS_MQTT_ONLY
+                        // (cf. ConfigManager.h). Au prochain reboot, la
+                        // valeur sera de nouveau lue depuis MQTT retained.
+                    }
+                }
+            } else if(objId == "litres_total"){
+                // Fallback si pulse_total n'a pas été retenu (ex. : valeur
+                // > 4.29G publiée une fois, ou discovery régénérée sans).
+                // Conversion L→pulses moins précise (2 décimales perdues),
+                // mais toujours mieux que de repartir de 0.
+                unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                if(mqttPulses > 4290000000UL){
+                    logSys("[MQTT] Rejet litres_total > 4.29G");
+                } else {
+                    unsigned long cnt;
+                    noInterrupts(); cnt = pulseCount; interrupts();
+                    unsigned long liveTotal = persistedPulseCount + cnt;
+                    if(mqttPulses > liveTotal){
+                        char b[120]; snprintf(b,sizeof(b),
+                            "[RECOVERY] litres_total: live=%lu < MQTT=%lu pulses — restauré",
+                            liveTotal, mqttPulses);
+                        logSys(b);
+                        persistedPulseCount = mqttPulses;
+                    }
+                }
+            } else {
                     // valve_N_litres_today ou valve_N_litres_total (publiés en litres)
                     int v = -1;
-                    if(sscanf(objId.c_str(), "valve_%d_litres_total", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                    if(parseValveObjId(objId, "_litres_total", v)){
                         unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
                         if(mqttPulses > 4290000000UL){
                             char b[80]; snprintf(b,80,"[MQTT] Rejet V%d_total > 4.29G", v+1);
@@ -466,22 +523,38 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                             valveCons[v].pulsesTotal = mqttPulses;
                             valveConsMarkDirty(v);
                         }
-                    } else if(sscanf(objId.c_str(), "valve_%d_litres_today", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                    } else if( parseValveObjId(objId, "_litres_today", v  )){
                         unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+
                         if(mqttPulses > 4290000000UL){
                             // Ignorer tacitement ou petit log
                         } else {
                             uint16_t today = todayYMD();
-                            if(today != 0 && valveCons[v].todayYmd == today && mqttPulses > valveCons[v].todayPulses){
-                                char b[80]; snprintf(b,sizeof(b),
-                                    "[RECOVERY] V%d litres_today: NVS=%u < MQTT=%lu pulses — restauré",
-                                    v+1, valveCons[v].todayPulses, mqttPulses);
-                                logSys(b);
-                                valveCons[v].todayPulses = (uint32_t)mqttPulses;
-                                valveConsMarkDirty(v);
+
+                            if(today != 0){
+                                // Init / rollover journalier : si todayYmd est 0
+                                // (NVS jamais initialisée, ex. après un reset
+                                // complet) ou pointe sur une date antérieure, on
+                                // bascule sur la date du jour AVANT de comparer
+                                // les compteurs. Sans cette étape, la condition
+                                // `todayYmd == today` est toujours fausse et la
+                                // recovery ne se déclenche jamais alors que la
+                                // valeur MQTT retained est valide.
+                                if(valveCons[v].todayYmd != today){
+                                    valveCons[v].todayYmd = today;
+                                    valveCons[v].todayPulses = 0;
+                                }
+                                if(mqttPulses > valveCons[v].todayPulses){
+                                    char b[120]; snprintf(b,sizeof(b),
+                                        "[RECOVERY] V%d litres_today: NVS=%u < MQTT=%lu pulses — restauré",
+                                        v+1, valveCons[v].todayPulses, mqttPulses);
+                                    logSys(b);
+                                    valveCons[v].todayPulses = (uint32_t)mqttPulses;
+                                    valveConsMarkDirty(v);
+                                }
                             }
                         }
-                    } else if(sscanf(objId.c_str(), "valve_%d_pulses_total", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                    } else if(parseValveObjId(objId, "_pulses_total", v)){
                         // Valeur brute en pulses (pas de conversion depuis des litres).
                         // Mêmes règles : on ne récupère que si MQTT > NVS et < 4.29G.
                         unsigned long mqttPulses = (unsigned long)(val + 0.5f);
@@ -496,19 +569,27 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                             valveCons[v].pulsesTotal = mqttPulses;
                             valveConsMarkDirty(v);
                         }
-                    } else if(sscanf(objId.c_str(), "valve_%d_pulses_today", &v) == 1 && v >= 0 && v < VANNE_COUNT){
+                    } else if(parseValveObjId(objId, "_pulses_today", v)){
                         unsigned long mqttPulses = (unsigned long)(val + 0.5f);
                         if(mqttPulses > 4290000000UL){
                             // Ignorer tacitement
                         } else {
                             uint16_t today = todayYMD();
-                            if(today != 0 && valveCons[v].todayYmd == today && mqttPulses > valveCons[v].todayPulses){
-                                char b[80]; snprintf(b,sizeof(b),
-                                    "[RECOVERY] V%d pulses_today: NVS=%u < MQTT=%lu — restauré",
-                                    v+1, valveCons[v].todayPulses, mqttPulses);
-                                logSys(b);
-                                valveCons[v].todayPulses = (uint32_t)mqttPulses;
-                                valveConsMarkDirty(v);
+                            if(today != 0){
+                                // Mêmes règles que litres_today ci-dessus : on
+                                // initialise/roule todayYmd AVANT de comparer.
+                                if(valveCons[v].todayYmd != today){
+                                    valveCons[v].todayYmd = today;
+                                    valveCons[v].todayPulses = 0;
+                                }
+                                if(mqttPulses > valveCons[v].todayPulses){
+                                    char b[120]; snprintf(b,sizeof(b),
+                                        "[RECOVERY] V%d pulses_today: NVS=%u < MQTT=%lu — restauré",
+                                        v+1, valveCons[v].todayPulses, mqttPulses);
+                                    logSys(b);
+                                    valveCons[v].todayPulses = (uint32_t)mqttPulses;
+                                    valveConsMarkDirty(v);
+                                }
                             }
                         }
                     }
@@ -828,14 +909,29 @@ inline void mqttLoop(){
     }
 
     if(mqttConnected){
-        if(!mqttDiscoveryPublished){
-            mqttDiscoveryPublished = true;
-            Serial.println("[MQTT] publication discovery forcée après connexion");
+if(!mqttDiscoveryPublished){
+    mqttDiscoveryPublished = true;
+    #ifdef CONS_MQTT_ONLY
+        // En mode CONS_MQTT_ONLY on est encore abonné aux topics sensor/+
+        // pour la recovery : publier maintenant provoquerait un auto-écho
+        // (le firmware recevrait son propre message retained comme une
+        // "valeur de session précédente" et la re-traiterait). On diffère
+        // ce premier publish à la fin de la fenêtre de recovery.
+        if(mqttRecoveryDone){
             mqttPublishDiscovery();
             mqttPublishState();
-            mqttLastActivityMs = millis(); // activity
+            mqttLastActivityMs = millis();
             lastMqttPubMs = now;
         }
+    #else
+        mqttPublishDiscovery();
+        mqttPublishState();
+        mqttLastActivityMs = millis();
+        lastMqttPubMs = now;
+    #endif
+    }
+
+
 #ifdef CONS_MQTT_ONLY
         // ── Fin de fenêtre de récupération (3 s après connexion) ─────────────
         // On ferme la fenêtre, on flush les valeurs restaurées en NVS, on

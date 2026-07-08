@@ -272,7 +272,10 @@ void loop(){
         if(v1 != temp1Valid){
             temp1Valid = v1;
             if(!temp1Valid) logSys("Temp1: capteur absent ou erreur");
-            else { char b[40]; snprintf(b,40, "Temp1: %.2f C", temperature1); logSys(b); }
+            else {// char b[40]; 
+           //     snprintf(b,40, "Temp1: %.2f C", temperature1);
+           //      logSys(b);
+                 }
         } else if(temp1Valid){
             // log occasional stable reading (every 6th read ~1min) to avoid spam
             static int cnt1 = 0; cnt1 = (cnt1+1)%6; if(cnt1==0){ char b[40]; snprintf(b,40, "Temp1: %.2f C", temperature1); logSys(b); }
@@ -284,6 +287,13 @@ void loop(){
         if (pendingRestart) {
             if (millis() - pendingRestartMs > 2000) {
                 Serial.println("[CaptivePortal] Redémarrage de l'ESP...");
+                // Libérer le port 80 et le DNS AVANT le restart pour qu'un
+                // éventuel client qui était connecté à l'AP ne se retrouve
+                // pas avec un 502/503 pendant la fenêtre de redémarrage.
+                // Note : safeRestart() fait lui-même un flush NVS, donc
+                // l'ordre est important : d'abord libérer le réseau, puis
+                // redémarrer.
+                stopCaptivePortal();
                 safeRestart("Redémarrage portail captif — WiFi mis à jour");
             }
             return; // Bloquer l'irrigation uniquement pendant le redémarrage (les 2 secondes de délai)
@@ -428,8 +438,12 @@ void loop(){
                 // Portail actif : vérifier timeout
                 if(now - captivePortalStartMs >= CAPTIVE_PORTAL_TIMEOUT_MS){
                     Serial.println("Portail captif timeout — arrêt du portail, reprise irrigation et tentatives WiFi en arrière-plan");
-                    WiFi.softAPdisconnect(true);
-                    captivePortalActive = false;
+                    // stopCaptivePortal() libère le port 80 (handlers) et
+                    // le port 53 (DNS) — sans ce ménage, les routes du
+                    // portail (notamment onNotFound(servePortal)) restent
+                    // actives et peuvent répondre à des requêtes du LAN
+                    // STA après le retour du WiFi normal.
+                    stopCaptivePortal();
                     // tenter reconnexion immédiatement aux anciens paramètres
                     Serial.println("Tentative reconnexion WiFi aux anciens paramètres...");
                     WiFi.begin(sysConfig.ssid, sysConfig.wifiPass);
@@ -437,11 +451,15 @@ void loop(){
                 }
             }
         } else {
-            // WiFi rétabli : s'assurer que le portail est arrêté
+            // WiFi rétabli : s'assurer que le portail est arrêté proprement.
+            // stopCaptivePortal() fait le ménage complet (DNS + handlers
+            // captiveServer + mode WiFi → STA) pour éviter que le portail
+            // continue à répondre sur le port 80 après le retour du STA
+            // (bug observé : page du portail servie à un client qui
+            // demandait 192.168.1.29, voir CaptivePortal.h::servePortal).
             if(captivePortalActive){
                 Serial.println("WiFi rétabli — arrêt portail captif");
-                WiFi.softAPdisconnect(true);
-                captivePortalActive = false;
+                stopCaptivePortal();
             }
         }
     }
