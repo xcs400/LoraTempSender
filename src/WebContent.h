@@ -590,10 +590,11 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
             <th>Nom</th>
             <th style="text-align:right">Aujourd'hui</th>
             <th style="text-align:right">Total</th>
+            <th style="text-align:right">Débit (live)</th>
           </tr>
         </thead>
         <tbody id="status-cons-body">
-          <tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>
+          <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>
         </tbody>
       </table>
     </div>
@@ -1449,20 +1450,39 @@ function renderValveCards() {
     const isOpen   = v.state === 1;
     const isForced = isOpen && (v.source === 'INPUT' || v.source === 'WEB');
     const cardCls  = isForced ? 'forced' : isOpen ? 'open' : '';
-    // Débit calibré (L/min) pour cette vanne, affiché à côté du badge
-    // d'état. Calcul identique à celui du tableau de calibration
-    // (refreshCalibration) : flowCoeff * 60 / pulsesPerLitre. Mis en
-    // cache par refreshCalibration() dans window.__flowCoeffs et
-    // window.PULSES_PER_LITRE. Si la vanne n'a jamais été calibrée,
-    // on affiche un libellé discret "non calibré" plutôt qu'une valeur
-    // inventée (cohérent avec le reste de l'UI).
+    // Débit instantané MESURÉ pour cette vanne (L/min), affiché à côté
+    // du badge d'état. Source : v.flow_lpm exposé par buildStatusJson()
+    // (WsManager.h) — calculé par valveFlowUpdateAll() à 1 Hz sur
+    // FLOW_WINDOW_MS (4s). C'est la valeur RÉELLE (pas la capacité
+    // théorique), donc elle vaut 0 quand la vanne est fermée et qu'il
+    // n'y a plus de pulses en fenêtre.
+    //
+    // Fallback "capacité calibrée" : si v.flow_lpm est absent (ancien
+    // firmware) OU vaut 0 alors qu'on a un flowCoeff connu, on retombe
+    // sur flowCoeff * 60 / pulsesPerLitre comme avant — utile au boot
+    // quand valveFlowUpdateAll() n'a pas encore eu le temps de peupler
+    // l'anneau (première seconde).
     // NOTE: doit être déclaré AVANT badgeHtml qui le référence —
     // sinon "can't access lexical declaration ... before initialization".
-    const _fc = (window.__flowCoeffs && window.__flowCoeffs[i]) ? Number(window.__flowCoeffs[i]) : 0;
+    const _liveFlow = (v.flow_lpm !== undefined && v.flow_lpm !== null && v.flow_lpm !== '') ? Number(v.flow_lpm) : null;
+    const _fc  = (window.__flowCoeffs && window.__flowCoeffs[i]) ? Number(window.__flowCoeffs[i]) : 0;
     const _ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
-    const lpmHtml = (_fc > 0 && _ppl > 0)
-      ? `<span class="vc-flow" title="Débit calibré de la vanne">💧 ${(_fc * 60 / _ppl).toFixed(2)} L/min</span>`
-      : `<span class="vc-flow uncal" title="Cette vanne n'a pas encore été calibrée">— non calibré</span>`;
+    const _capLpm = (_fc > 0 && _ppl > 0) ? (_fc * 60 / _ppl) : 0;
+    let lpmHtml;
+    if(_liveFlow !== null && _liveFlow > 0.005){
+      // Débit mesuré > 0 : on affiche la valeur réelle. Couleur bleue
+      // pour signaler "mesure live". Tooltip rappelle qu'il s'agit
+      // d'une moyenne lissée sur FLOW_WINDOW_MS (4 s).
+      lpmHtml = `<span class="vc-flow" title="Débit instantané mesuré (moyenne lissée sur ~4 s)">💧 ${_liveFlow.toFixed(2)} L/min</span>`;
+    } else if(_capLpm > 0){
+      // Pas (encore) de débit mesuré, vanne calibrée : on affiche la
+      // capacité théorique. Couleur discrète pour différencier d'une
+      // mesure live.
+      lpmHtml = `<span class="vc-flow uncal" title="Débit théorique (= capacité calibrée) — pas de mesure en ce moment">0.00 L/min · cap. ${_capLpm.toFixed(2)}</span>`;
+    } else {
+      // Vanne jamais calibrée : on affiche un libellé discret.
+      lpmHtml = `<span class="vc-flow uncal" title="Cette vanne n'a pas encore été calibrée">— non calibré</span>`;
+    }
     // Le badge L/min est accolé au badge d'état. Pour les vannes
     // fermées : affichage "à côté du status fermé" (demande explicite).
     // Pour les vannes ouvertes/forcées : idem, pour rappeler la capacité
@@ -1473,7 +1493,36 @@ function renderValveCards() {
         ? `<span class="vc-badge badge-open">● Ouverte (${v.source})</span>`
         : `<span class="vc-badge badge-closed">◌ Fermée</span>`) + lpmHtml;
     const nextEv = getNextEventForValve(i);
-    const nextHtml = nextEv ? ( (nextEv.sched && nextEv.sched.name ? (nextEv.sched.name+' — ') : '') + nextEv.text ) : '—';
+    // Construction du HTML "Prochain événement" enrichi :
+    //   - nom du programme (s'il existe) en titre
+    //   - texte de compte à rebours ("dans 2 j à 06h00", etc.)
+    //   - durée prévue (au format heures/minutes/secondes, via fmtSec)
+    //   - volume prévu en litres, calculé à partir de flowCoeff[i] /
+    //     pulsesPerLitre × durationSec — caché si la vanne n'est
+    //     pas calibrée (sinon on afficherait une valeur inventée,
+    //     cf. règle déjà appliquée au "Restant" sous vc-remaining).
+    let nextHtml;
+    if(nextEv){
+      const s = nextEv.sched || {};
+      const name = s.name ? s.name : 'Programme';
+      const dur  = (s.durationSec !== undefined) ? fmtSec(s.durationSec) : '—';
+      const fc   = (window.__flowCoeffs && window.__flowCoeffs[i]) ? Number(window.__flowCoeffs[i]) : 0;
+      const ppl  = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
+      const vol  = (fc > 0 && ppl > 0 && s.durationSec)
+                   ? (s.durationSec * fc / ppl).toFixed(2) + ' L'
+                   : null;
+      const volHtml = vol
+        ? `<span style="color:var(--blue);font-weight:600;margin-left:4px">💧 ${vol}</span>`
+        : '';
+      nextHtml = `
+        <div style="color:var(--text);font-weight:600;margin-bottom:3px">${name}</div>
+        <div style="color:var(--text-muted);font-size:.78rem;margin-bottom:4px">⏱ ${nextEv.text}</div>
+        <div style="font-size:.78rem">
+          <span style="color:var(--text-muted)">Durée :</span> <strong>${dur}</strong>${volHtml}
+        </div>`;
+    } else {
+      nextHtml = '<span style="color:var(--text-muted)">—</span>';
+    }
     // Volume restant = flowCoeff (pulses/s) × remainingSec / pulsesPerLitre
     // flowCoeffs est mis en cache par refreshCalibration() dans window.__flowCoeffs
     // (et pulsesPerLitre dans window.PULSES_PER_LITRE). Tant qu'aucune
@@ -1517,8 +1566,8 @@ function renderValveCards() {
         </span>
       </div>
       <div style="margin: 8px 0 14px; padding: 8px 12px; background: var(--surface2); border-radius: 6px; border-left: 3px solid var(--blue); font-size: .8rem;">
-        <span style="color:var(--text-muted);font-size:.75rem;display:block;margin-bottom:2px;text-transform:uppercase;letter-spacing:0.5px">Prochain événement</span>
-        <strong style="color:var(--text);">${nextHtml}</strong>
+        <span style="color:var(--text-muted);font-size:.75rem;display:block;margin-bottom:4px;text-transform:uppercase;letter-spacing:0.5px">Prochain événement</span>
+        ${nextHtml}
       </div>
       <div class="vc-actions">
         <button class="btn btn-green btn-sm" onclick="showForceModal(${i})">Ouvrir</button>
@@ -2616,21 +2665,45 @@ function refreshConsumption(){
       </tr>`;
     }).join('');
     // Version compacte pour la boîte "État du système" du dashboard
-    // (4 colonnes, sans l'historique détaillé — plus lisible sur petit écran).
+    // (5 colonnes, sans l'historique détaillé — plus lisible sur petit écran).
+    // La 5e colonne "Débit (live)" réutilise v.instantFlowLpm exposé
+    // par /api/consumption (même calcul que valves[i].flow_lpm dans
+    // buildStatusJson() côté WebSocket, lissé sur FLOW_WINDOW_MS = 4s).
+    // On retrouve la valeur par vanne en cherchant dans valves[] (le
+    // cache global rafraîchi par handleStatus), plutôt que d'appeler
+    // /api/status — ça évite un round-trip HTTP et garantit la
+    // cohérence visuelle entre le badge des cartes de vanne et cette
+    // colonne du tableau (même source, même valeur).
     const shortHtml = d.valves.map(v=>{
       const today  = v.litresToday  || 0;
       const total  = v.litresTotal  || 0;
+      // Récupère la valeur live du cache (valves[] est mis à jour 1×/s par
+      // handleStatus). Fallback sur l'instantFlowLpm exposé par
+      // /api/consumption si jamais le WS n'a pas encore reçu de STATUS.
+      let flowLpm = null;
+      if(Array.isArray(valves) && valves[v.valve] && valves[v.valve].flow_lpm !== undefined){
+        flowLpm = Number(valves[v.valve].flow_lpm);
+      } else if(v.instantFlowLpm !== undefined){
+        flowLpm = Number(v.instantFlowLpm);
+      }
+      let flowCell;
+      if(flowLpm !== null && !isNaN(flowLpm) && flowLpm > 0.005){
+        flowCell = `<span style="color:var(--blue);font-weight:600">${flowLpm.toFixed(2)}</span>`;
+      } else {
+        flowCell = '<span style="color:var(--text-muted)">0.00</span>';
+      }
       return `<tr>
         <td><strong>V${v.valve}</strong></td>
         <td>${v.name||'V'+v.valve}</td>
         <td style="text-align:right;color:${today>0?'var(--blue)':'var(--text-muted)'};font-weight:600">${today.toFixed(2)} L</td>
         <td style="text-align:right">${total.toFixed(2)} L</td>
+        <td style="text-align:right">${flowCell} <span style="color:var(--text-muted);font-size:.7rem">L/min</span></td>
       </tr>`;
     }).join('');
     const tb1 = document.getElementById('cons-body');
     const tb2 = document.getElementById('status-cons-body');
     if(tb1) tb1.innerHTML = longHtml;
-    if(tb2) tb2.innerHTML = shortHtml || '<tr><td colspan="4" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>';
+    if(tb2) tb2.innerHTML = shortHtml || '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>';
   });
 }
 

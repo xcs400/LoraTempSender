@@ -12,7 +12,7 @@
 
 #include "Globals.h"
 #include "LoggerManager.h"
-
+inline void valveConsResetInstantFlow(int idx);
 // Ferme physiquement une vanne, met à jour état
 inline void valveHardClose(int idx){
     if(idx<0||idx>=VANNE_COUNT) return;
@@ -46,6 +46,9 @@ inline void valveHardClose(int idx){
     // chemin de code, mais n'effectue rien en CONS_MQTT_ONLY.)
     valveConsFlushOne(idx);
 #endif
+
+valveConsResetInstantFlow(idx);
+
 }
 
 // Ouvre physiquement une vanne avec priorité et durée

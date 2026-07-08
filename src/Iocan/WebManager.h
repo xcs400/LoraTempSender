@@ -289,6 +289,14 @@ inline void webSetup(){
             // seul, ou 1.0 par défaut si jamais calibré) — utile pour que
             // l'UI affiche les coefficients courants même hors calibration.
             o["flowCoeff"]        = valveCons[v].flowCoeff;
+            // Débit instantané PAR VANNE (L/min, lissé sur FLOW_WINDOW_MS=4s
+            // par valveFlowUpdateAll() à 1 Hz). Exposé ici pour que la
+            // colonne "Débit (live)" du tableau de conso affiche une
+            // valeur même sans WebSocket connecté (refresh manuel via
+            // le bouton ↻). Voir aussi valves[i].flow_lpm dans le JSON
+            // WebSocket (buildStatusJson / WsManager.h) pour la version
+            // temps réel. Formaté à 2 décimales pour rester compact.
+            o["instantFlowLpm"]  = valveCons[v].instantFlowLpm;
             JsonArray hist = o.createNestedArray("history");
             // On parcourt l'historique par ordre chronologique inverse (le plus récent d'abord)
             int start = (valveCons[v].todayIdx - 1 + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;

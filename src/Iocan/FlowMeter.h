@@ -3,14 +3,6 @@
 // ============================================================
 // FlowMeter.h — Débitmètre partagé (WebSocket + MQTT)
 // ============================================================
-// Correspond à la SECTION 3b du fichier d'origine.
-//
-// CORRECTIF : auparavant le calcul de débit instantané (L/min) vivait
-// dans des variables `static` locales à buildStatusJson(), donc invisible
-// depuis mqttPublishState() qui republiait toujours 0.0 pour flow_lpm.
-// On extrait le calcul ici, dans une fonction partagée par les deux
-// consommateurs (WebSocket et MQTT).
-//
 // Calcul : on garde en RAM un anneau de (timestamp, pulses) sur une
 // fenêtre glissante de FLOW_WINDOW_MS millisecondes. flowUpdate() est
 // appelée ~1×/s depuis loop() et recalcule le débit moyen sur tous les
@@ -87,5 +79,46 @@ inline void flowUpdate(unsigned long totalPulses){
 inline float computeFlowLpm(unsigned long /*totalPulsesIgnored*/){
     return flowCurrentLpm;
 }
+
+
+
+// ── Calcul générique : débit moyen (L/min) sur un anneau d'échantillons ──
+// Factorisé pour être appelé identiquement sur le débit global (flowRing)
+// et sur le débit par vanne (voir valveFlowRing plus bas) : même méthode
+// de lissage, même fenêtre FLOW_WINDOW_MS, pour que les débits par vanne
+// restent cohérents (sommables) avec le débit global affiché.
+inline float flowComputeFromRing(FlowSample* ring, uint8_t head, uint8_t count, float previousLpm){
+    unsigned long nowMs = millis();
+    unsigned long cutoff = (nowMs > FLOW_WINDOW_MS) ? (nowMs - FLOW_WINDOW_MS) : 0;
+    unsigned long totalDeltaMs = 0;
+    unsigned long totalDeltaP  = 0;
+    int usedSamples = 0;
+
+    int curIdx = (head - 1 + FLOW_SAMPLES) % FLOW_SAMPLES;
+    unsigned long prevMs    = ring[curIdx].tMs;
+    unsigned long prevPulse = ring[curIdx].pulses;
+
+    for(int k=1; k<count; k++){
+        int idx = (head - 1 - k + FLOW_SAMPLES) % FLOW_SAMPLES;
+        if(ring[idx].tMs < cutoff) break;
+        unsigned long thisMs    = ring[idx].tMs;
+        unsigned long thisPulse = ring[idx].pulses;
+        unsigned long dMs = prevMs - thisMs;
+        if(dMs > 0){
+            totalDeltaMs += dMs;
+            if(prevPulse > thisPulse) totalDeltaP += (prevPulse - thisPulse);
+            usedSamples++;
+        }
+        prevMs    = thisMs;
+        prevPulse = thisPulse;
+    }
+
+    if(usedSamples == 0 || totalDeltaMs == 0){
+        return previousLpm; // pas assez de recul : on garde la dernière valeur connue
+    }
+    float litresDelta = (float)totalDeltaP / PULSES_PER_LITRE;
+    return litresDelta * (60000.0f / (float)totalDeltaMs);
+}
+
 
 #endif // IOCAN

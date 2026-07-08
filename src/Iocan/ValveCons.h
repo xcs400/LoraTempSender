@@ -6,15 +6,19 @@
 // Correspond aux SECTION 3c et 7b du fichier d'origine :
 //   - pulseDistribute()  : répartition des pulses entre vannes ouvertes
 //   - calibStart/Tick/Abort/Finish : calibration débit (machine à états)
+//   - valveFlowUpdateAll() : débit instantané par vanne (fenêtre glissante,
+//     même méthode que le débit global, voir FlowMeter.h)
 //
-// Dépend de ValveManager.h (valveHardOpen/valveHardClose) et de
-// ConfigManager.h (todayYMD, valveConsSaveOne, valveConsSaveFlowCoeff).
+// Dépend de ValveManager.h (valveHardOpen/valveHardClose), de
+// ConfigManager.h (todayYMD, valveConsSaveOne, valveConsSaveFlowCoeff)
+// et de FlowMeter.h (FlowSample, flowComputeFromRing, FLOW_SAMPLES).
 // ============================================================
 
 #include "Globals.h"
 #include "LoggerManager.h"
 #include "ConfigManager.h"
 #include "ValveManager.h"
+#include "FlowMeter.h"
 
 // ── Distribution au prorata des coefficients de calibration : à chaque
 //    delta de pulses global, on attribue à chaque vanne ouverte une part
@@ -177,6 +181,48 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
     // totale : ~3 put/vanne/min au lieu de ~600/min — divise l'usure NVS
     // par 200× et élimine la cause du NOT_ENOUGH_SPACE.
     for(int i=0;i<VANNE_COUNT;i++) if(valves[i].isOpen) valveConsMarkDirty(i);
+}
+
+// ============================================================
+// DÉBIT INSTANTANÉ PAR VANNE (fenêtre glissante)
+// ============================================================
+// Même méthode que le débit global (cf. FlowMeter.h::flowUpdate /
+// flowComputeFromRing) : un anneau (timestamp, pulses cumulés) par vanne,
+// et un calcul de débit moyen sur la fenêtre FLOW_WINDOW_MS. Cette
+// cohérence de méthode permet de comparer/sommer les débits par vanne
+// avec le débit global déjà affiché (doc["flow_lpm"] dans
+// buildStatusJson()) sans écart de méthodologie.
+//
+// Alimenté en continu (vanne ouverte ou non) pour que le débit d'une
+// vanne qui vient de se fermer redescende progressivement à 0 dans la
+// fenêtre au lieu de chuter instantanément à l'appel suivant.
+inline FlowSample valveFlowRing[VANNE_COUNT][FLOW_SAMPLES];
+inline uint8_t    valveFlowHead[VANNE_COUNT]  = {0};
+inline uint8_t    valveFlowCount[VANNE_COUNT] = {0};
+
+// À appeler ~1×/s depuis loop(), à côté de l'appel existant à flowUpdate().
+inline void valveFlowUpdateAll(){
+    for(int i=0;i<VANNE_COUNT;i++){
+        unsigned long nowMs = millis();
+        valveFlowRing[i][valveFlowHead[i]].tMs    = nowMs;
+        valveFlowRing[i][valveFlowHead[i]].pulses = valveCons[i].pulsesTotal;
+        valveFlowHead[i] = (valveFlowHead[i] + 1) % FLOW_SAMPLES;
+        if(valveFlowCount[i] < FLOW_SAMPLES) valveFlowCount[i]++;
+
+        valveCons[i].instantFlowLpm = flowComputeFromRing(
+            valveFlowRing[i], valveFlowHead[i], valveFlowCount[i],
+            valveCons[i].instantFlowLpm
+        );
+    }
+}
+
+// Remet à zéro le débit et l'historique d'anneau d'une vanne à sa
+// fermeture, pour ne pas laisser une dernière valeur affichée "figée".
+// À appeler depuis valveHardClose() (ValveManager.h).
+inline void valveConsResetInstantFlow(int i){
+    valveCons[i].instantFlowLpm = 0.0f;
+    valveFlowHead[i]  = 0;
+    valveFlowCount[i] = 0;
 }
 
 // ============================================================

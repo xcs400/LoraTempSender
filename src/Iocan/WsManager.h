@@ -55,6 +55,21 @@ inline String buildStatusJson(){
         o["litresTotal"] = litresTotal;
         o["pulsesToday"] = (valveCons[i].todayYmd == today) ? (long)valveCons[i].todayPulses : 0;
         o["pulsesTotal"] = (long)valveCons[i].pulsesTotal;
+        // Débit instantané PAR VANNE (L/min), lissé sur FLOW_WINDOW_MS
+        // (4s) par valveFlowUpdateAll() appelé à 1 Hz depuis loop().
+        // Méthode identique au débit global : moyenne sur un anneau de
+        // (timestamp, pulses) glissant — garantit que Σ instantFlowLpm[i]
+        // reste ≈ flow_lpm global (±1 pulse de marge, dû au carry de
+        // pulseDistribute()). On formate en string "%.2f" pour éviter
+        // qu'ArduinoJson ne tronque les .0 quand la valeur tombe pile
+        // sur un entier (cohérent avec ce qui est fait pour flow_lpm
+        // global plus bas).
+        {
+            float f = valveCons[i].instantFlowLpm;
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.2f", (double)f);
+            o["flow_lpm"] = buf;
+        }
     }
 
     // ── Entrées/Sorties pour la page web E/S (similaire à OLED page 3)

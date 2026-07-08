@@ -208,6 +208,31 @@ inline void mqttPublishDiscovery(){
             String out; serializeJson(doc, out);
             mqttPublishConfig("sensor", oid, out);
         }
+        // Sensor instant_flow_lpm : débit instantané PAR VANNE, lissé sur
+        // FLOW_WINDOW_MS (4s) — publié à chaque mqttPublishState() (~10s)
+        // via valveCons[v].instantFlowLpm (mis à jour 1×/s par
+        // valveFlowUpdateAll() dans ValveCons.h). Utile pour détecter
+        // une vanne qui goutte (débit non nul alors qu'elle est fermée),
+        // ou pour avoir une vision en temps réel dans HA même quand le
+        // WebSocket n'est pas ouvert. Voir buildStatusJson() côté
+        // WebSocket qui expose la même valeur via valves[i].flow_lpm.
+        {
+            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_flow_lpm",v);
+            StaticJsonDocument<512> doc;
+            doc["name"]           = String(vname) + " — débit instantané";
+            doc["object_id"]      = String(oid);
+            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
+            doc["state_topic"]    = mqttTopic("sensor", oid);
+            doc["availability_topic"] = nodeTopic + "/availability";
+            doc["payload_available"]  = "online";
+            doc["payload_not_available"] = "offline";
+            doc["unit_of_measurement"] = "L/min";
+            doc["state_class"]    = "measurement";
+            doc["device_class"]   = "volume_flow_rate";
+            injectDevice(doc.as<JsonObject>());
+            String out; serializeJson(doc, out);
+            mqttPublishConfig("sensor", oid, out);
+        }
         // Binary sensor : ouvert/fermé
         {
             char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
@@ -315,6 +340,16 @@ inline void mqttPublishState(){
         } else {
             pub("sensor", oid, String(litresTotV,2));
         }
+        snprintf(oid,sizeof(oid),"valve_%d_flow_lpm",v);
+        // Débit instantané par vanne, calculé en RAM par
+        // valveFlowUpdateAll() à 1 Hz. On formate à 2 décimales (idem
+        // flow_lpm global) pour rester cohérent avec ce que l'UI
+        // affiche. Pas de garde >4.29G ici (un float ne peut pas
+        // atteindre cette valeur : PULSES_PER_LITRE=741.2 → max débit
+        // mesurable = 65535pulses/s × 60/741.2 ≈ 5300 L/min, soit
+        // ~5300.00 une fois sérialisé).
+        pub("sensor", oid, String(valveCons[v].instantFlowLpm, 2));
+
         snprintf(oid,sizeof(oid),"valve_%d",v);
         pub("binary_sensor", oid, valves[v].isOpen ? "ON" : "OFF");
         pub("switch", oid, valves[v].isOpen ? "ON" : "OFF");

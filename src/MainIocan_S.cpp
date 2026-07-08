@@ -323,6 +323,7 @@ void loop(){
         if(millis() - lastFlowUpdateMs >= 1000){
             lastFlowUpdateMs = millis();
             flowUpdate(totalPulses);
+            valveFlowUpdateAll();
         }
         // Distribue les pulses aux vannes ouvertes (accumulateur d'erreur
         // persistant par vanne, voir ValveCons.h::pulseDistribute())

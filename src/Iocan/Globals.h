@@ -370,6 +370,9 @@ struct ValveCons {
     // Résidu fractionnaire accumulé d'un appel de pulseDistribute() à l'autre
     // (voir ValveCons.h::pulseDistribute() pour le détail de l'algorithme).
     float carry = 0.0f;
+
+    float instantFlowLpm = 0.0f;
+
 };
 
 // --- Calibration débit ---
