@@ -37,6 +37,7 @@
 #include "ConfigManager.h"
 #include "FlowMeter.h"
 #include "ValveManager.h"
+#include "AlarmManager.h"
 
 inline bool mqttDiscoveryPublished = false;
 
@@ -176,6 +177,63 @@ inline void mqttPublishDiscovery(){
         injectDevice(doc.as<JsonObject>());
         String out; serializeJson(doc, out);
         mqttPublishConfig("button", "pulse_total_reset", out);
+    }
+
+    // ── Alarmes hydrauliques (voir AlarmManager.h) ──────────────────────
+    // On expose 3 entités pour qu'elles soient directement utilisables
+    // dans des automations Home Assistant :
+    //   - binary_sensor `alarm` (ON/OFF)  : agrégat — pratique pour
+    //     déclencher une notification, allumer un voyant, etc.
+    //   - sensor `alarm_code` (0/1/2)    : détail — 0=OK, 1=NO_FLOW
+    //     (vanne ouverte mais pas de débit), 2=UNEXPECTED_FLOW (fuite).
+    //   - sensor `alarm_message` (texte) : libellé court pour debug.
+    {
+        // binary_sensor : alarme active
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "Alarme hydraulique";
+        doc["object_id"]      = "alarm";
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_alarm";
+        doc["state_topic"]    = mqttTopic("binary_sensor", "alarm");
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["payload_on"]     = "ON";
+        doc["payload_off"]    = "OFF";
+        doc["device_class"]   = "problem";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("binary_sensor", "alarm", out);
+    }
+    {
+        // sensor : code d'alarme
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "Code alarme";
+        doc["object_id"]      = "alarm_code";
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_alarm_code";
+        doc["state_topic"]    = mqttTopic("sensor", "alarm_code");
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["state_class"]    = "measurement";
+        doc["icon"]           = "mdi:water-alert";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("sensor", "alarm_code", out);
+    }
+    {
+        // sensor : libellé court de l'alarme
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "Message alarme";
+        doc["object_id"]      = "alarm_message";
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_alarm_message";
+        doc["state_topic"]    = mqttTopic("sensor", "alarm_message");
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["icon"]           = "mdi:message-alert-outline";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("sensor", "alarm_message", out);
     }
 
     // ── Une entité par vanne : sensor (litres today+total) + binary_sensor + switch
@@ -421,6 +479,14 @@ inline void mqttPublishState(){
         pub("binary_sensor", oid, valves[v].isOpen ? "ON" : "OFF");
         pub("switch", oid, valves[v].isOpen ? "ON" : "OFF");
     }
+
+    // ── Alarmes hydrauliques (voir AlarmManager.h) ──
+    // Publié en retained pour que HA garde la dernière valeur connue
+    // même après un reboot / déco du broker — une alarme fuite doit
+    // rester visible tant qu'elle n'a pas été acquittée.
+    pub("binary_sensor", "alarm", alarmState.active ? "ON" : "OFF");
+    pub("sensor",        "alarm_code",    String((unsigned)alarmState.code));
+    pub("sensor",        "alarm_message", String(alarmState.msg));
 }
 
 // ── Handler des commandes switch venues de HA + récupération des retained
@@ -640,9 +706,16 @@ inline void onMqttConnect(bool sessionPresent){
     // Le watchdog a besoin d'un timestamp d'activité fraîche à chaque
     // connexion réussie, sinon il considérerait immédiatement la connexion
     // comme morte.
+    unsigned long downtimeMs = (mqttDisconnectMs > 0) ? (millis() - mqttDisconnectMs) : 0;
     mqttConsecutiveFailures = 0;
     mqttLastActivityMs      = millis();
     Serial.println("[MQTT] Connecté");
+    {
+        char b[160];
+        snprintf(b, sizeof(b), "[MQTT] ✓ Reconnecté (downtime ~%lu s, échecs consécutifs remis à 0)",
+                 (unsigned long)(downtimeMs / 1000UL));
+        logSys(b);
+    }
     String cmdTopic = String(sysConfig.mqttPrefix) + "/switch/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(cmdTopic.c_str(), 0);
     mqttLastActivityMs = millis(); // subscribe = activité
@@ -690,6 +763,8 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     // "now - last > 15000", et last vient d'être posé).
     lastMqttConnectAttemptMs = 0;
     mqttLastActivityMs = 0; // désarmement du watchdog (rien à surveiller tant qu'on n'est pas connecté)
+    // Mémoriser le moment de la déco pour calculer le downtime à la reco.
+    mqttDisconnectMs = millis();
     // ── BACKOFF EXPONENTIEL ──
     // On incrémente le compteur d'échecs CONSÉCUTIFS. mqttLoop() s'en sert
     // pour calculer le délai avant la prochaine tentative : 5s, 10s, 20s,
@@ -716,6 +791,20 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
         default:                                                        reasonStr = "UNKNOWN"; break;
     }
     Serial.printf("[MQTT] Déconnecté (%d = %s)\n", (int)r, reasonStr);
+    // ── TRACE logSys — c'est ÇA qu'on cherche le matin ! ──
+    // Avant ce patch, seule la trace Serial était écrite, donc rien n'était
+    // visible via l'API /logs (logToJson) et la page Logs de l'UI. On logue
+    // maintenant systématiquement la déco avec sa raison + le compteur
+    // d'échecs pour pouvoir corréler avec les reboots / coupures WiFi.
+    {
+        char b[200];
+        snprintf(b, sizeof(b), "[MQTT] ✗ Déconnecté: %s (échecs=%u, prochain retry dans %lu s)",
+                 reasonStr,
+                 (unsigned)mqttConsecutiveFailures,
+                 (unsigned long)(min(MQTT_BACKOFF_MAX_MS,
+                                     MQTT_BACKOFF_MIN_MS * (1UL << min((int)mqttConsecutiveFailures-1, 4)))) / 1000UL);
+        logSys(b);
+    }
 }
 
 inline void mqttSetup(){
@@ -797,10 +886,21 @@ inline void mqttSetup(){
     // croissant pour donner à la pile le temps de se stabiliser.
     Serial.printf("[MQTT] WiFi status=%d, RSSI=%d, heap=%u — lancement connect()\n",
                   (int)WiFi.status(), WiFi.RSSI(), (unsigned)ESP.getFreeHeap());
+    {
+        char b[160];
+        snprintf(b, sizeof(b), "[MQTT] Setup: host=%s port=%u id=%s (heap=%u, RSSI=%d)",
+                 sysConfig.mqttHost, (unsigned)sysConfig.mqttPort,
+                 sysConfig.mqttId, (unsigned)ESP.getFreeHeap(), WiFi.RSSI());
+        logSys(b);
+    }
     for(int attempt=0; attempt<3; attempt++){
         if(attempt > 0){
             Serial.printf("[MQTT] Retry connect() #%d après %d ms\n",
                           attempt+1, 500 * attempt);
+            char rb[80];
+            snprintf(rb, sizeof(rb), "[MQTT] Retry connect() #%d après %d ms",
+                     attempt+1, 500 * attempt);
+            logSys(rb);
             delay(500 * attempt);
         }
         mqttClient.connect();
@@ -812,11 +912,15 @@ inline void mqttSetup(){
         }
         if(mqttConnected){
             Serial.printf("[MQTT] ✓ Connecté dès la tentative #%d\n", attempt+1);
+            char cb[80];
+            snprintf(cb, sizeof(cb), "[MQTT] ✓ Connecté dès la tentative #%d", attempt+1);
+            logSys(cb);
             break;
         }
     }
     if(!mqttConnected){
         Serial.println("[MQTT] ✗ Toutes les tentatives échouées — mqttLoop() retentera périodiquement");
+        logSys("[MQTT] ✗ Setup: 3 tentatives échouées — retry via mqttLoop()");
     }
     lastMqttConnectAttemptMs = millis();
 }
@@ -877,6 +981,20 @@ inline void mqttLoop(){
             Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
                           (unsigned)mqttConsecutiveFailures,
                           (unsigned long)(backoffDelay / 1000UL));
+            // On ne logge PAS la tentative courante (sinon spam), on logue
+            // uniquement les transitions importantes : 1er essai, puis
+            // paliers 5/15/30/60 min pour qu'on puisse suivre la situation
+            // depuis l'UI sans devoir brancher le Serial.
+            if(mqttConsecutiveFailures == 1 || mqttConsecutiveFailures == 5
+               || mqttConsecutiveFailures == 10 || mqttConsecutiveFailures == 30
+               || mqttConsecutiveFailures == 60){
+                char b[160];
+                snprintf(b, sizeof(b), "[MQTT] Retry #%u (délai=%lu s, WiFi OK=%d, heap=%u)",
+                         (unsigned)mqttConsecutiveFailures,
+                         (unsigned long)(backoffDelay / 1000UL),
+                         (int)wifiUp, (unsigned)ESP.getFreeHeap());
+                logSys(b);
+            }
             mqttClient.connect();
         }
     }

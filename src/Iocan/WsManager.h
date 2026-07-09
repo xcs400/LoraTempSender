@@ -15,6 +15,7 @@
 #include "ConfigManager.h"
 #include "FlowMeter.h"
 #include "ValveCons.h"
+#include "AlarmManager.h"
 
 inline unsigned long lastWsBroadcastMs = 0;
 
@@ -137,6 +138,22 @@ inline String buildStatusJson(){
         unsigned long totalMs = (unsigned long)calibState.durationSec*1000UL;
         unsigned long remainMs = (totalMs > elapsedMs) ? (totalMs - elapsedMs) : 0;
         calib["remainingSec"] = remainMs/1000UL;
+    }
+    // AMÉLIORATION (alarmes) : expose l'état d'alarme hydraulique au
+    // frontend pour affichage temps réel (bandeau rouge clignotant,
+    // popup, etc.). Mêmes champs que MQTT — l'UI n'a qu'une source.
+    {
+        JsonObject alarm = doc.createNestedObject("alarm");
+        alarm["active"]   = alarmState.active;
+        alarm["code"]     = (unsigned)alarmState.code;
+        alarm["msg"]      = alarmState.msg;
+        if(alarmState.sinceMs > 0){
+            unsigned long durMs = (millis() > alarmState.sinceMs)
+                                  ? (millis() - alarmState.sinceMs) : 0;
+            alarm["sinceSec"] = durMs / 1000UL;
+        } else {
+            alarm["sinceSec"] = 0;
+        }
     }
     String out; serializeJson(doc,out);
     return out;

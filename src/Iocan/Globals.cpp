@@ -30,6 +30,7 @@ unsigned long   lastMqttConnectAttemptMs = 0;
 // qu'aucune connexion n'a eu lieu, il reste à 0 et n'a aucun effet.
 unsigned long   mqttLastActivityMs        = 0;
 uint8_t         mqttConsecutiveFailures   = 0;
+unsigned long   mqttDisconnectMs          = 0;
 // Récupération MQTT au boot (mode CONS_MQTT_ONLY) : fenêtre de 3s après
 // connexion pour récupérer les valeurs retained et mettre à jour la RAM.
 // mqttRecoveryDone passe à true à l'expiration de la fenêtre dans mqttLoop().
@@ -77,6 +78,14 @@ volatile bool valveConsDirty[VANNE_COUNT] = {false};
 
 // Calibration débit
 CalibState calibState;
+
+// Alarmes hydrauliques (voir AlarmManager.h)
+// Tous les champs sont à zéro par défaut grâce aux initializers de la
+// struct. `lastCloseMs` est positionné au boot pour que le délai de grâce
+// post-fermeture soit écoulé dès la première seconde de loop() (sinon on
+// déclencherait une fausse alarme UNEXPECTED_FLOW au démarrage si le
+// capteur a déjà vu passer de l'eau avant reboot).
+AlarmState alarmState;
 
 // Journal circulaire
 LogEntry  logBuf[LOG_MAX];

@@ -375,6 +375,20 @@ struct ValveCons {
 
 };
 
+// --- Alarmes hydrauliques (voir AlarmManager.h) ---
+//
+// Struct + extern ci-dessous ; les définitions vivent dans Globals.cpp.
+// On centralise l'état pour que MQTT, LoRa, WebSocket et l'API REST
+// lisent la MÊME source de vérité (cf. AlarmManager.h::alarmTick()).
+struct AlarmState {
+    uint8_t       code       = 0;       // 0=OK, 1=NO_FLOW, 2=UNEXPECTED_FLOW
+    bool          active     = false;
+    unsigned long sinceMs    = 0;       // millis() du passage en alarme
+    unsigned long openSinceMs = 0;      // millis() de la dernière ouverture vanne (pour délai grâce)
+    unsigned long lastCloseMs = 0;      // millis() de la dernière fermeture (idem, anti-fantômes)
+    char          msg[80]    = "";      // libellé court pour logs / LoRa
+};
+
 // --- Calibration débit ---
 enum class CalibPhase : uint8_t { IDLE=0, RUNNING=1, DONE=2, ABORTED=3, FAILED=4 };
 
@@ -423,6 +437,11 @@ extern unsigned long   mqttLastActivityMs;
 // revient. Remis à 0 dans onMqttConnect() et dans mqttLoop() quand le
 // WiFi est KO (on ne doit pas pénaliser un échec de cause WiFi).
 extern uint8_t        mqttConsecutiveFailures;
+// Timestamp de la dernière déconnexion MQTT (millis()). Mis à 0 par
+// onMqttDisconnect() et lu par onMqttConnect() pour calculer le downtime
+// et l'afficher dans la trace logSys de la reconnexion. Si = 0, on n'a
+// jamais été déconnecté depuis le boot (cas du premier connect).
+extern unsigned long   mqttDisconnectMs;
 const unsigned long MQTT_PUB_INTERVAL_MS    = 10000UL;  // 10 s
 const unsigned long MQTT_RECONNECT_MS       = 15000UL;  // 15 s entre tentatives (throttle simple)
 const unsigned long MQTT_WATCHDOG_MS        = 120000UL; // 2 min sans activité → reconnexion forcée
@@ -469,6 +488,9 @@ inline void applyFlowCoeffDefaults(){
 
 // Calibration débit
 extern CalibState calibState;
+
+// Alarmes hydrauliques (voir AlarmManager.h)
+extern AlarmState alarmState;
 
 // Journal circulaire
 extern LogEntry  logBuf[];

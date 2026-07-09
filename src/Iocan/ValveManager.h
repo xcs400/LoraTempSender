@@ -12,6 +12,7 @@
 
 #include "Globals.h"
 #include "LoggerManager.h"
+#include "AlarmManager.h"
 inline void valveConsResetInstantFlow(int idx);
 // Ferme physiquement une vanne, met à jour état
 inline void valveHardClose(int idx){
@@ -48,6 +49,13 @@ inline void valveHardClose(int idx){
 #endif
 
 valveConsResetInstantFlow(idx);
+
+// Notifie le gestionnaire d'alarmes qu'une vanne vient d'être fermée :
+// si on vient de fermer la dernière vanne ouverte, démarre le délai de
+// grâce post-fermeture (anti-fantômes). Lève aussi une éventuelle
+// alarme UNEXPECTED_FLOW si elle était en cours (typique : électrovanne
+// HS qu'on a forcée à se fermer).
+alarmOnValveClosed(idx);
 
 }
 
@@ -92,6 +100,10 @@ inline bool valveHardOpen(int idx, CmdSource src, uint32_t durationSec){
     v.openEndMs    = millis() + (unsigned long)durationSec*1000UL;
     v.openedAt     = nowEpoch();
     v.lastUpdateMs = millis();
+    // Notifie le gestionnaire d'alarmes qu'une vanne vient d'être ouverte :
+    // réinitialise le délai de grâce (amorçage) et lève une éventuelle
+    // alarme NO_FLOW résiduelle.
+    alarmOnValveOpened(idx);
     char msg[60];
     snprintf(msg,60,"Ouverte — source=%s dur=%us", srcStr(src), durationSec);
     logAdd(idx, msg);

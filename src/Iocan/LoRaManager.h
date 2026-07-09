@@ -9,6 +9,7 @@
 #include "Globals.h"
 #include "LoggerManager.h"
 #include "ValveManager.h"
+#include "AlarmManager.h"
 
 // NOTE : loraSetFlag() est déclarée IRAM_ATTR (interruption matérielle
 // DIO1 du module LoRa). Comme pulse_isr() dans Globals.cpp, ce type de
@@ -27,7 +28,13 @@ inline String loraBuildStatus(){
     doc["tempLocal"] = temperature1;      // température locale (DS18B20)
     doc["uptime"] = millis()/1000;
   //  doc["rssi"]   = loraRssi;
-    doc["alarm"]  = 0;
+    // ── Alarme hydraulique agrégée (champ déjà présent côté firmware,
+    //    juste remis à jour pour refléter alarmState.active) ──
+    doc["alarm"]  = alarmState.active ? 1 : 0;
+    // Détail : code 0=OK, 1=NO_FLOW, 2=UNEXPECTED_FLOW. Permet au
+    // récepteur LoRa distant de distinguer fuite vs panne électrovanne
+    // sans avoir à interroger l'UI.
+    doc["alarmCode"] = (unsigned)alarmState.code;
     JsonArray vannesArr   = doc.createNestedArray("vannes");
     JsonArray remArr      = doc.createNestedArray("remaining");
     JsonArray srcArr      = doc.createNestedArray("source");

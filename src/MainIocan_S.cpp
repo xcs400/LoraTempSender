@@ -62,6 +62,7 @@
 #include "Iocan/TimeManager.h"
 #include "Iocan/ValveManager.h"
 #include "Iocan/ValveCons.h"
+#include "Iocan/AlarmManager.h"
 #include "Iocan/ScheduleManager.h"
 #include "Iocan/ManualInput.h"
 #include "Iocan/LoRaManager.h"
@@ -217,6 +218,12 @@ void setup(){
         noInterrupts(); cnt = pulseCount; interrupts();
         lastDistributedTotal = persistedPulseCount + cnt;
     }
+
+    // ── Alarmes hydrauliques : init du délai de grâce post-fermeture
+    //    sur l'horloge millis() actuelle (sinon on déclencherait une
+    //    fausse alarme UNEXPECTED_FLOW au boot si le capteur a déjà vu
+    //    passer de l'eau avant le reboot — voir AlarmManager.h).
+    alarmReset();
 
     // ── Watchdog
     esp_task_wdt_init(60, true);
@@ -391,6 +398,12 @@ void loop(){
 
     // ── Timers vannes (fermeture auto)
     valveUpdate();
+
+    // ── Alarmes hydrauliques (1×/s — voir AlarmManager.h)
+    // Lit flowCurrentLpm (déjà lissé 1×/s par flowUpdate() ci-dessus) et
+    // l'état des vannes. Aucun effet de bord autre que la mise à jour de
+    // alarmState (code, active, msg). Très léger.
+    alarmTick();
 
     // ── Machine à états de calibration débit (avance pas à pas, non-bloquant)
     calibTick();
