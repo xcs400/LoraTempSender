@@ -191,11 +191,11 @@ const int BUTTON_PIN = 0;
 // servent de défaut à la place de 1.0f (répartition égale).
 //
 // Référence : calibration du 06/07/2026 sur l'installation réelle :
-//   V0 =  92.333 pulses/s
-//   V1 =  62.417 pulses/s
-//   V2 =  42.200 pulses/s
-//   V3 = 133.650 pulses/s
-//   V4 =  24.150 pulses/s
+ //   73.122f,   // V0
+ //   59.233f,   // V1
+ //   39.500f,   // V2
+ //  116.011f,   // V3
+ //   22.122f,   // V4
 // Somme = 354.75 pulses/s → la part relative de chaque vanne est
 // immédiate (V3 = 37.7%, V0 = 26.0%, etc.).
 //
@@ -204,11 +204,11 @@ const int BUTTON_PIN = 0;
 // (pas des compteurs). Si l'utilisateur relance une calibration, la valeur
 // mesurée écrase le défaut pour cette vanne.
 static const float FLOW_COEFF_DEFAULTS[VANNE_COUNT] = {
-    92.333f,   // V0
-    62.417f,   // V1
-    42.200f,   // V2
-   133.650f,   // V3
-    24.150f,   // V4
+    73.122f,   // V0
+    59.233f,   // V1
+    39.500f,   // V2
+   116.011f,   // V3
+    22.122f,   // V4
 };
 
 // ── Stratégie de persistance NVS pour la consommation des vannes ──────────────

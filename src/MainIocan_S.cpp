@@ -278,7 +278,7 @@ void loop(){
                  }
         } else if(temp1Valid){
             // log occasional stable reading (every 6th read ~1min) to avoid spam
-            static int cnt1 = 0; cnt1 = (cnt1+1)%6; if(cnt1==0){ char b[40]; snprintf(b,40, "Temp1: %.2f C", temperature1); logSys(b); }
+         //   static int cnt1 = 0; cnt1 = (cnt1+1)%6; if(cnt1==0){ char b[40]; snprintf(b,40, "Temp1: %.2f C", temperature1); logSys(b); }
         }
     }
 

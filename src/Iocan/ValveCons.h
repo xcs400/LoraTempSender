@@ -198,22 +198,54 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
         }
     }
 
+    // ── ROLLOVER JOURNALIER GLOBAL (toutes vannes) ──
+    // Avant le fix, ce bloc était à l'intérieur de la boucle suivante
+    // (`for(int i=0;...){ if(!valves[i].isOpen) continue; ... }`), ce qui
+    // avait deux effets pervers :
+    //   1) Les vannes FERMÉES à minuit n'avaient JAMAIS leur todayYmd
+    //      remis à jour, donc leur `litres_today` restait collé à la
+    //      valeur d'hier sur le broker MQTT (retained) tant qu'elles
+    //      ne rouvraient pas. Symptôme : "la vanne 3 dit qu'elle a
+    //      consommé 12 L aujourd'hui alors qu'elle n'a pas bougé depuis
+    //      hier soir".
+    //   2) La condition `todayYmd == today` (utilisée par mqttPublishState,
+    //      WsManager.h, WebManager.h pour publier 0 si autre jour) restait
+    //      fausse pour les vannes fermées → la valeur était publiée
+    //      comme "litres_today = pulsesTotal / PULSES_PER_LITRE" (car
+    //      le ternaire `todayYmd == today ? todayPulses : 0` tombait
+    //      dans la branche 0 et la valeur affichée était 0, MAIS le
+    //      total pulsesTotal continuait à être incrémenté par
+    //      d'autres vannes, donc litresToday sur le broker était
+    //      désynchronisé du todayPulses RAM).
+    //
+    // On fait donc UNE passe unique en amont sur TOUTES les vannes, fermées
+    // ou ouvertes. Coût négligeable (5 vannes × ~5 lignes) et résout le
+    // problème de désynchronisation MQTT à la racine.
+    {
+        uint16_t todayAll = today;
+        for(int i=0;i<VANNE_COUNT;i++){
+            if(todayAll != valveCons[i].todayYmd){
+                // Clôture éventuelle du jour précédent dans l'historique
+                if(valveCons[i].todayYmd != 0 && valveCons[i].todayPulses > 0){
+                    DayStat ds;
+                    ds.ymd = valveCons[i].todayYmd;
+                    ds.pulses = valveCons[i].todayPulses;
+                    ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
+                    valveCons[i].history[valveCons[i].todayIdx % CONS_HISTORY_DAYS] = ds;
+                    valveCons[i].todayIdx = (uint16_t)((valveCons[i].todayIdx + 1) % CONS_HISTORY_DAYS);
+                }
+                valveCons[i].todayYmd = todayAll;
+                valveCons[i].todayPulses = 0;
+            }
+        }
+    }
+
     for(int i=0;i<VANNE_COUNT;i++){
         if(!valves[i].isOpen) continue;
-        // Reset du compteur journalier si on est sur un nouveau jour
-        if(today != valveCons[i].todayYmd){
-            // Clôture éventuelle du jour précédent dans l'historique
-            if(valveCons[i].todayYmd != 0 && valveCons[i].todayPulses > 0){
-                DayStat ds;
-                ds.ymd = valveCons[i].todayYmd;
-                ds.pulses = valveCons[i].todayPulses;
-                ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
-                valveCons[i].history[valveCons[i].todayIdx % CONS_HISTORY_DAYS] = ds;
-                valveCons[i].todayIdx = (uint16_t)((valveCons[i].todayIdx + 1) % CONS_HISTORY_DAYS);
-            }
-            valveCons[i].todayYmd = today;
-            valveCons[i].todayPulses = 0;
-        }
+        // NB : le rollover journalier a déjà été appliqué en amont (voir
+        // le bloc "ROLLOVER JOURNALIER GLOBAL" juste au-dessus). On n'a
+        // plus besoin de le re-vérifier ici — todayYmd == today est
+        // garanti par construction.
         valveCons[i].pulsesTotal += shares[i];
         valveCons[i].todayPulses += shares[i];
     }
