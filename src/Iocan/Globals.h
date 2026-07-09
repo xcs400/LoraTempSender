@@ -447,6 +447,18 @@ const unsigned long MQTT_RECONNECT_MS       = 15000UL;  // 15 s entre tentatives
 const unsigned long MQTT_WATCHDOG_MS        = 120000UL; // 2 min sans activité → reconnexion forcée
 const unsigned long MQTT_BACKOFF_MIN_MS     = 5000UL;   // 5 s avant retry après 1er échec
 const unsigned long MQTT_BACKOFF_MAX_MS     = 60000UL;  // 60 s max entre retries (backoff)
+// Purge périodique de la connexion MQTT (filet de sécurité contre les
+// sessions TCP zombies que ni le watchdog d'inactivité ni le keepalive
+// MQTT ne détectent — voir commentaire dans mqttLoop()).
+// 10 min = 600 s : suffisamment long pour ne pas générer de churn
+// réseau visible côté HA, suffisamment court pour purger un socket
+// bloqué silencieusement par AsyncTCP/AsyncMqttClient sur ESP32-S3
+// (bug connu de certaines versions, socket figée sans FIN/RST).
+const unsigned long MQTT_FORCE_RECONNECT_MS = 600000UL; // 10 min
+// Timestamp de la dernière purge/reconnexion forcée périodique.
+// Initialisé à 0 dans Globals.cpp ; armé dans mqttLoop() à chaque
+// passage où on déclenche la purge.
+extern unsigned long   lastMqttForceReconnectMs;
 // Récupération MQTT au boot (mode CONS_MQTT_ONLY)
 // Voir MqttManager.h pour la logique et Globals.cpp pour les définitions.
 #ifdef CONS_MQTT_ONLY

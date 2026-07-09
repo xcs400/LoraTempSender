@@ -31,6 +31,7 @@ unsigned long   lastMqttConnectAttemptMs = 0;
 unsigned long   mqttLastActivityMs        = 0;
 uint8_t         mqttConsecutiveFailures   = 0;
 unsigned long   mqttDisconnectMs          = 0;
+unsigned long   lastMqttForceReconnectMs  = 0;
 // Récupération MQTT au boot (mode CONS_MQTT_ONLY) : fenêtre de 3s après
 // connexion pour récupérer les valeurs retained et mettre à jour la RAM.
 // mqttRecoveryDone passe à true à l'expiration de la fenêtre dans mqttLoop().

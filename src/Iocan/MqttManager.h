@@ -953,6 +953,15 @@ inline void mqttLoop(){
     // firmware, donc on simule : on force la déconnexion, onMqttDisconnect
     // est appelé, le compteur d'échecs s'incrémente, et la logique
     // de backoff prend le relais.
+    //
+    // NB IMPORTANT : mqttLastActivityMs n'est armé QUE sur des preuves
+    // d'aller-retour (message reçu / subscribe / onMqttConnect). Nos
+    // propres publish() NE le réarment PAS (voir bloc plus bas), sans
+    // quoi le watchdog serait neutralisé par notre trafic périodique
+    // (write() réussit dans un buffer TCP mort → on croirait à tort
+    // que la socket est vivante → le watchdog ne se déclencherait
+    // jamais → mqttConnected resterait à true → la branche de
+    // reconnexion de cette boucle ne tournerait plus).
     if(mqttConnected && mqttLastActivityMs > 0
        && (now - mqttLastActivityMs) > MQTT_WATCHDOG_MS){
         Serial.printf("[MQTT] ⚠ Watchdog: aucune activité depuis %lu s — forçage reconnexion\n",
@@ -965,6 +974,48 @@ inline void mqttLoop(){
         // asynchrone, onMqttDisconnect peut arriver après).
         mqttConnected = false;
         mqttLastActivityMs = 0;
+        // Idem : on désarme aussi la purge périodique pour qu'elle
+        // reparte de zéro après la reco (sinon elle pourrait re-tomber
+        // quelques secondes plus tard et créer un cycle de reconnexions
+        // rapides sur un broker qui a un RTT dégradé).
+        lastMqttForceReconnectMs = now;
+    }
+
+    // ── PURGE PÉRIODIQUE DE LA CONNEXION (filet de sécurité) ──
+    // Indépendamment du watchdog d'inactivité, on force une reconnexion
+    // complète toutes les MQTT_FORCE_RECONNECT_MS (10 min). C'est un
+    // dernier rempart contre les sessions TCP qui restent "vues vivantes"
+    // par AsyncMqttClient alors qu'elles sont en réalité bloquées côté
+    // AsyncTCP (bug connu sur ESP32-S3 dans certaines versions : socket
+    // qui ne reçoit plus aucun paquet, ne génère aucun événement, mais
+    // que la lib considère toujours comme "connectée" → impossible à
+    // détecter par keepalive ni par watchdog d'inactivité puisqu'il
+    // n'y a aucun signal d'erreur).
+    //
+    // Effet de bord : HA verra passer une petite indisponibilité (LWT
+    // "offline" → "online" retenu) toutes les 10 min. C'est un trade-off
+    // acceptable et bien plus rare qu'un blocage total de plusieurs heures
+    // comme on l'observait avant. La fréquence est configurable via
+    // MQTT_FORCE_RECONNECT_MS.
+    if(mqttConnected && (now - lastMqttForceReconnectMs > MQTT_FORCE_RECONNECT_MS)){
+        unsigned long upSec = lastMqttForceReconnectMs > 0
+                            ? (now - lastMqttForceReconnectMs) / 1000UL
+                            : (now / 1000UL);
+        char pb[200];
+        snprintf(pb, sizeof(pb),
+                 "[MQTT] Purge périodique (~%lu s d'uptime) — reconnexion propre",
+                 (unsigned long)upSec);
+        logSys(pb);
+        mqttClient.disconnect();
+        mqttConnected = false;
+        mqttLastActivityMs = 0;
+        lastMqttForceReconnectMs = now; // réarmement pour la prochaine purge
+    } else if(mqttConnected && lastMqttForceReconnectMs == 0){
+        // Premier passage en mode connecté : on initialise le timer de
+        // purge. Sans cette init, on pourrait déclencher une purge
+        // immédiate si on vient juste de se reconnecter (delta énorme
+        // par rapport à l'init à 0 du boot).
+        lastMqttForceReconnectMs = now;
     }
 
     if(!mqttConnected && wifiUp){
@@ -1011,13 +1062,13 @@ if(!mqttDiscoveryPublished){
         if(mqttRecoveryDone){
             mqttPublishDiscovery();
             mqttPublishState();
-            mqttLastActivityMs = millis();
+            // mqttLastActivityMs n'est PAS réarmé ici (voir note watchdog).
             lastMqttPubMs = now;
         }
     #else
         mqttPublishDiscovery();
         mqttPublishState();
-        mqttLastActivityMs = millis();
+        // mqttLastActivityMs n'est PAS réarmé ici (voir note watchdog).
         lastMqttPubMs = now;
     #endif
     }
@@ -1034,17 +1085,35 @@ if(!mqttDiscoveryPublished){
             // Désabonnement du pattern de recovery
             String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
             mqttClient.unsubscribe(recovPattern.c_str());
-            mqttLastActivityMs = millis(); // activity
+            // mqttLastActivityMs n'est PAS réarmé ici (unsubscribe() non
+            // plus ne prouve rien côté broker — voir note watchdog plus bas).
             // Flush NVS des valeurs éventuellement restaurées
             valveConsFlushDirty();
             logSys("[CONS] Recovery MQTT terminée — NVS mis à jour");
             // Publication discovery + état fusionné après récupération
             mqttPublishDiscovery();
             mqttPublishState();
-            mqttLastActivityMs = millis(); // activity
+            // mqttLastActivityMs n'est PAS réarmé ici (voir note watchdog).
             lastMqttPubMs = now;
         }
 #endif
+        // ── CORRECTIF CRITIQUE : ne PAS réarmer mqttLastActivityMs après
+        // nos propres publish(). AsyncMqttClient::publish() ne fait qu'écrire
+        // dans le buffer TCP local — ça ne prouve PAS que le paquet a atteint
+        // le broker (socket TCP zombie, routeur qui a vidé sa table NAT,
+        // broker rebooté silencieusement, etc. : aucun FIN/RST n'est généré
+        // et write() réussit localement dans un buffer mort).
+        //
+        // Conséquence : si on réarmait ici, le watchdog d'inactivité ne se
+        // déclencherait JAMAIS, onMqttDisconnect() ne serait jamais appelé,
+        // mqttConnected resterait bloqué à true, et la branche de
+        // reconnexion de mqttLoop() — celle qui contient tout le backoff
+        // exponentiel — ne tournerait plus jamais. C'est exactement le
+        // bug "MQTT déconnecté, WiFi OK, rien ne se passe jusqu'au reboot".
+        //
+        // mqttLastActivityMs n'est donc armé QUE sur des preuves réelles
+        // d'aller-retour : message REÇU (mqttHandleMessage), subscribe
+        // confirmé, ou connexion établie (onMqttConnect).
         if(now - lastMqttPubMs > MQTT_PUB_INTERVAL_MS){
             lastMqttPubMs = now;
 #ifdef CONS_MQTT_ONLY
@@ -1054,7 +1123,8 @@ if(!mqttDiscoveryPublished){
 #else
             mqttPublishState();
 #endif
-            mqttLastActivityMs = millis(); // activity
+            // mqttLastActivityMs n'est PAS réarmé ici — voir commentaire
+            // détaillé au-dessus.
         }
     }
 }
