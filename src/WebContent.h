@@ -583,6 +583,26 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
         </div>
       </div>
 
+      <!-- Carte VanneManuelle (débitmètre voit couler alors qu'aucune vanne auto n'est ouverte) -->
+      <div class="status-card" id="manual-valve-card">
+        <div class="status-card-icon" style="background:var(--blue-dim)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
+          </svg>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-label">VanneManuelle</div>
+          <div class="status-card-value" id="manual-valve-today">— L</div>
+          <div class="status-card-sub">
+            Total: <span id="manual-valve-total">—</span> L
+            <span id="manual-valve-flow" style="color:var(--blue);font-weight:600;margin-left:6px">— L/min</span>
+          </div>
+          <div style="margin-top:6px">
+            <button class="btn btn-ghost btn-sm" onclick="resetManualValve()" title="Remettre le compteur VanneManuelle à zéro">🔄 RAZ</button>
+          </div>
+        </div>
+      </div>
+
       <!-- Carte mémoire / santé — masquée (encombre la grille, infos
            redondantes avec les badges header WiFi/MQTT/WS)
       <div class="status-card">
@@ -1448,6 +1468,39 @@ function handleStatus(data) {
       alarmLabel.style.color = 'var(--green)';
       alarmLabel.textContent = 'Aucune alarme';
       alarmSub.textContent = (code > 0) ? ('Dernière: ' + codeLabel) : '—';
+    }
+  }
+  // Carte "VanneManuelle" — reflète data.manualValve publié par WsManager
+  // (mêmes champs que pour une vanne standard : litresToday, litresTotal,
+  // flow_lpm, hasFlow). Permet à l'utilisateur de suivre la conso par la
+  // vanne manuelle (robinet en aval du débitmètre) en temps réel.
+  {
+    const todayEl  = document.getElementById('manual-valve-today');
+    const totalEl  = document.getElementById('manual-valve-total');
+    const flowEl   = document.getElementById('manual-valve-flow');
+    const cardEl   = document.getElementById('manual-valve-card');
+    if(todayEl && totalEl && flowEl && cardEl){
+      if(data.manualValve){
+        const mv = data.manualValve;
+        todayEl.textContent = (mv.litresToday || 0).toFixed(2) + ' L';
+        totalEl.textContent = (mv.litresTotal || 0).toFixed(2);
+        const flow = mv.flow_lpm !== undefined ? Number(mv.flow_lpm) : 0;
+        flowEl.textContent = flow.toFixed(2) + ' L/min';
+        // Indicateur visuel : si eau en train de couler (hasFlow=true),
+        // on met un petit point vert clignotant sur la carte.
+        if(mv.hasFlow){
+          cardEl.classList.add('alarm-active'); // réutilise l'animation clignotante
+          flowEl.style.color = 'var(--green)';
+        } else {
+          cardEl.classList.remove('alarm-active');
+          flowEl.style.color = 'var(--blue)';
+        }
+      } else {
+        todayEl.textContent = '— L';
+        totalEl.textContent = '—';
+        flowEl.textContent = '— L/min';
+        cardEl.classList.remove('alarm-active');
+      }
     }
   }
   // Jauge NVS — on l'actualise à chaque STATUS (≈1×/s par le WebSocket)
@@ -2680,6 +2733,17 @@ function resetPulse(){
   api('POST','/api/pulse/reset').then(r=>{ refreshPulse(); refreshConsumption(); alert('Compteur + suivi par vanne remis à zéro'); });
 }
 
+function resetManualValve(){
+  if(!confirm('Remettre à zéro le compteur VanneManuelle ?\n\nCela ne touche pas le compteur global ni les vannes automatisées.')) return;
+  api('POST','/api/manual_valve/reset').then(r=>{
+    refreshPulse();
+    refreshConsumption();
+    // Force un refresh du status pour mettre à jour la carte VanneManuelle
+    requestStatus();
+    alert('Compteur VanneManuelle remis à zéro');
+  });
+}
+
 function fmtYMD(v){
   if(!v || v<10000000) return '—';
   const s = String(v);
@@ -2764,10 +2828,28 @@ function refreshConsumption(){
         <td style="text-align:right">${flowCell} <span style="color:var(--text-muted);font-size:.7rem">L/min</span></td>
       </tr>`;
     }).join('');
+    // ── Ligne "VanneManuelle" (si exposée par /api/consumption) ──
+    let manualRow = '';
+    if(d.manualValve){
+      const mv = d.manualValve;
+      const mvToday  = mv.litresToday  || 0;
+      const mvTotal  = mv.litresTotal  || 0;
+      const mvFlow   = mv.instantFlowLpm || 0;
+      const mvFlowCell = (mvFlow > 0.005)
+        ? `<span style="color:var(--blue);font-weight:600">${mvFlow.toFixed(2)}</span>`
+        : '<span style="color:var(--text-muted)">0.00</span>';
+      manualRow = `<tr style="border-top:2px solid var(--border)">
+        <td><strong style="color:var(--blue)">Man</strong></td>
+        <td>VanneManuelle</td>
+        <td style="text-align:right;color:${mvToday>0?'var(--blue)':'var(--text-muted)'};font-weight:600">${mvToday.toFixed(2)} L</td>
+        <td style="text-align:right">${mvTotal.toFixed(2)} L</td>
+        <td style="text-align:right">${mvFlowCell} <span style="color:var(--text-muted);font-size:.7rem">L/min</span></td>
+      </tr>`;
+    }
     const tb1 = document.getElementById('cons-body');
     const tb2 = document.getElementById('status-cons-body');
     if(tb1) tb1.innerHTML = longHtml;
-    if(tb2) tb2.innerHTML = shortHtml || '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>';
+    if(tb2) tb2.innerHTML = (shortHtml + manualRow) || '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>';
   });
 }
 
