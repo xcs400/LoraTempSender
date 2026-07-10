@@ -13,6 +13,9 @@
 #include "WsManager.h"
 #include "WebContent.h"   // SPA HTML — seul fichier séparé 
 
+
+
+
 // Helper: réponse JSON 200
 inline void jsonResp(AsyncWebServerRequest* req, const String& body, int code=200){
     AsyncWebServerResponse* r = req->beginResponse(code,"application/json",body);

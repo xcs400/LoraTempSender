@@ -1321,28 +1321,19 @@ inline void mqttLoop(){
         lastMqttConnectAttemptMs = now;
     }
 
-    // ★ FIX : reconnexion préventive périodique, indépendante de tout
-    // symptôme détecté. Purge un éventuel état zombie côté pile
-    // AsyncTCP/AsyncMqttClient qui n'aurait pas déclenché le watchdog
-    // ci-dessus (ex: session apparemment saine mais légèrement corrompue).
-    // Coût quasi nul (une reconnexion propre dure <1s), bénéfice : borne
-    // supérieure garantie sur la durée max d'une éventuelle panne
-    // silencieuse, même dans un scénario non anticipé par le watchdog.
-  //  if(mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS){
-  //      lastMqttForceReconnectMs = now;
-   //     Serial.println("[MQTT] ↻ Reconnexion préventive périodique");
-   //     logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
-   //     mqttClient.disconnect();
-   //     mqttConnected = false;
-   //     mqttLastActivityMs = 0;
-        // ★ FIX (bug #3) : même raison que pour le watchdog ci-dessus —
-        // sans ce timestamp, le bloc de reconnexion juste en dessous
-        // relance connect() quasi instantanément, avant que disconnect()
-        // (asynchrone) ait eu le temps de libérer la socket précédente.
-        // C'est CE bug qui causait les ~4 minutes de TCP_DISCONNECTED en
-        // boucle observées après chaque reconnexion préventive.
-   //     lastMqttConnectAttemptMs = now;
-   // }
+        // ★ FIX : reconnexion préventive périodique, indépendante de tout symptôme détecté.
+        if (mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS) {
+            lastMqttForceReconnectMs = now;
+            Serial.println("[MQTT] ↻ Reconnexion préventive périodique");
+            logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
+            // Petite pause pour laisser la pile TCP se stabiliser avant le disconnect asynchrone
+            delay(100);
+            mqttClient.disconnect();          // asynchrone
+            mqttConnected = false;
+            mqttLastActivityMs = 0;
+            // *** NE PAS RE‑INITIALISER lastMqttConnectAttemptMs ici ***
+            // Le back‑off normal (MQTT_RECONNECT_MS, MQTT_BACKOFF_…) prendra le relais.
+        }
 
     if(!mqttConnected && wifiUp){
         // ── CALCUL DU DÉLAI DE RETRY (backoff exponentiel) ──
