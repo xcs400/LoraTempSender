@@ -30,6 +30,43 @@
 // les clics sur les switches dans Home Assistant n'atteignaient alors
 // jamais l'ESP32, sans aucune erreur visible (le message MQTT partait
 // juste vers un topic non souscrit).
+//
+// ── ★ CORRECTIF (juillet 2026) — MQTT restait déconnecté "toute la nuit"
+// malgré un WiFi opérationnel, et ne récupérait qu'au reboot ──
+//
+// Cause racine : le watchdog d'inactivité (mqttLastActivityMs) était
+// réarmé à chaque APPEL de mqttClient.publish(), y compris en QoS 0.
+// Or publish() ne fait qu'écrire dans le buffer TCP local : ça ne prouve
+// absolument pas que le paquet a atteint le broker, ni même que la
+// session TCP est encore valide côté distant. Si la session mourait
+// silencieusement (NAT du routeur qui expire, micro-coupure RF non vue
+// au niveau socket, broker qui redémarre sans RST propre, etc.), le
+// firmware continuait de "réarmer" lui-même son propre watchdog avec
+// son trafic sortant non confirmé → le watchdog ne se déclenchait
+// jamais → onMqttDisconnect() n'était jamais appelé → mqttConnected
+// restait bloqué à true → le bloc de reconnexion dans mqttLoop() n'était
+// jamais atteint (sa condition est `!mqttConnected`).
+//
+// Effet aggravant : les publications d'état toutes les 10s (bien en
+// dessous du keepAlive de 60s) empêchaient AsyncMqttClient d'envoyer le
+// moindre PINGREQ, puisque la lib ne ping que s'il n'y a PAS eu d'autre
+// trafic sortant récent. Le mécanisme de keepalive natif du protocole
+// MQTT était donc lui aussi neutralisé par le même phénomène.
+//
+// Correctif appliqué :
+//   1) On ne réarme plus mqttLastActivityMs sur un simple publish() QoS 0.
+//   2) Un "canari" dédié est publié en QoS 1 toutes les
+//      MQTT_CANARY_INTERVAL_MS (45s, sous le keepAlive de 60s). Seule la
+//      réception du PUBACK correspondant (callback onMqttPublishAck)
+//      réarme le watchdog — c'est la seule preuve fiable que le broker
+//      est vivant à l'autre bout.
+//   3) Les accusés de réception de subscribe (SUBACK, callback
+//      onMqttSubscribeAck) réarment aussi le watchdog, pour la même
+//      raison (confirmation réelle vs. simple envoi).
+//   4) Filet de sécurité supplémentaire : une reconnexion complète
+//      préventive toutes les MQTT_FORCED_RECONNECT_MS (15 min), qu'un
+//      problème ait été détecté ou non, pour purger un éventuel état
+//      zombie côté pile AsyncTCP/AsyncMqttClient.
 // ============================================================
 
 #include "Globals.h"
@@ -40,6 +77,19 @@
 #include "AlarmManager.h"
 
 inline bool mqttDiscoveryPublished = false;
+
+// ★ FIX : horodatages dédiés au canari de confirmation de vie et à la
+// reconnexion préventive périodique (état interne au module, pas besoin
+// d'être exposé dans Globals.h).
+inline unsigned long lastMqttCanaryMs        = 0;
+inline unsigned long lastMqttForceReconnectMs = 0;
+
+#ifndef MQTT_CANARY_INTERVAL_MS
+#define MQTT_CANARY_INTERVAL_MS 45000UL   // 45s, sous le keepAlive (60s)
+#endif
+#ifndef MQTT_FORCED_RECONNECT_MS
+#define MQTT_FORCED_RECONNECT_MS 900000UL // 15 min — purge préventive
+#endif
 
 inline String mqttTopic(const char* component, const char* objId){
     // ex: homeassistant/sensor/irrpro_hs3/temperature1
@@ -487,13 +537,34 @@ inline void mqttPublishState(){
     pub("binary_sensor", "alarm", alarmState.active ? "ON" : "OFF");
     pub("sensor",        "alarm_code",    String((unsigned)alarmState.code));
     pub("sensor",        "alarm_message", String(alarmState.msg));
+
+
+
+}
+
+// ★ FIX : canari de confirmation de vie de la session.
+// Contrairement aux valeurs de capteurs publiées en QoS 0 par
+// mqttPublishState() (aucune garantie de livraison, aucun accusé de
+// réception possible), ce message dédié est publié en QoS 1. Le broker
+// répond obligatoirement par un PUBACK, capté par onMqttPublishAck()
+// ci-dessous — c'est cette confirmation, et elle seule, qui réarme le
+// watchdog d'inactivité. Publié plus fréquemment que le keepAlive MQTT
+// (60s) pour ne pas dépendre uniquement du PINGREQ natif de la lib (qui
+// de toute façon ne partirait jamais tant qu'il y a du trafic sortant
+// périodique, cf. explication en tête de fichier).
+inline void mqttSendCanary(){
+    if(!mqttConnected) return;
+    String availTopic = mqttTopicNode() + "/availability";
+    mqttClient.publish(availTopic.c_str(), 1, true, "online", 6);
 }
 
 // ── Handler des commandes switch venues de HA + récupération des retained
 inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     String t(topic);
     String p(payload, len);
-    // Tout message reçu = activité sur la socket → reset du watchdog.
+    // Tout message REÇU = preuve réelle d'activité bidirectionnelle sur la
+    // socket → reset du watchdog. (Contrairement à un simple publish()
+    // sortant, ceci prouve que le broker nous parle encore.)
     mqttLastActivityMs = millis();
 
 
@@ -699,16 +770,40 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     }
 }
 
+// ★ FIX : callback appelé sur réception du PUBACK (accusé de réception
+// broker) pour un message publié en QoS 1 — donc uniquement pour le
+// canari envoyé par mqttSendCanary(). C'est la seule preuve fiable que
+// le broker a effectivement reçu quelque chose de nous récemment.
+inline void onMqttPublishAck(uint16_t packetId){
+    (void)packetId;
+    mqttLastActivityMs = millis();
+}
+
+// ★ FIX : callback appelé sur réception du SUBACK — confirmation réelle
+// (pas juste "on a envoyé la demande") que le broker a traité notre
+// abonnement. Réarme aussi le watchdog.
+inline void onMqttSubscribeAck(uint16_t packetId, uint8_t qos){
+    (void)packetId; (void)qos;
+    mqttLastActivityMs = millis();
+}
+
 inline void onMqttConnect(bool sessionPresent){
     mqttConnected = true;
     mqttDiscoveryPublished = false;
     // Reset du compteur d'échecs et armement du watchdog d'inactivité.
     // Le watchdog a besoin d'un timestamp d'activité fraîche à chaque
     // connexion réussie, sinon il considérerait immédiatement la connexion
-    // comme morte.
+    // comme morte. (Cette mise à jour initiale est un armement de départ,
+    // pas une preuve broker — les preuves viendront ensuite via
+    // onMqttPublishAck/onMqttSubscribeAck/mqttHandleMessage.)
     unsigned long downtimeMs = (mqttDisconnectMs > 0) ? (millis() - mqttDisconnectMs) : 0;
     mqttConsecutiveFailures = 0;
     mqttLastActivityMs      = millis();
+    // ★ FIX : réarme aussi les horloges du canari et de la reconnexion
+    // préventive, pour ne pas déclencher ces mécanismes juste après une
+    // reconnexion qui vient de réussir.
+    lastMqttCanaryMs         = millis();
+    lastMqttForceReconnectMs = millis();
     Serial.println("[MQTT] Connecté");
     {
         char b[160];
@@ -718,16 +813,13 @@ inline void onMqttConnect(bool sessionPresent){
     }
     String cmdTopic = String(sysConfig.mqttPrefix) + "/switch/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(cmdTopic.c_str(), 0);
-    mqttLastActivityMs = millis(); // subscribe = activité
     String btnTopic = String(sysConfig.mqttPrefix) + "/button/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(btnTopic.c_str(), 0);
-    mqttLastActivityMs = millis(); // subscribe = activité
     Serial.print("[MQTT] Abonné à: "); Serial.println(cmdTopic);
     Serial.print("[MQTT] Abonné à: "); Serial.println(btnTopic);
     // Publication disponibilité
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
-    mqttLastActivityMs = millis(); // publish = activité
 #ifdef CONS_MQTT_ONLY
     // ── Lancer la récupération des valeurs retained ────────────────────────────
     // On s'abonne à <prefix>/sensor/<mqttId>/+ pour recevoir TOUTES les
@@ -754,31 +846,17 @@ inline void onMqttConnect(bool sessionPresent){
 inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     mqttConnected = false;
     mqttDiscoveryPublished = false;
+    // ── RESET DU THROTTLE DE RECONNEXION ──
+    // lastMqttConnectAttemptMs est remis à 0 pour que la prochaine boucle
+    // mqttLoop() puisse retenter IMMÉDIATEMENT (sous réserve du backoff
+    // exponentiel ci-dessous). Sans ce reset, si la dernière tentative
+    // vient d'être lancée et qu'onMqttDisconnect arrive dans la même
+    // seconde, on attendrait 15s de plus pour rien (le throttle utilise
+    // "now - last > 15000", et last vient d'être posé).
+    lastMqttConnectAttemptMs = 0;
     mqttLastActivityMs = 0; // désarmement du watchdog (rien à surveiller tant qu'on n'est pas connecté)
     // Mémoriser le moment de la déco pour calculer le downtime à la reco.
     mqttDisconnectMs = millis();
-
-    // ── ANTI-BOUCLE DE RECONNEXION (bug du 09/07/2026) ──
-    // AsyncMqttClient::connect() est ASYNCHRONE : il retourne immédiatement
-    // et la pile TCP essaie d'ouvrir la socket en arrière-plan. Si elle
-    // échoue, onMqttDisconnect est rappelé presque instantanément, AVANT
-    // même que mqttLoop() ait pu re-armer lastMqttConnectAttemptMs.
-    //
-    // AVANT le patch : lastMqttConnectAttemptMs était remis à 0 dans cette
-    // fonction, ce qui DÉBRANCHAAIT complètement le throttle : mqttLoop()
-    // voyait (now - 0) > backoffDelay à chaque tour et rappelait connect()
-    // immédiatement. La pile TCP renvoyait un échec instantané, onMqttDisconnect
-    // rappelait → 50 retries à la seconde, logSys submergé. Le log ci-joint
-    // du 09/07/2026 17:01 en est la trace (≈ 50 lignes Retry/Disconnect par
-    // seconde, tous avec mqttConsecutiveFailures plafonné à 10, exactement
-    // le symptôme prédit).
-    //
-    // APRÈS le patch : on ARME lastMqttConnectAttemptMs à millis() (pas
-    // remis à 0), de sorte que le backoff de MQTT_BACKOFF_MAX_MS (60s)
-    // est strictement respecté, même si onMqttDisconnect rappelle en boucle.
-    // La branche de retry de mqttLoop() ne se déclenchera qu'après 60s.
-    lastMqttConnectAttemptMs = millis();
-
     // ── BACKOFF EXPONENTIEL ──
     // On incrémente le compteur d'échecs CONSÉCUTIFS. mqttLoop() s'en sert
     // pour calculer le délai avant la prochaine tentative : 5s, 10s, 20s,
@@ -805,16 +883,12 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
         default:                                                        reasonStr = "UNKNOWN"; break;
     }
     Serial.printf("[MQTT] Déconnecté (%d = %s)\n", (int)r, reasonStr);
-    // ── TRACE logSys THROTTLEE ──
-    // On ne logue PAS à chaque onMqttDisconnect (la pile TCP peut appeler
-    // cette callback plusieurs fois par seconde si elle n'arrive pas à
-    // joindre le broker — c'est précisément le bug de boucle qu'on vient
-    // de corriger). On ne logue qu'aux paliers 1/5/10/30/60 du compteur
-    // d'échecs consécutifs pour pouvoir suivre la situation depuis l'UI
-    // sans spammer le journal circulaire (LOG_MAX = 1000 entrées).
-    if(mqttConsecutiveFailures == 1 || mqttConsecutiveFailures == 5
-       || mqttConsecutiveFailures == 10 || mqttConsecutiveFailures == 30
-       || mqttConsecutiveFailures == 60){
+    // ── TRACE logSys — c'est ÇA qu'on cherche le matin ! ──
+    // Avant ce patch, seule la trace Serial était écrite, donc rien n'était
+    // visible via l'API /logs (logToJson) et la page Logs de l'UI. On logue
+    // maintenant systématiquement la déco avec sa raison + le compteur
+    // d'échecs pour pouvoir corréler avec les reboots / coupures WiFi.
+    {
         char b[200];
         snprintf(b, sizeof(b), "[MQTT] ✗ Déconnecté: %s (échecs=%u, prochain retry dans %lu s)",
                  reasonStr,
@@ -888,15 +962,14 @@ inline void mqttSetup(){
     // la dernière valeur retained ("online") publiée avant la coupure.
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.setWill(availTopic.c_str(), 0, true, "offline");
-    // Keepalive 60s : moitié du watchdog 90s (cf. MQTT_WATCHDOG_MS).
-    // Un broker Mosquitto sain coupe une session silencieuse au bout de
-    // 1.5 × keepalive = 90s. On aligne notre watchdog sur cette valeur
-    // pour que la fenêtre zombie soit minimale.
     mqttClient.setKeepAlive(60);
     mqttClient.setCleanSession(true);
-    Serial.printf("[MQTT] Keepalive=60s, Watchdog=90s, PubInterval=10s\n");
     mqttClient.onConnect(onMqttConnect);
     mqttClient.onDisconnect(onMqttDisconnect);
+    // ★ FIX : callbacks de confirmation réelle (PUBACK/SUBACK) — seule
+    // source fiable pour réarmer le watchdog d'inactivité en continu.
+    mqttClient.onPublish(onMqttPublishAck);
+    mqttClient.onSubscribe(onMqttSubscribeAck);
     mqttClient.onMessage([](char* topic, char* payload, AsyncMqttClientMessageProperties, size_t len, size_t, size_t){
         mqttHandleMessage(topic, payload, len);
     });
@@ -968,28 +1041,25 @@ inline void mqttLoop(){
 
     // ── WATCHDOG D'INACTIVITÉ ──
     // Si on se croit connecté (mqttConnected=true) mais qu'aucune
-    // activité (publish, subscribe, message reçu) n'a eu lieu depuis
-    // MQTT_WATCHDOG_MS, c'est que la socket TCP est probablement
-    // morte dans un état zombie (routeur qui a perdu l'association
-    // STA, coupure RF brève, broker rebooté silencieusement, etc.).
-    // AsyncMqttClient n'a pas de mécanisme de ping natif visible côté
-    // firmware, donc on simule : on force la déconnexion, onMqttDisconnect
-    // est appelé, le compteur d'échecs s'incrémente, et la logique
-    // de backoff prend le relais.
+    // activité CONFIRMÉE PAR LE BROKER (PUBACK du canari, SUBACK, ou
+    // message reçu — voir onMqttPublishAck/onMqttSubscribeAck/
+    // mqttHandleMessage) n'a eu lieu depuis MQTT_WATCHDOG_MS, c'est que
+    // la socket TCP est probablement morte dans un état zombie (routeur
+    // qui a perdu l'association STA, coupure RF brève, broker rebooté
+    // silencieusement, etc.).
     //
-    // NB IMPORTANT : mqttLastActivityMs n'est armé QUE sur des preuves
-    // d'aller-retour (message reçu / subscribe / onMqttConnect). Nos
-    // propres publish() NE le réarment PAS (voir bloc plus bas), sans
-    // quoi le watchdog serait neutralisé par notre trafic périodique
-    // (write() réussit dans un buffer TCP mort → on croirait à tort
-    // que la socket est vivante → le watchdog ne se déclencherait
-    // jamais → mqttConnected resterait à true → la branche de
-    // reconnexion de cette boucle ne tournerait plus).
+    // ★ FIX : mqttLastActivityMs n'est PLUS réarmé par un simple
+    // publish() sortant (mqttPublishState() par exemple) — un publish()
+    // ne prouve rien sur l'état réel de la session côté broker. Seule
+    // une confirmation reçue (PUBACK/SUBACK/message) réarme ce timer,
+    // ce qui permet à ce watchdog de détecter une session zombie même
+    // quand le firmware continue d'émettre du trafic sortant en
+    // apparence normal.
     if(mqttConnected && mqttLastActivityMs > 0
        && (now - mqttLastActivityMs) > MQTT_WATCHDOG_MS){
-        Serial.printf("[MQTT] ⚠ Watchdog: aucune activité depuis %lu s — forçage reconnexion\n",
+        Serial.printf("[MQTT] ⚠ Watchdog: aucune activité CONFIRMÉE depuis %lu s — forçage reconnexion\n",
                       (unsigned long)((now - mqttLastActivityMs) / 1000UL));
-        logSys("[MQTT] Watchdog inactivité — reconnexion forcée");
+        logSys("[MQTT] Watchdog inactivité (aucun PUBACK/SUBACK/RX) — reconnexion forcée");
         mqttClient.disconnect();
         // On force mqttConnected à false ici, en plus de onMqttDisconnect,
         // pour que la branche de reconnexion ci-dessous s'exécute tout
@@ -997,48 +1067,22 @@ inline void mqttLoop(){
         // asynchrone, onMqttDisconnect peut arriver après).
         mqttConnected = false;
         mqttLastActivityMs = 0;
-        // Idem : on désarme aussi la purge périodique pour qu'elle
-        // reparte de zéro après la reco (sinon elle pourrait re-tomber
-        // quelques secondes plus tard et créer un cycle de reconnexions
-        // rapides sur un broker qui a un RTT dégradé).
-        lastMqttForceReconnectMs = now;
     }
 
-    // ── PURGE PÉRIODIQUE DE LA CONNEXION (filet de sécurité) ──
-    // Indépendamment du watchdog d'inactivité, on force une reconnexion
-    // complète toutes les MQTT_FORCE_RECONNECT_MS (10 min). C'est un
-    // dernier rempart contre les sessions TCP qui restent "vues vivantes"
-    // par AsyncMqttClient alors qu'elles sont en réalité bloquées côté
-    // AsyncTCP (bug connu sur ESP32-S3 dans certaines versions : socket
-    // qui ne reçoit plus aucun paquet, ne génère aucun événement, mais
-    // que la lib considère toujours comme "connectée" → impossible à
-    // détecter par keepalive ni par watchdog d'inactivité puisqu'il
-    // n'y a aucun signal d'erreur).
-    //
-    // Effet de bord : HA verra passer une petite indisponibilité (LWT
-    // "offline" → "online" retenu) toutes les 10 min. C'est un trade-off
-    // acceptable et bien plus rare qu'un blocage total de plusieurs heures
-    // comme on l'observait avant. La fréquence est configurable via
-    // MQTT_FORCE_RECONNECT_MS.
-    if(mqttConnected && (now - lastMqttForceReconnectMs > MQTT_FORCE_RECONNECT_MS)){
-        unsigned long upSec = lastMqttForceReconnectMs > 0
-                            ? (now - lastMqttForceReconnectMs) / 1000UL
-                            : (now / 1000UL);
-        char pb[200];
-        snprintf(pb, sizeof(pb),
-                 "[MQTT] Purge périodique (~%lu s d'uptime) — reconnexion propre",
-                 (unsigned long)upSec);
-        logSys(pb);
+    // ★ FIX : reconnexion préventive périodique, indépendante de tout
+    // symptôme détecté. Purge un éventuel état zombie côté pile
+    // AsyncTCP/AsyncMqttClient qui n'aurait pas déclenché le watchdog
+    // ci-dessus (ex: session apparemment saine mais légèrement corrompue).
+    // Coût quasi nul (une reconnexion propre dure <1s), bénéfice : borne
+    // supérieure garantie sur la durée max d'une éventuelle panne
+    // silencieuse, même dans un scénario non anticipé par le watchdog.
+    if(mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS){
+        lastMqttForceReconnectMs = now;
+        Serial.println("[MQTT] ↻ Reconnexion préventive périodique");
+        logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
         mqttClient.disconnect();
         mqttConnected = false;
         mqttLastActivityMs = 0;
-        lastMqttForceReconnectMs = now; // réarmement pour la prochaine purge
-    } else if(mqttConnected && lastMqttForceReconnectMs == 0){
-        // Premier passage en mode connecté : on initialise le timer de
-        // purge. Sans cette init, on pourrait déclencher une purge
-        // immédiate si on vient juste de se reconnecter (delta énorme
-        // par rapport à l'init à 0 du boot).
-        lastMqttForceReconnectMs = now;
     }
 
     if(!mqttConnected && wifiUp){
@@ -1051,48 +1095,6 @@ inline void mqttLoop(){
             backoffDelay = min(candidate, MQTT_BACKOFF_MAX_MS);
         }
         if(now - lastMqttConnectAttemptMs > backoffDelay){
-            // ── TEST TCP BRUT AVANT DE TENTER connect() ──
-            // Sans ce test, on rappelle mqttClient.connect() en boucle toutes
-            // les backoffDelay ms, et la pile TCP renvoie un échec instantané
-            // (broker injoignable) → onMqttDisconnect rappelé → on attend
-            // encore backoffDelay → nouvelle tentative → etc. Le bug du
-            // 09/07/2026 provenait exactement de là : 50 tentatives en 1
-            // seconde quand le reset du throttle était cassé.
-            //
-            // Maintenant que le throttle est correct (lastMqttConnectAttemptMs
-            // armé dans onMqttDisconnect au lieu d'être reseté), on rappelle
-            // connect() au plus toutes les 60s. Mais un test TCP rapide (1s
-            // timeout) permet en plus de NE PAS rappeler connect() du tout
-            // si le broker est manifestement injoignable (genre routeur wifi
-            // qui a reboot), ce qui économise un cycle TCP/handshake inutile
-            // et un appel à onMqttDisconnect. Si le test TCP réussit, on
-            // sait que AsyncMqttClient a une vraie chance d'aboutir.
-            IPAddress brokerIp;
-            if(brokerIp.fromString(sysConfig.mqttHost)){
-                WiFiClient probe;
-                probe.setTimeout(1500);
-                bool tcpOk = probe.connect(brokerIp, sysConfig.mqttPort);
-                probe.stop();
-                if(!tcpOk){
-                    // Broker injoignable : on réarme le throttle pour ne
-                    // pas retenter pendant encore 60s, et on logue la
-                    // situation UNIQUEMENT aux paliers 1/5/10/30/60 pour
-                    // ne pas spammer logSys.
-                    lastMqttConnectAttemptMs = now;
-                    if(mqttConsecutiveFailures == 1 || mqttConsecutiveFailures == 5
-                       || mqttConsecutiveFailures == 10 || mqttConsecutiveFailures == 30
-                       || mqttConsecutiveFailures == 60){
-                        char b[160];
-                        snprintf(b, sizeof(b), "[MQTT] Test TCP KO (broker %s:%u injoignable, échecs=%u)",
-                                 brokerIp.toString().c_str(), (unsigned)sysConfig.mqttPort,
-                                 (unsigned)mqttConsecutiveFailures);
-                        logSys(b);
-                    }
-                    return; // on ne tente pas connect()
-                }
-                // Test TCP OK : on peut tenter connect() sans risque de
-                // flooder logSys. On logue le palier atteint avant l'appel.
-            }
             lastMqttConnectAttemptMs = now;
             Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
                           (unsigned)mqttConsecutiveFailures,
@@ -1127,13 +1129,11 @@ if(!mqttDiscoveryPublished){
         if(mqttRecoveryDone){
             mqttPublishDiscovery();
             mqttPublishState();
-            // mqttLastActivityMs n'est PAS réarmé ici (voir note watchdog).
             lastMqttPubMs = now;
         }
     #else
         mqttPublishDiscovery();
         mqttPublishState();
-        // mqttLastActivityMs n'est PAS réarmé ici (voir note watchdog).
         lastMqttPubMs = now;
     #endif
     }
@@ -1150,34 +1150,15 @@ if(!mqttDiscoveryPublished){
             // Désabonnement du pattern de recovery
             String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
             mqttClient.unsubscribe(recovPattern.c_str());
-            mqttLastActivityMs = millis(); // activity
             // Flush NVS des valeurs éventuellement restaurées
             valveConsFlushDirty();
             logSys("[CONS] Recovery MQTT terminée — NVS mis à jour");
             // Publication discovery + état fusionné après récupération
             mqttPublishDiscovery();
             mqttPublishState();
-            // mqttLastActivityMs n'est PAS réarmé ici (voir note watchdog).
             lastMqttPubMs = now;
         }
 #endif
-        // ── CORRECTIF CRITIQUE : ne PAS réarmer mqttLastActivityMs après
-        // nos propres publish(). AsyncMqttClient::publish() ne fait qu'écrire
-        // dans le buffer TCP local — ça ne prouve PAS que le paquet a atteint
-        // le broker (socket TCP zombie, routeur qui a vidé sa table NAT,
-        // broker rebooté silencieusement, etc. : aucun FIN/RST n'est généré
-        // et write() réussit localement dans un buffer mort).
-        //
-        // Conséquence : si on réarmait ici, le watchdog d'inactivité ne se
-        // déclencherait JAMAIS, onMqttDisconnect() ne serait jamais appelé,
-        // mqttConnected resterait bloqué à true, et la branche de
-        // reconnexion de mqttLoop() — celle qui contient tout le backoff
-        // exponentiel — ne tournerait plus jamais. C'est exactement le
-        // bug "MQTT déconnecté, WiFi OK, rien ne se passe jusqu'au reboot".
-        //
-        // mqttLastActivityMs n'est donc armé QUE sur des preuves réelles
-        // d'aller-retour : message REÇU (mqttHandleMessage), subscribe
-        // confirmé, ou connexion établie (onMqttConnect).
         if(now - lastMqttPubMs > MQTT_PUB_INTERVAL_MS){
             lastMqttPubMs = now;
 #ifdef CONS_MQTT_ONLY
@@ -1187,8 +1168,16 @@ if(!mqttDiscoveryPublished){
 #else
             mqttPublishState();
 #endif
-            // mqttLastActivityMs n'est PAS réarmé ici — voir commentaire
-            // détaillé au-dessus.
+            // ★ FIX : plus de mqttLastActivityMs=millis() ici — un publish()
+            // QoS 0 sortant ne prouve rien. Voir watchdog ci-dessus et
+            // canari ci-dessous pour la vraie confirmation.
+        }
+
+        // ★ FIX : canari QoS 1 périodique — seule source de confirmation
+        // continue de vie de la session en dehors des messages reçus.
+        if(now - lastMqttCanaryMs > MQTT_CANARY_INTERVAL_MS){
+            lastMqttCanaryMs = now;
+            mqttSendCanary();
         }
     }
 }
