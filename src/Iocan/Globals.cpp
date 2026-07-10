@@ -77,6 +77,12 @@ unsigned long lastDistributedTotal = 0;
 // Drity flags pour throttling d'écriture NVS (cf. ConfigManager.h)
 volatile bool valveConsDirty[VANNE_COUNT] = {false};
 
+// Consommation "Vanne manuelle" (voir ManualValveState / Globals.h).
+// Initialisée à zéro ici ; les valeurs NVS sont restaurées par
+// manualValveLoad() dans setup() (avant tout pulseDistribute()).
+ManualValveState manualValveState;
+volatile bool     manualValveDirty = false;
+
 // Calibration débit
 CalibState calibState;
 

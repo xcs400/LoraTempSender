@@ -169,6 +169,7 @@ inline void pulseSave(){
 
 // Déclarations anticipées pour les helpers de consommation
 inline void valveConsFlushDirty();
+inline void manualValveFlushDirty(); // défini plus bas, après manualValveLoad/SaveOne
 
 // ── Redémarrage sécurisé : flush NVS avant ESP.restart() ─────────────────
 //
@@ -181,6 +182,7 @@ inline void valveConsFlushDirty();
 // Séquence :
 //   1) Flush compteur pulse global (pulseSave) — toujours.
 //   2) Flush conso par vanne dirty (valveConsFlushDirty) — toujours.
+//   2b) Flush conso "vanne manuelle" dirty (manualValveFlushDirty) — toujours.
 //   3) Petit délai pour laisser les transactions NVS terminer.
 //   4) ESP.restart().
 inline void safeRestart(const char* reason = nullptr){
@@ -202,6 +204,7 @@ inline void safeRestart(const char* reason = nullptr){
     pulseSave();
 #endif
     valveConsFlushDirty();
+    manualValveFlushDirty();
     Serial.println("[SAFE] Flush NVS avant restart OK");
     delay(300);
     ESP.restart();
@@ -408,6 +411,88 @@ inline void valveConsFlushOne(int v){
     if(v<0||v>=VANNE_COUNT) return;
     valveConsSaveOne(v);
     valveConsDirty[v] = false;
+}
+
+// ────────────────────────────────────────────────────────────────────
+// CONSOMMATION "VANNE MANUELLE" — persistance NVS
+// ────────────────────────────────────────────────────────────────────
+//
+// Même schéma que valveConsLoad / valveConsSaveOne : namespace dédié
+// "irrmnl" (pour "irrigation manual"), clés préfixées "mnl_". En mode
+// CONS_MQTT_ONLY, les load/save sont des no-ops (cohérent avec le reste
+// de la conso) — la valeur vit uniquement en RAM et sera ré-hydratée
+// par la recovery MQTT (MqttManager.h) si elle a été publiée retained.
+//
+// En mode normal, on flush :
+//   * immédiatement sur reset (via manualValveFlushOne)
+//   * immédiatement sur transition vannes (toutes fermées → ouverture,
+//     ou l'inverse) : voir valveHardOpen / valveHardClose
+//   * périodiquement (toutes les 30 s) tant que manualValveDirty=true
+inline void manualValveLoad(){
+#ifdef CONS_MQTT_ONLY
+    // Pas de persistance en CONS_MQTT_ONLY — la valeur sera ré-hydratée
+    // par la recovery MQTT au boot si elle a été publiée retained.
+#else
+    prefs.begin("irrmnl", false);
+    manualValveState.pulsesTotal = prefs.getULong("mnl_pt", 0UL);
+    manualValveState.todayYmd    = prefs.getUInt("mnl_td", 0);
+    manualValveState.todayPulses = prefs.getUInt("mnl_tp", 0);
+    manualValveState.todayIdx    = prefs.getUShort("mnl_ti", 0);
+    manualValveState.flowCoeff   = prefs.getFloat("mnl_fc", 1.0f);
+    manualValveState.carry       = prefs.getFloat("mnl_cr", 0.0f);
+    for(int d=0;d<CONS_HISTORY_DAYS;d++){
+        char key[16]; snprintf(key,16,"mnl_h%d",d);
+        size_t n = prefs.getBytes(key, &manualValveState.history[d], sizeof(DayStat));
+        if(n != sizeof(DayStat)){
+            manualValveState.history[d] = {0, 0, 0.0f};
+        }
+    }
+    prefs.end();
+    // Recalcule l'index d'écriture anneau (idem valveConsLoad)
+    uint16_t idx = 0;
+    for(int d=0;d<CONS_HISTORY_DAYS;d++){
+        if(manualValveState.history[d].ymd == 0){ idx = d; break; }
+        idx = (uint16_t)((d+1) % CONS_HISTORY_DAYS);
+    }
+    manualValveState.todayIdx = idx;
+#endif
+}
+
+inline void manualValveSaveOne(){
+#ifdef CONS_MQTT_ONLY
+    // no-op (cohérent avec valveConsSaveOne)
+#else
+    prefs.begin("irrmnl", false);
+    prefs.putULong("mnl_pt", manualValveState.pulsesTotal);
+    prefs.putUInt("mnl_td",  manualValveState.todayYmd);
+    prefs.putUInt("mnl_tp",  manualValveState.todayPulses);
+    prefs.putUShort("mnl_ti", manualValveState.todayIdx);
+    prefs.putFloat("mnl_fc", manualValveState.flowCoeff);
+    prefs.putFloat("mnl_cr", manualValveState.carry);
+    for(int d=0;d<CONS_HISTORY_DAYS;d++){
+        char key[16]; snprintf(key,16,"mnl_h%d",d);
+        prefs.putBytes(key, &manualValveState.history[d], sizeof(DayStat));
+    }
+    prefs.end();
+#endif
+}
+
+// Flush immédiat sur demande (reset Web, transition de vanne, etc.).
+// Appelé par :
+//   - WebManager.h::pulse_reset (en plus de valveConsSaveOne)
+//   - valveHardOpen / valveHardClose pour persister immédiatement quand
+//     une transition vannes ↔ vanne manuelle a eu lieu (évite une perte
+//     de 30 s de conso en cas de coupure).
+inline void manualValveFlushOne(){
+    manualValveSaveOne();
+    manualValveDirty = false;
+}
+
+// Flush en lot, utilisé par la loop() toutes les 30 s en mode normal.
+inline void manualValveFlushDirty(){
+    if(manualValveDirty){
+        manualValveFlushOne();
+    }
 }
 
 // Sauvegarde/chargement des programmes

@@ -212,6 +212,14 @@ void setup(){
     // ignorés mais flowCoeff est conservé — voir ConfigManager.h).
     applyFlowCoeffDefaults();
     valveConsLoad();
+    // Charge aussi l'état du compteur "Vanne manuelle" (cf. Globals.h /
+    // ConfigManager.h). En mode CONS_MQTT_ONLY, c'est un no-op (la
+    // valeur sera restaurée par la recovery MQTT). En mode normal, on
+    // récupère les compteurs NVS potentiellement persistés au tour
+    // précédent — IMPORTANT : on charge APRÈS valveConsLoad() mais AVANT
+    // le recalcul de lastDistributedTotal pour ne pas perturber la
+    // synchronisation de la distribution.
+    manualValveLoad();
     // Aligne la distribution sur le total connu au boot (persistant + runtime courant)
     {
         unsigned long cnt;
@@ -378,12 +386,18 @@ void loop(){
     //     au prix d'une perte possible des données "en vol" en cas de reboot
     //     brutal pendant un arrosage (perte = litres non encore flushés depuis
     //     la dernière fermeture de vanne). Voir Globals.h pour le détail.
+    //
+    // Le compteur "VanneManuelle" (pulses comptés alors qu'aucune vanne
+    // automatisée n'est ouverte) suit la MÊME stratégie de throttling pour
+    // préserver la flash — manualValveDirty est posé par pulseDistribute()
+    // et par les transitions d'état vanne.
     {
 #ifndef CONS_MQTT_ONLY
         static unsigned long lastValveConsFlushMs = 0;
         if(millis() - lastValveConsFlushMs >= 30000UL){
             lastValveConsFlushMs = millis();
             valveConsFlushDirty();
+            manualValveFlushDirty(); // même fenêtre de 30s
         }
 #else
         // Mode économie flash : pas de flush NVS périodique.

@@ -187,9 +187,25 @@ inline void webSetup(){
         // Lecture atomique
         unsigned long cnt;
         noInterrupts(); cnt = pulseCount; interrupts();
-        char buf[128];
+        char buf[256];
         float litres = (float)cnt / PULSES_PER_LITRE;
-        snprintf(buf, sizeof(buf), "{\"pulses\":%lu,\"litres\":%.3f,\"pulses_per_litre\":%.1f}", cnt, litres, (double)PULSES_PER_LITRE);
+        // ── Compteur "Vanne manuelle" (cf. Globals.h::ManualValveState).
+        // Exposé ici pour qu'un refresh manuel (bouton ↻) affiche la
+        // conso manuelle même sans WebSocket connecté. La structure
+        // imbriquée est cohérente avec buildStatusJson() (clé
+        // "manualValve") côté WebSocket.
+        float mvlToday = (manualValveState.todayYmd == todayYMD())
+                       ? (float)manualValveState.todayPulses / PULSES_PER_LITRE
+                       : 0.0f;
+        float mvlTotal = (float)manualValveState.pulsesTotal / PULSES_PER_LITRE;
+        snprintf(buf, sizeof(buf),
+            "{\"pulses\":%lu,\"litres\":%.3f,\"pulses_per_litre\":%.1f,"
+            "\"manualValve\":{\"litresToday\":%.3f,\"litresTotal\":%.3f,"
+            "\"pulsesToday\":%lu,\"pulsesTotal\":%lu}}",
+            cnt, litres, (double)PULSES_PER_LITRE,
+            (double)mvlToday, (double)mvlTotal,
+            (unsigned long)((manualValveState.todayYmd == todayYMD()) ? manualValveState.todayPulses : 0),
+            (unsigned long)manualValveState.pulsesTotal);
         req->send(200, "application/json", String(buf));
     });
 
@@ -213,10 +229,44 @@ inline void webSetup(){
             }
             valveConsSaveOne(v);
         }
+        // Reset aussi le compteur "Vanne manuelle" (cf. Globals.h)
+        manualValveState.pulsesTotal = 0;
+        manualValveState.todayPulses  = 0;
+        manualValveState.todayYmd     = todayYMD();
+        manualValveState.todayIdx     = 0;
+        manualValveState.carry        = 0.0f;
+        for(int d=0;d<CONS_HISTORY_DAYS;d++){
+            manualValveState.history[d].ymd    = 0;
+            manualValveState.history[d].pulses = 0;
+            manualValveState.history[d].litres = 0.0f;
+        }
+        manualValveFlushOne();
         lastDistributedTotal = 0;
         lastMqttPubMs = 0; // Force la publication immédiate des zéros sur MQTT
         req->send(200, "application/json", String("{\"ok\":true}"));
-        logSys("Compteur impulsions + suivi par vanne remis a zero");
+        logSys("Compteur impulsions + suivi par vanne + vanne manuelle remis a zero");
+    });
+
+    // ── Reset dédié du compteur "Vanne manuelle" POST /api/manual_valve/reset
+    // Permet de remettre à zéro la conso manuelle SANS toucher au compteur
+    // global ni aux vannes automatisées. Utile après un usage ponctuel
+    // (arrosage au tuyau) pour repartir d'une base propre, ou après une
+    // fausse manip de l'utilisateur.
+    server.on("/api/manual_valve/reset", HTTP_POST, [](AsyncWebServerRequest* req){
+        manualValveState.pulsesTotal = 0;
+        manualValveState.todayPulses  = 0;
+        manualValveState.todayYmd     = todayYMD();
+        manualValveState.todayIdx     = 0;
+        manualValveState.carry        = 0.0f;
+        for(int d=0;d<CONS_HISTORY_DAYS;d++){
+            manualValveState.history[d].ymd    = 0;
+            manualValveState.history[d].pulses = 0;
+            manualValveState.history[d].litres = 0.0f;
+        }
+        manualValveFlushOne();
+        lastMqttPubMs = 0; // Force MAJ MQTT immédiate
+        req->send(200, "application/json", String("{\"ok\":true}"));
+        logSys("Compteur VanneManuelle remis a zero");
     });
 
     // ── Reset compteur conso d'une vanne POST /api/valve/reset_cons
@@ -290,6 +340,38 @@ inline void webSetup(){
                 if(ds.ymd == 0) continue;
                 JsonObject h = hist.createNestedObject();
                 h["ymd"] = ds.ymd;
+                h["pulses"] = ds.pulses;
+                h["litres"] = ds.litres;
+            }
+        }
+        // ── Entrée dédiée "Vanne manuelle" (cf. Globals.h::ManualValveState) ──
+        // Mêmes champs que pour une vanne standard, plus un identifiant
+        // stable (-1, ou "manual") pour que l'UI puisse la distinguer
+        // dans le tableau de conso. Permet à un refresh manuel (bouton ↻)
+        // d'afficher la conso manuelle même sans WebSocket.
+        {
+            JsonObject o = doc.createNestedObject("manualValve");
+            o["valve"]            = -1;        // marqueur distinctif (les vannes vont de 0 à VANNE_COUNT-1)
+            o["name"]             = "VanneManuelle";
+            o["pulsesTotal"]      = manualValveState.pulsesTotal;
+            o["litresTotal"]      = (float)manualValveState.pulsesTotal / PULSES_PER_LITRE;
+            o["todayYmd"]         = manualValveState.todayYmd;
+            o["pulsesToday"]      = (manualValveState.todayYmd == today) ? manualValveState.todayPulses : 0;
+            o["litresToday"]      = (manualValveState.todayYmd == today)
+                                    ? (float)manualValveState.todayPulses / PULSES_PER_LITRE
+                                    : 0.0f;
+            o["flowCoeff"]        = manualValveState.flowCoeff;
+            // Débit instantané du compteur global (un seul anneau pour
+            // la vanne manuelle, partagé avec flowCurrentLpm).
+            o["instantFlowLpm"]  = flowCurrentLpm;
+            JsonArray hist = o.createNestedArray("history");
+            int startMV = (manualValveState.todayIdx - 1 + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;
+            for(int k=0;k<CONS_HISTORY_DAYS;k++){
+                int idxMV = (startMV - k + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;
+                const DayStat& ds = manualValveState.history[idxMV];
+                if(ds.ymd == 0) continue;
+                JsonObject h = hist.createNestedObject();
+                h["ymd"]    = ds.ymd;
                 h["pulses"] = ds.pulses;
                 h["litres"] = ds.litres;
             }

@@ -103,6 +103,60 @@ inline String buildStatusJson(){
         doc["flow_lpm"] = buf;
     }
 
+    // ── Compteur "Vanne manuelle" (cf. Globals.h::ManualValveState) ──
+    // Attribue les pulses qui arrivent alors qu'AUCUNE vanne automatisée
+    // n'est ouverte — cas typique : l'utilisateur a ouvert une vanne
+    // manuelle en aval du débitmètre (robinet, arrosage au tuyau, etc.).
+    // L'alarme UNEXPECTED_FLOW reste en place et inchangée (les fuites
+    // sont un cas particulier d'écoulement à vannes fermées qui doit
+    // toujours être signalé — c'est l'utilisateur qui distingue via ce
+    // compteur "VanneManuelle" un usage légitime d'une vraie fuite).
+    // Mêmes champs que pour une vanne standard (litresToday, litresTotal,
+    // pulsesToday, pulsesTotal) pour la cohérence de l'UI, plus un flag
+    // "hasFlow" dérivé du débit instantané global (flow_lpm ci-dessus) :
+    // permet à l'UI d'afficher un indicateur visuel "eau en train de
+    // couler par la vanne manuelle" sans dépendre d'une autre source.
+    {
+        uint16_t todayMV = today;
+        JsonObject mvl = doc.createNestedObject("manualValve");
+        float litresTodayMV = (manualValveState.todayYmd == todayMV)
+                            ? (float)manualValveState.todayPulses / PULSES_PER_LITRE
+                            : 0.0f;
+        float litresTotalMV = (float)manualValveState.pulsesTotal / PULSES_PER_LITRE;
+        mvl["litresToday"]  = litresTodayMV;
+        mvl["litresTotal"]  = litresTotalMV;
+        mvl["pulsesToday"]  = (manualValveState.todayYmd == todayMV) ? (long)manualValveState.todayPulses : 0;
+        mvl["pulsesTotal"]  = (long)manualValveState.pulsesTotal;
+        // hasFlow : true si débit global > seuil "significatif" ET
+        // aucune vanne automatisée ouverte. On réutilise le même seuil
+        // que l'alarme NO_FLOW (0.05 L/min) pour la cohérence.
+        bool anyAutoOpen = false;
+        for(int i=0;i<VANNE_COUNT;i++){
+            if(valves[i].isOpen){ anyAutoOpen = true; break; }
+        }
+        mvl["hasFlow"]     = (!anyAutoOpen) && (flowCurrentLpm >= 0.05f);
+        // flow_lpm instantané mesuré PENDANT l'écoulement manuel (même
+        // débit global, mais n'a de sens que quand hasFlow==true).
+        {
+            float f = flowCurrentLpm;
+            char buf[16];
+            snprintf(buf, sizeof(buf), "%.2f", (double)f);
+            mvl["flow_lpm"] = buf;
+        }
+        // history : on expose l'historique 14 jours pour l'UI.
+        JsonArray hist = mvl.createNestedArray("history");
+        int startMV = (manualValveState.todayIdx - 1 + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;
+        for(int k=0;k<CONS_HISTORY_DAYS;k++){
+            int idxMV = (startMV - k + CONS_HISTORY_DAYS) % CONS_HISTORY_DAYS;
+            const DayStat& ds = manualValveState.history[idxMV];
+            if(ds.ymd == 0) continue;
+            JsonObject h = hist.createNestedObject();
+            h["ymd"]    = ds.ymd;
+            h["pulses"] = ds.pulses;
+            h["litres"] = ds.litres;
+        }
+    }
+
     doc["mqttConnected"] = mqttConnected;
     // AMÉLIORATION (NVS) : expose le niveau de remplissage de la partition
     // NVS (utilisé / total + pourcentage) pour que l'UI puisse afficher

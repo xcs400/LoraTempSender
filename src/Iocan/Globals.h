@@ -375,6 +375,56 @@ struct ValveCons {
 
 };
 
+// --- Consommation "Vanne manuelle" (débitmètre voit couler alors qu'aucune
+// électrovanne automatisée n'est ouverte) ---
+//
+// Use case (juillet 2026) : l'installation possède une vanne manuelle en
+// aval du débitmètre (arrosage au tuyau, remplissage manuel, etc.). Quand
+// l'utilisateur ouvre cette vanne manuelle, le débitmètre compte des
+// pulses mais AUCUNE vanne automatisée n'est ouverte — donc le code
+// existant ne les attribuait à PERSONNE (les pulses étaient perdus pour
+// les compteurs par vanne, même s'ils restaient dans le compteur global
+// `pulse_total`). L'alarme UNEXPECTED_FLOW se déclenche par ailleurs
+// avec un délai de grâce de 15s après la dernière fermeture de vanne
+// (AlarmManager.h), ce qui est adapté à la détection de FUITE mais pas
+// à un usage légitime de la vanne manuelle.
+//
+// Cette structure suit exactement le même modèle que `ValveCons` (mêmes
+// champs, mêmes conventions, même algorithme de répartition via
+// accumulateur d'erreur — voir ValveCons.h::pulseDistribute), mais
+// avec un unique "canal" (la vanne manuelle est unique par installation).
+// L'alarme UNEXPECTED_FLOW reste en place et inchangée : un débit
+// inattendu à vanne(s) fermée(s) ET vanne manuelle fermée doit toujours
+// être signalé comme fuite possible — c'est l'utilisateur qui décide,
+// via le compteur `VanneManuelle`, de distinguer un usage légitime
+// d'une fuite entre deux fermetures.
+//
+// Pourquoi PAS une vraie "vanne" (struct Valve) :
+//   - Une vanne automatisée a un GPIO, un état, un programmeur, un
+//     priorité, un timer de fermeture auto. La vanne manuelle n'a AUCUN
+//     de ces concepts : c'est l'utilisateur qui l'ouvre et la ferme
+//     physiquement. La modéliser comme Valve forcerait à inventer un
+//     GPIO fantôme et un état "toujours false" — source de bugs.
+//   - Le seul besoin métier est de COMPTER les litres qui passent par
+//     elle pendant qu'aucune électrovanne n'est ouverte. C'est ce que
+//     fait cette struct, et c'est tout ce qu'il faut.
+struct ManualValveState {
+    unsigned long pulsesTotal = 0;   // total cumulé (persisté en NVS en mode normal)
+    uint32_t todayYmd = 0;           // YYYYMMDD du compteur "today"
+    uint32_t todayPulses = 0;        // pulses du jour (rollover à minuit)
+    uint16_t todayIdx = 0;           // index d'écriture dans history (anneau)
+    DayStat history[CONS_HISTORY_DAYS];
+    // Coefficient de débit (toujours 1.0 — pas de calibration vanne par
+    // vanne possible ici puisqu'il n'y a qu'un compteur et qu'il n'est
+    // jamais ouvert "seul" : il capte la somme de tous les flux aval).
+    // Conservé pour la cohérence d'API avec ValveCons.
+    float flowCoeff = 1.0f;
+    // Résidu fractionnaire (même algorithme de Bresenham que valveCons[].carry
+    // — voir ValveCons.h::pulseDistribute). Indispensable pour qu'un
+    // pulse isolé ne soit pas perdu à l'arrondi quand le delta est petit.
+    float carry = 0.0f;
+};
+
 // --- Alarmes hydrauliques (voir AlarmManager.h) ---
 //
 // Struct + extern ci-dessous ; les définitions vivent dans Globals.cpp.
@@ -494,6 +544,13 @@ extern unsigned long lastDistributedTotal;
 // n'a pas encore été flushée en NVS. Flush déclenché toutes les 30 s par
 // loop() (ou immédiatement sur transition d'état / reset).
 extern volatile bool valveConsDirty[];
+
+// Consommation "Vanne manuelle" — voir ManualValveState ci-dessus pour
+// le contexte d'usage. Même stratégie NVS que les vannes : on travaille
+// en RAM, on marque dirty, et loop() flushe périodiquement. La persistance
+// est désactivée en mode CONS_MQTT_ONLY (cohérent avec valveCons).
+extern ManualValveState manualValveState;
+extern volatile bool     manualValveDirty;
 
 // Applique les coefficients de calibration par défaut (mesurés le
 // 06/07/2026 sur l'installation réelle, voir FLOW_COEFF_DEFAULTS plus

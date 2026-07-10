@@ -84,6 +84,17 @@ inline bool mqttDiscoveryPublished = false;
 inline unsigned long lastMqttCanaryMs        = 0;
 inline unsigned long lastMqttForceReconnectMs = 0;
 
+// ★ FIX (juillet 2026, bug #2) : dernier compteur d'échecs pour lequel un
+// log a déjà été émis, et horodatage du dernier "rappel" en cas de panne
+// longue. Permet de ne logger qu'aux TRANSITIONS de mqttConsecutiveFailures
+// (1, 2, 3… jusqu'à 10) au lieu de re-logger à chaque tentative une fois
+// plafonné à 10 — voir explication détaillée dans mqttLoop().
+inline uint8_t       lastLoggedMqttFailureCount = 0;
+inline unsigned long lastMqttDownHeartbeatMs     = 0;
+#ifndef MQTT_DOWN_HEARTBEAT_MS
+#define MQTT_DOWN_HEARTBEAT_MS 1800000UL // 30 min — rappel si panne longue
+#endif
+
 #ifndef MQTT_CANARY_INTERVAL_MS
 #define MQTT_CANARY_INTERVAL_MS 45000UL   // 45s, sous le keepAlive (60s)
 #endif
@@ -227,6 +238,104 @@ inline void mqttPublishDiscovery(){
         injectDevice(doc.as<JsonObject>());
         String out; serializeJson(doc, out);
         mqttPublishConfig("button", "pulse_total_reset", out);
+    }
+
+    // ── Compteurs "Vanne manuelle" (cf. Globals.h::ManualValveState) ──
+    // 4 sensors (litres_today / litres_total / pulses_today / pulses_total)
+    // + 1 button de reset dédié. Permet à HA d'afficher "VanneManuelle"
+    // comme une entité à part, distincte des vannes automatisées, et de
+    // tracer l'usage manuel (arrosage au tuyau, etc.) séparément des
+    // consommations automatiques et des fuites. L'alarme UNEXPECTED_FLOW
+    // continue à se déclencher en cas de débit inattendu — l'opérateur
+    // distingue "vrai fuite" vs "usage légitime" via ce compteur.
+    {
+        const char* objId = "manual_valve_litres_today";
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "VanneManuelle — litres aujourd'hui";
+        doc["object_id"]      = String(objId);
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + objId;
+        doc["state_topic"]    = mqttTopic("sensor", objId);
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["unit_of_measurement"] = "L";
+        doc["state_class"]    = "total_increasing";
+        doc["device_class"]   = "volume";
+        doc["icon"]           = "mdi:water-pump";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("sensor", objId, out);
+    }
+    {
+        const char* objId = "manual_valve_litres_total";
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "VanneManuelle — litres total";
+        doc["object_id"]      = String(objId);
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + objId;
+        doc["state_topic"]    = mqttTopic("sensor", objId);
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["unit_of_measurement"] = "L";
+        doc["state_class"]    = "total_increasing";
+        doc["device_class"]   = "volume";
+        doc["icon"]           = "mdi:water-pump";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("sensor", objId, out);
+    }
+    {
+        const char* objId = "manual_valve_pulses_today";
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "VanneManuelle — pulses aujourd'hui";
+        doc["object_id"]      = String(objId);
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + objId;
+        doc["state_topic"]    = mqttTopic("sensor", objId);
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["unit_of_measurement"] = "pulses";
+        doc["state_class"]    = "total_increasing";
+        doc["icon"]           = "mdi:pulse";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("sensor", objId, out);
+    }
+    {
+        const char* objId = "manual_valve_pulses_total";
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "VanneManuelle — pulses total";
+        doc["object_id"]      = String(objId);
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + objId;
+        doc["state_topic"]    = mqttTopic("sensor", objId);
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["unit_of_measurement"] = "pulses";
+        doc["state_class"]    = "total_increasing";
+        doc["icon"]           = "mdi:pulse";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("sensor", objId, out);
+    }
+    {
+        // Bouton de RAZ dédié "VanneManuelle" — n'affecte QUE le compteur
+        // manuel, pas le global ni les vannes automatisées. Complément
+        // du bouton "pulse_total_reset" qui remet tout à zéro.
+        const char* objId = "manual_valve_reset";
+        StaticJsonDocument<512> doc;
+        doc["name"]           = "VanneManuelle — Remise à zéro";
+        doc["object_id"]      = String(objId);
+        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + objId;
+        doc["command_topic"]  = mqttTopic("button", objId) + "/set";
+        doc["availability_topic"] = nodeTopic + "/availability";
+        doc["payload_available"]  = "online";
+        doc["payload_not_available"] = "offline";
+        doc["payload_press"]  = "PRESS";
+        doc["icon"]           = "mdi:water-minus";
+        injectDevice(doc.as<JsonObject>());
+        String out; serializeJson(doc, out);
+        mqttPublishConfig("button", objId, out);
     }
 
     // ── Alarmes hydrauliques (voir AlarmManager.h) ──────────────────────
@@ -538,6 +647,30 @@ inline void mqttPublishState(){
     pub("sensor",        "alarm_code",    String((unsigned)alarmState.code));
     pub("sensor",        "alarm_message", String(alarmState.msg));
 
+    // ── Compteurs "Vanne manuelle" (cf. Globals.h::ManualValveState) ──
+    // Litres aujourd'hui + total. Publiés en retained pour que HA garde
+    // la dernière valeur connue même après reboot / déco broker — la
+    // recovery MQTT au prochain boot s'en servira pour ré-hydrater la
+    // RAM (mode CONS_MQTT_ONLY). Mêmes seuils de rejet > 4.29G que les
+    // autres compteurs pour éviter d'empoisonner HA avec une valeur
+    // castée en unsigned long 32 bits.
+    float mvlLitresToday = (manualValveState.todayYmd == today)
+                          ? (float)manualValveState.todayPulses / PULSES_PER_LITRE
+                          : 0.0f;
+    float mvlLitresTotal = (float)manualValveState.pulsesTotal / PULSES_PER_LITRE;
+    pub("sensor", "manual_valve_litres_today", String(mvlLitresToday, 2));
+    if(manualValveState.pulsesTotal > 4290000000UL){
+        logSys("[MQTT] Rejet ecriture manual_valve_pulses_total > 4.29G");
+    } else {
+        pub("sensor", "manual_valve_litres_total", String(mvlLitresTotal, 2));
+        pub("sensor", "manual_valve_pulses_total", String((unsigned long)manualValveState.pulsesTotal));
+    }
+    if(manualValveState.todayPulses > 4290000000UL){
+        // silencieux (cohérent avec litres_today)
+    } else {
+        pub("sensor", "manual_valve_pulses_today", String((unsigned long)manualValveState.todayPulses));
+    }
+
 
 
 }
@@ -702,6 +835,68 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                                 valveConsMarkDirty(v);
                             }
                         }
+                    } else if(objId == "manual_valve_litres_total"){
+                        // ── Recovery "Vanne manuelle" (cf. Globals.h) ──
+                        // Mêmes règles que les vannes : on ne récupère
+                        // que si la valeur MQTT retained est strictement
+                        // supérieure à la RAM (un compteur ne peut que
+                        // progresser entre deux sessions). Conversion
+                        // L→pulses moins précise que la version pulses
+                        // brutes, mais sert de fallback si la version
+                        // pulses n'est pas retained.
+                        unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                        if(mqttPulses > manualValveState.pulsesTotal){
+                            char b[120]; snprintf(b,sizeof(b),
+                                "[RECOVERY] VanneManuelle litres_total: RAM=%lu < MQTT=%lu pulses — restauré",
+                                manualValveState.pulsesTotal, mqttPulses);
+                            logSys(b);
+                            manualValveState.pulsesTotal = mqttPulses;
+                            manualValveDirty = true;
+                        }
+                    } else if(objId == "manual_valve_litres_today"){
+                        unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                        uint16_t today = todayYMD();
+                        if(today != 0){
+                            if(manualValveState.todayYmd != today){
+                                manualValveState.todayYmd = today;
+                                manualValveState.todayPulses = 0;
+                            }
+                            if(mqttPulses > manualValveState.todayPulses){
+                                char b[120]; snprintf(b,sizeof(b),
+                                    "[RECOVERY] VanneManuelle litres_today: RAM=%u < MQTT=%lu pulses — restauré",
+                                    (unsigned)manualValveState.todayPulses, mqttPulses);
+                                logSys(b);
+                                manualValveState.todayPulses = (uint32_t)mqttPulses;
+                                manualValveDirty = true;
+                            }
+                        }
+                    } else if(objId == "manual_valve_pulses_total"){
+                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                        if(mqttPulses > manualValveState.pulsesTotal){
+                            char b[120]; snprintf(b,sizeof(b),
+                                "[RECOVERY] VanneManuelle pulses_total: RAM=%lu < MQTT=%lu — restauré",
+                                manualValveState.pulsesTotal, mqttPulses);
+                            logSys(b);
+                            manualValveState.pulsesTotal = mqttPulses;
+                            manualValveDirty = true;
+                        }
+                    } else if(objId == "manual_valve_pulses_today"){
+                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                        uint16_t today = todayYMD();
+                        if(today != 0){
+                            if(manualValveState.todayYmd != today){
+                                manualValveState.todayYmd = today;
+                                manualValveState.todayPulses = 0;
+                            }
+                            if(mqttPulses > manualValveState.todayPulses){
+                                char b[120]; snprintf(b,sizeof(b),
+                                    "[RECOVERY] VanneManuelle pulses_today: RAM=%u < MQTT=%lu — restauré",
+                                    (unsigned)manualValveState.todayPulses, mqttPulses);
+                                logSys(b);
+                                manualValveState.todayPulses = (uint32_t)mqttPulses;
+                                manualValveDirty = true;
+                            }
+                        }
                     }
                 }
             return; // message de récupération traité — pas une commande switch
@@ -750,10 +945,38 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                 for(int d=0;d<CONS_HISTORY_DAYS;d++) valveCons[vv].history[d] = {0,0,0.0f};
                 valveConsSaveOne(vv);
             }
+            // Reset aussi le compteur "Vanne manuelle" (cf. Globals.h) —
+            // le bouton "pulse_total_reset" remet TOUT à zéro, par
+            // cohérence avec l'endpoint Web /api/pulse/reset.
+            manualValveState.pulsesTotal = 0;
+            manualValveState.todayPulses  = 0;
+            manualValveState.todayYmd     = todayYMD();
+            manualValveState.todayIdx     = 0;
+            manualValveState.carry        = 0.0f;
+            for(int d=0;d<CONS_HISTORY_DAYS;d++){
+                manualValveState.history[d] = {0,0,0.0f};
+            }
+            manualValveFlushOne();
             pulseSave(); // no-op en CONS_MQTT_ONLY, persiste en mode normal
             lastDistributedTotal = 0;
             lastMqttPubMs = 0; // Force update MQTT
             logSys("Compteur global remis a zero via Home Assistant");
+        }
+        else if(obj == "manual_valve_reset"){
+            // ── Reset dédié "Vanne manuelle" (cf. Globals.h) ──
+            // N'affecte QUE le compteur manuel (et son rollover jour),
+            // pas le compteur global ni les vannes automatisées.
+            manualValveState.pulsesTotal = 0;
+            manualValveState.todayPulses  = 0;
+            manualValveState.todayYmd     = todayYMD();
+            manualValveState.todayIdx     = 0;
+            manualValveState.carry        = 0.0f;
+            for(int d=0;d<CONS_HISTORY_DAYS;d++){
+                manualValveState.history[d] = {0,0,0.0f};
+            }
+            manualValveFlushOne();
+            lastMqttPubMs = 0; // Force MAJ MQTT immédiate
+            logSys("Compteur VanneManuelle remis a zero via Home Assistant");
         }
         else {
             int v = -1;
@@ -804,6 +1027,10 @@ inline void onMqttConnect(bool sessionPresent){
     // reconnexion qui vient de réussir.
     lastMqttCanaryMs         = millis();
     lastMqttForceReconnectMs = millis();
+    // ★ FIX (bug #2) : réarme le tracker de transitions de logs, pour que
+    // la prochaine coupure reloggue bien à partir de "échecs=1".
+    lastLoggedMqttFailureCount = 0;
+    lastMqttDownHeartbeatMs    = millis();
     Serial.println("[MQTT] Connecté");
     {
         char b[160];
@@ -847,13 +1074,25 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     mqttConnected = false;
     mqttDiscoveryPublished = false;
     // ── RESET DU THROTTLE DE RECONNEXION ──
-    // lastMqttConnectAttemptMs est remis à 0 pour que la prochaine boucle
-    // mqttLoop() puisse retenter IMMÉDIATEMENT (sous réserve du backoff
-    // exponentiel ci-dessous). Sans ce reset, si la dernière tentative
-    // vient d'être lancée et qu'onMqttDisconnect arrive dans la même
-    // seconde, on attendrait 15s de plus pour rien (le throttle utilise
-    // "now - last > 15000", et last vient d'être posé).
-    lastMqttConnectAttemptMs = 0;
+    // ★ FIX (juillet 2026, bug #2 — LE VRAI GROS BUG du flood de logs) :
+    // l'ancienne version faisait `lastMqttConnectAttemptMs = 0`. Or dans
+    // mqttLoop(), la condition de retry est
+    //     if(now - lastMqttConnectAttemptMs > backoffDelay)
+    // Avec lastMqttConnectAttemptMs=0, "now - 0 = now", et now (millis()
+    // depuis le boot) est quasiment toujours >> backoffDelay (max 60000ms).
+    // La condition devient donc TOUJOURS vraie, ce qui contourne
+    // intégralement le backoff exponentiel : dès que connect() échoue en
+    // TCP_DISCONNECTED (quasi instantané quand le broker est injoignable),
+    // onMqttDisconnect() remet le compteur à 0, et le tour de loop()
+    // suivant (quelques ms plus tard) retente aussitôt → boucle à pleine
+    // vitesse, avec un log à chaque itération. C'est exactement le flood
+    // observé ("Retry #10" répété en boucle au même horodatage).
+    //
+    // Correctif : on pose lastMqttConnectAttemptMs = millis() (l'instant
+    // de l'échec), pas 0. Le prochain essai attendra alors correctement
+    // tout le délai de backoff calculé à partir du nouveau compteur
+    // d'échecs, comme prévu.
+    lastMqttConnectAttemptMs = millis();
     mqttLastActivityMs = 0; // désarmement du watchdog (rien à surveiller tant qu'on n'est pas connecté)
     // Mémoriser le moment de la déco pour calculer le downtime à la reco.
     mqttDisconnectMs = millis();
@@ -1067,6 +1306,19 @@ inline void mqttLoop(){
         // asynchrone, onMqttDisconnect peut arriver après).
         mqttConnected = false;
         mqttLastActivityMs = 0;
+        // ★ FIX (juillet 2026, bug #3) : sans cette ligne, le bloc
+        // "if(!mqttConnected && wifiUp)" juste en dessous devient vrai
+        // DANS LE MÊME appel de mqttLoop() (lastMqttConnectAttemptMs date
+        // encore de la dernière connexion réussie, donc "now - last" est
+        // énorme) et relance connect() quasi immédiatement après ce
+        // disconnect() — alors que disconnect() est asynchrone et que la
+        // socket précédente n'a pas fini de se libérer côté AsyncTCP/LwIP.
+        // Ça provoque une rafale de TCP_DISCONNECTED qui ne se résorbe
+        // qu'après plusieurs dizaines de secondes (le temps que le vieux
+        // socket se libère). En estampillant ici, on force le bloc de
+        // reconnexion à attendre au moins le backoff minimal avant de
+        // retenter, laissant le temps à la pile de faire le ménage.
+        lastMqttConnectAttemptMs = now;
     }
 
     // ★ FIX : reconnexion préventive périodique, indépendante de tout
@@ -1076,14 +1328,21 @@ inline void mqttLoop(){
     // Coût quasi nul (une reconnexion propre dure <1s), bénéfice : borne
     // supérieure garantie sur la durée max d'une éventuelle panne
     // silencieuse, même dans un scénario non anticipé par le watchdog.
-    if(mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS){
-        lastMqttForceReconnectMs = now;
-        Serial.println("[MQTT] ↻ Reconnexion préventive périodique");
-        logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
-        mqttClient.disconnect();
-        mqttConnected = false;
-        mqttLastActivityMs = 0;
-    }
+  //  if(mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS){
+  //      lastMqttForceReconnectMs = now;
+   //     Serial.println("[MQTT] ↻ Reconnexion préventive périodique");
+   //     logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
+   //     mqttClient.disconnect();
+   //     mqttConnected = false;
+   //     mqttLastActivityMs = 0;
+        // ★ FIX (bug #3) : même raison que pour le watchdog ci-dessus —
+        // sans ce timestamp, le bloc de reconnexion juste en dessous
+        // relance connect() quasi instantanément, avant que disconnect()
+        // (asynchrone) ait eu le temps de libérer la socket précédente.
+        // C'est CE bug qui causait les ~4 minutes de TCP_DISCONNECTED en
+        // boucle observées après chaque reconnexion préventive.
+   //     lastMqttConnectAttemptMs = now;
+   // }
 
     if(!mqttConnected && wifiUp){
         // ── CALCUL DU DÉLAI DE RETRY (backoff exponentiel) ──
@@ -1099,18 +1358,32 @@ inline void mqttLoop(){
             Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
                           (unsigned)mqttConsecutiveFailures,
                           (unsigned long)(backoffDelay / 1000UL));
-            // On ne logge PAS la tentative courante (sinon spam), on logue
-            // uniquement les transitions importantes : 1er essai, puis
-            // paliers 5/15/30/60 min pour qu'on puisse suivre la situation
-            // depuis l'UI sans devoir brancher le Serial.
-            if(mqttConsecutiveFailures == 1 || mqttConsecutiveFailures == 5
-               || mqttConsecutiveFailures == 10 || mqttConsecutiveFailures == 30
-               || mqttConsecutiveFailures == 60){
+            // ★ FIX (juillet 2026, bug #2) : on ne logge (logSys, visible
+            // dans l'UI) que sur une TRANSITION du compteur d'échecs, càd
+            // la première fois qu'on atteint un nouveau palier. Une fois
+            // plafonné à 10 (backoff max 60s), mqttConsecutiveFailures ne
+            // change plus tant que le broker reste injoignable — donc plus
+            // aucun nouveau log tant que rien ne change, au lieu de
+            // ré-écrire le même message toutes les 60s indéfiniment.
+            // Pour ne pas perdre toute visibilité en cas de panne longue,
+            // un rappel discret est émis toutes les MQTT_DOWN_HEARTBEAT_MS
+            // (30 min) tant qu'on reste bloqué au palier max.
+            if(mqttConsecutiveFailures != lastLoggedMqttFailureCount){
+                lastLoggedMqttFailureCount = mqttConsecutiveFailures;
+                lastMqttDownHeartbeatMs = now;
                 char b[160];
                 snprintf(b, sizeof(b), "[MQTT] Retry #%u (délai=%lu s, WiFi OK=%d, heap=%u)",
                          (unsigned)mqttConsecutiveFailures,
                          (unsigned long)(backoffDelay / 1000UL),
                          (int)wifiUp, (unsigned)ESP.getFreeHeap());
+                logSys(b);
+            } else if(now - lastMqttDownHeartbeatMs > MQTT_DOWN_HEARTBEAT_MS){
+                lastMqttDownHeartbeatMs = now;
+                char b[160];
+                snprintf(b, sizeof(b), "[MQTT] Toujours déconnecté (échecs=%u, délai=%lu s, WiFi OK=%d)",
+                         (unsigned)mqttConsecutiveFailures,
+                         (unsigned long)(backoffDelay / 1000UL),
+                         (int)wifiUp);
                 logSys(b);
             }
             mqttClient.connect();

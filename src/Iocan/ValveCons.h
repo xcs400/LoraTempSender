@@ -126,14 +126,52 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
     if(openCount == 0){
         // CORRECTIF (bug "vanne ouverte plus tard reçoit 0 pulse") :
         // si AUCUNE vanne n'est ouverte, on NE PERD PAS les pulses — on les
-        // accumule dans un compteur dédié "orphelins" pour pouvoir les
-        // attribuer à la prochaine vanne qui s'ouvre. Sans ça, si l'eau
-        // coule entre minuit et 6h du matin (vannes fermées) ou pendant
-        // que l'utilisateur navigue dans l'UI sans vanne ouverte, tous ces
-        // pulses étaient définitivement perdus (et la 1ère vanne ouverte
-        // repartait d'un delta=0, recevant 0 pulse).
-        // On met juste à jour lastDistributedTotal pour ne pas accumuler
-        // indéfiniment : les pulses sont implicitement "en attente".
+        // attribue au compteur "VanneManuelle" (cf. Globals.h /
+        // ManualValveState). Cela correspond à un cas d'usage légitime :
+        // l'utilisateur a ouvert une vanne manuelle en aval du débitmètre
+        // (robinet de puisage, arrosage au tuyau, etc.), l'eau coule mais
+        // aucune électrovanne automatisée n'est ouverte. On veut COMPTER
+        // ces litres — et les afficher dans l'état du système — sans les
+        // confondre avec une fuite (l'alarme UNEXPECTED_FLOW reste active
+        // en parallèle avec son seuil et son délai de grâce adaptés à la
+        // détection de fuite, voir AlarmManager.h).
+        //
+        // On utilise le même algorithme de carry persistant (Bresenham)
+        // que pour les vannes, pour ne perdre aucun pulse sur des débits
+        // très faibles. Voir plus bas le bloc "Répartition par
+        // accumulateur d'erreur" pour le détail.
+        uint16_t todayMV = todayYMD(); // déclaré ici (la branche avec vannes
+                                       // ouvertes le redéclare plus bas en
+                                       // réutilisant la même variable).
+        // ── ROLLOVER JOURNALIER (vanne manuelle) ──
+        // Si on a changé de jour, on capture l'ancien jour dans
+        // l'historique AVANT de remettre todayPulses à 0 (cohérent avec
+        // ce qui est fait pour les vannes dans le bloc plus bas).
+        if(todayMV != manualValveState.todayYmd){
+            if(manualValveState.todayYmd != 0 && manualValveState.todayPulses > 0){
+                DayStat ds;
+                ds.ymd    = manualValveState.todayYmd;
+                ds.pulses = manualValveState.todayPulses;
+                ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
+                manualValveState.history[manualValveState.todayIdx % CONS_HISTORY_DAYS] = ds;
+                manualValveState.todayIdx = (uint16_t)((manualValveState.todayIdx + 1) % CONS_HISTORY_DAYS);
+            }
+            manualValveState.todayYmd    = todayMV;
+            manualValveState.todayPulses = 0;
+        }
+        // ── Attribution des pulses à la vanne manuelle ──
+        // Tous les pulses delta (puisqu'aucune vanne n'est ouverte) vont
+        // à la vanne manuelle, modulo le carry. flowCoeff=1.0 (pas de
+        // calibration possible sur un canal unique).
+        manualValveState.carry += (float)delta;
+        if(manualValveState.carry < 0.0f) manualValveState.carry = 0.0f; // FIX carry négatif
+        unsigned long shareMV = (unsigned long)manualValveState.carry;
+        manualValveState.carry -= (float)shareMV;
+        manualValveState.pulsesTotal += shareMV;
+        manualValveState.todayPulses  += shareMV;
+        if(shareMV > 0){
+            manualValveDirty = true; // flush NVS au prochain tour de loop
+        }
         lastDistributedTotal = totalPulsesGlobal;
         return;
     }
@@ -198,7 +236,7 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
         }
     }
 
-    // ── ROLLOVER JOURNALIER GLOBAL (toutes vannes) ──
+    // ── ROLLOVER JOURNALIER GLOBAL (toutes vannes + vanne manuelle) ──
     // Avant le fix, ce bloc était à l'intérieur de la boucle suivante
     // (`for(int i=0;...){ if(!valves[i].isOpen) continue; ... }`), ce qui
     // avait deux effets pervers :
@@ -221,6 +259,16 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
     // On fait donc UNE passe unique en amont sur TOUTES les vannes, fermées
     // ou ouvertes. Coût négligeable (5 vannes × ~5 lignes) et résout le
     // problème de désynchronisation MQTT à la racine.
+    //
+    // On en profite pour appliquer le MÊME rollover à `manualValveState`
+    // (VanneManuelle) : sans ça, le rollover journalier de la vanne
+    // manuelle ne se déclencherait QUE dans la branche `openCount==0`
+    // ci-dessus, c'est-à-dire UNIQUEMENT quand on est en train d'attribuer
+    // des pulses à la vanne manuelle. Si une vanne automatisée s'ouvre à
+    // 00:00:01 pile, le rollover de la vanne manuelle serait repoussé à
+    // la prochaine nuit où la vanne manuelle reçoit des pulses — pas
+    // acceptable, la valeur MQTT retained pourrait afficher 2 jours
+    // décalés pendant 24h.
     {
         uint16_t todayAll = today;
         for(int i=0;i<VANNE_COUNT;i++){
@@ -237,6 +285,19 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
                 valveCons[i].todayYmd = todayAll;
                 valveCons[i].todayPulses = 0;
             }
+        }
+        // ROLLOVER de la vanne manuelle (même logique, une seule itération)
+        if(todayAll != manualValveState.todayYmd){
+            if(manualValveState.todayYmd != 0 && manualValveState.todayPulses > 0){
+                DayStat ds;
+                ds.ymd    = manualValveState.todayYmd;
+                ds.pulses = manualValveState.todayPulses;
+                ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
+                manualValveState.history[manualValveState.todayIdx % CONS_HISTORY_DAYS] = ds;
+                manualValveState.todayIdx = (uint16_t)((manualValveState.todayIdx + 1) % CONS_HISTORY_DAYS);
+            }
+            manualValveState.todayYmd    = todayAll;
+            manualValveState.todayPulses = 0;
         }
     }
 
