@@ -403,6 +403,17 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   padding:10px 12px;
   min-height:62px;
 }
+/* Carte alarme hydraulique — bordure rouge + clignotement léger
+   pour attirer l'œil sans être trop agressif. */
+.status-card.alarm-active{
+  border-color:var(--red);
+  background:linear-gradient(0deg, rgba(248,81,73,0.08), rgba(248,81,73,0.08)), var(--bg);
+  animation: alarm-blink 1.4s ease-in-out infinite;
+}
+@keyframes alarm-blink{
+  0%,100%{ box-shadow:0 0 0 0 rgba(248,81,73,0.0); }
+  50%    { box-shadow:0 0 0 3px rgba(248,81,73,0.25); }
+}
 .status-card-icon{
   width:36px;height:36px;border-radius:8px;
   display:flex;align-items:center;justify-content:center;
@@ -557,7 +568,23 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
         </div>
       </div>
 
-      <!-- Carte mémoire / santé -->
+      <!-- Carte alarme hydraulique -->
+      <div class="status-card" id="alarm-card">
+        <div class="status-card-icon" id="alarm-icon" style="background:var(--green-dim)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M9 12l2 2 4-4"/>
+            <circle cx="12" cy="12" r="10"/>
+          </svg>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-label">Alarme hydraulique</div>
+          <div class="status-card-value" id="alarm-label" style="color:var(--green)">Aucune alarme</div>
+          <div class="status-card-sub" id="alarm-sub">—</div>
+        </div>
+      </div>
+
+      <!-- Carte mémoire / santé — masquée (encombre la grille, infos
+           redondantes avec les badges header WiFi/MQTT/WS)
       <div class="status-card">
         <div class="status-card-icon" style="background:var(--surface2)">
           <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -575,6 +602,7 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
           <div class="status-card-sub" id="wifi-label">WiFi —</div>
         </div>
       </div>
+      -->
     </div>
 
     <!-- Tableau compact conso par vanne -->
@@ -1366,7 +1394,9 @@ function handleStatus(data) {
     const flow = data.flow_lpm !== undefined ? Number(data.flow_lpm).toFixed(2) : '0.00';
     document.getElementById('flow-label').textContent = flow + ' L/min';
   }
-  // Carte "Santé ESP" : heap libre + état WiFi
+  // Carte "Santé ESP" : heap libre + état WiFi — masquée, code conservé
+  // pour réutilisation future si on la réactive.
+  /*
   const heapEl = document.getElementById('heap-label');
   if (heapEl) {
     const kb = (data.heap !== undefined ? Math.round(data.heap/1024) : '--');
@@ -1379,12 +1409,46 @@ function handleStatus(data) {
     const wsDot = document.getElementById('ws-dot');
     wifiEl.textContent = wsDot && wsDot.className === 'ok' ? 'WiFi connecté' : 'WiFi —';
   }
+  */
   // Badge MQTT (amélioration A) — reflète mqttConnected envoyé par le firmware
   const mqttDot = document.getElementById('mqtt-dot');
   const mqttLabel = document.getElementById('mqtt-label');
   if (mqttDot && mqttLabel && data.mqttConnected !== undefined) {
     mqttDot.className = data.mqttConnected ? 'ok' : 'off';
     mqttLabel.textContent = 'MQTT: ' + (data.mqttConnected ? 'connecté' : 'déconnecté');
+  }
+  // Carte "Alarme hydraulique" — reflète data.alarm publié par WsManager
+  // (mêmes champs que MQTT : active / code / msg / sinceSec). L'alarme
+  // reste affichée même après levée (jusqu'à acquittement ou reload) pour
+  // qu'on garde une trace visuelle du dernier incident.
+  const alarmCard  = document.getElementById('alarm-card');
+  const alarmIcon  = document.getElementById('alarm-icon');
+  const alarmLabel = document.getElementById('alarm-label');
+  const alarmSub   = document.getElementById('alarm-sub');
+  if (alarmCard && alarmLabel && alarmIcon && alarmSub && data.alarm) {
+    const a = data.alarm;
+    const code = (a.code !== undefined) ? Number(a.code) : 0;
+    const active = !!a.active;
+    const codeLabel = (code === 1) ? 'NO_FLOW' : (code === 2 ? 'UNEXPECTED_FLOW' : 'OK');
+    if (active) {
+      alarmCard.classList.add('alarm-active');
+      alarmIcon.style.background = 'var(--red-dim)';
+      alarmIcon.querySelector('svg').setAttribute('stroke', 'var(--red)');
+      alarmLabel.style.color = 'var(--red)';
+      alarmLabel.textContent = codeLabel;
+      // Message + durée écoulée depuis le déclenchement
+      const sec = a.sinceSec || 0;
+      const min = Math.floor(sec / 60), s = sec % 60;
+      const dur = (min > 0) ? (min + ' min ' + s + ' s') : (s + ' s');
+      alarmSub.textContent = (a.msg || '—') + ' · depuis ' + dur;
+    } else {
+      alarmCard.classList.remove('alarm-active');
+      alarmIcon.style.background = 'var(--green-dim)';
+      alarmIcon.querySelector('svg').setAttribute('stroke', 'var(--green)');
+      alarmLabel.style.color = 'var(--green)';
+      alarmLabel.textContent = 'Aucune alarme';
+      alarmSub.textContent = (code > 0) ? ('Dernière: ' + codeLabel) : '—';
+    }
   }
   // Jauge NVS — on l'actualise à chaque STATUS (≈1×/s par le WebSocket)
   // pour que l'utilisateur suive l'évolution du remplissage en direct

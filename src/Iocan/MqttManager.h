@@ -754,17 +754,31 @@ inline void onMqttConnect(bool sessionPresent){
 inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     mqttConnected = false;
     mqttDiscoveryPublished = false;
-    // ── RESET DU THROTTLE DE RECONNEXION ──
-    // lastMqttConnectAttemptMs est remis à 0 pour que la prochaine boucle
-    // mqttLoop() puisse retenter IMMÉDIATEMENT (sous réserve du backoff
-    // exponentiel ci-dessous). Sans ce reset, si la dernière tentative
-    // vient d'être lancée et qu'onMqttDisconnect arrive dans la même
-    // seconde, on attendrait 15s de plus pour rien (le throttle utilise
-    // "now - last > 15000", et last vient d'être posé).
-    lastMqttConnectAttemptMs = 0;
     mqttLastActivityMs = 0; // désarmement du watchdog (rien à surveiller tant qu'on n'est pas connecté)
     // Mémoriser le moment de la déco pour calculer le downtime à la reco.
     mqttDisconnectMs = millis();
+
+    // ── ANTI-BOUCLE DE RECONNEXION (bug du 09/07/2026) ──
+    // AsyncMqttClient::connect() est ASYNCHRONE : il retourne immédiatement
+    // et la pile TCP essaie d'ouvrir la socket en arrière-plan. Si elle
+    // échoue, onMqttDisconnect est rappelé presque instantanément, AVANT
+    // même que mqttLoop() ait pu re-armer lastMqttConnectAttemptMs.
+    //
+    // AVANT le patch : lastMqttConnectAttemptMs était remis à 0 dans cette
+    // fonction, ce qui DÉBRANCHAAIT complètement le throttle : mqttLoop()
+    // voyait (now - 0) > backoffDelay à chaque tour et rappelait connect()
+    // immédiatement. La pile TCP renvoyait un échec instantané, onMqttDisconnect
+    // rappelait → 50 retries à la seconde, logSys submergé. Le log ci-joint
+    // du 09/07/2026 17:01 en est la trace (≈ 50 lignes Retry/Disconnect par
+    // seconde, tous avec mqttConsecutiveFailures plafonné à 10, exactement
+    // le symptôme prédit).
+    //
+    // APRÈS le patch : on ARME lastMqttConnectAttemptMs à millis() (pas
+    // remis à 0), de sorte que le backoff de MQTT_BACKOFF_MAX_MS (60s)
+    // est strictement respecté, même si onMqttDisconnect rappelle en boucle.
+    // La branche de retry de mqttLoop() ne se déclenchera qu'après 60s.
+    lastMqttConnectAttemptMs = millis();
+
     // ── BACKOFF EXPONENTIEL ──
     // On incrémente le compteur d'échecs CONSÉCUTIFS. mqttLoop() s'en sert
     // pour calculer le délai avant la prochaine tentative : 5s, 10s, 20s,
@@ -791,12 +805,16 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
         default:                                                        reasonStr = "UNKNOWN"; break;
     }
     Serial.printf("[MQTT] Déconnecté (%d = %s)\n", (int)r, reasonStr);
-    // ── TRACE logSys — c'est ÇA qu'on cherche le matin ! ──
-    // Avant ce patch, seule la trace Serial était écrite, donc rien n'était
-    // visible via l'API /logs (logToJson) et la page Logs de l'UI. On logue
-    // maintenant systématiquement la déco avec sa raison + le compteur
-    // d'échecs pour pouvoir corréler avec les reboots / coupures WiFi.
-    {
+    // ── TRACE logSys THROTTLEE ──
+    // On ne logue PAS à chaque onMqttDisconnect (la pile TCP peut appeler
+    // cette callback plusieurs fois par seconde si elle n'arrive pas à
+    // joindre le broker — c'est précisément le bug de boucle qu'on vient
+    // de corriger). On ne logue qu'aux paliers 1/5/10/30/60 du compteur
+    // d'échecs consécutifs pour pouvoir suivre la situation depuis l'UI
+    // sans spammer le journal circulaire (LOG_MAX = 1000 entrées).
+    if(mqttConsecutiveFailures == 1 || mqttConsecutiveFailures == 5
+       || mqttConsecutiveFailures == 10 || mqttConsecutiveFailures == 30
+       || mqttConsecutiveFailures == 60){
         char b[200];
         snprintf(b, sizeof(b), "[MQTT] ✗ Déconnecté: %s (échecs=%u, prochain retry dans %lu s)",
                  reasonStr,
@@ -870,8 +888,13 @@ inline void mqttSetup(){
     // la dernière valeur retained ("online") publiée avant la coupure.
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.setWill(availTopic.c_str(), 0, true, "offline");
+    // Keepalive 60s : moitié du watchdog 90s (cf. MQTT_WATCHDOG_MS).
+    // Un broker Mosquitto sain coupe une session silencieuse au bout de
+    // 1.5 × keepalive = 90s. On aligne notre watchdog sur cette valeur
+    // pour que la fenêtre zombie soit minimale.
     mqttClient.setKeepAlive(60);
     mqttClient.setCleanSession(true);
+    Serial.printf("[MQTT] Keepalive=60s, Watchdog=90s, PubInterval=10s\n");
     mqttClient.onConnect(onMqttConnect);
     mqttClient.onDisconnect(onMqttDisconnect);
     mqttClient.onMessage([](char* topic, char* payload, AsyncMqttClientMessageProperties, size_t len, size_t, size_t){
@@ -1028,6 +1051,48 @@ inline void mqttLoop(){
             backoffDelay = min(candidate, MQTT_BACKOFF_MAX_MS);
         }
         if(now - lastMqttConnectAttemptMs > backoffDelay){
+            // ── TEST TCP BRUT AVANT DE TENTER connect() ──
+            // Sans ce test, on rappelle mqttClient.connect() en boucle toutes
+            // les backoffDelay ms, et la pile TCP renvoie un échec instantané
+            // (broker injoignable) → onMqttDisconnect rappelé → on attend
+            // encore backoffDelay → nouvelle tentative → etc. Le bug du
+            // 09/07/2026 provenait exactement de là : 50 tentatives en 1
+            // seconde quand le reset du throttle était cassé.
+            //
+            // Maintenant que le throttle est correct (lastMqttConnectAttemptMs
+            // armé dans onMqttDisconnect au lieu d'être reseté), on rappelle
+            // connect() au plus toutes les 60s. Mais un test TCP rapide (1s
+            // timeout) permet en plus de NE PAS rappeler connect() du tout
+            // si le broker est manifestement injoignable (genre routeur wifi
+            // qui a reboot), ce qui économise un cycle TCP/handshake inutile
+            // et un appel à onMqttDisconnect. Si le test TCP réussit, on
+            // sait que AsyncMqttClient a une vraie chance d'aboutir.
+            IPAddress brokerIp;
+            if(brokerIp.fromString(sysConfig.mqttHost)){
+                WiFiClient probe;
+                probe.setTimeout(1500);
+                bool tcpOk = probe.connect(brokerIp, sysConfig.mqttPort);
+                probe.stop();
+                if(!tcpOk){
+                    // Broker injoignable : on réarme le throttle pour ne
+                    // pas retenter pendant encore 60s, et on logue la
+                    // situation UNIQUEMENT aux paliers 1/5/10/30/60 pour
+                    // ne pas spammer logSys.
+                    lastMqttConnectAttemptMs = now;
+                    if(mqttConsecutiveFailures == 1 || mqttConsecutiveFailures == 5
+                       || mqttConsecutiveFailures == 10 || mqttConsecutiveFailures == 30
+                       || mqttConsecutiveFailures == 60){
+                        char b[160];
+                        snprintf(b, sizeof(b), "[MQTT] Test TCP KO (broker %s:%u injoignable, échecs=%u)",
+                                 brokerIp.toString().c_str(), (unsigned)sysConfig.mqttPort,
+                                 (unsigned)mqttConsecutiveFailures);
+                        logSys(b);
+                    }
+                    return; // on ne tente pas connect()
+                }
+                // Test TCP OK : on peut tenter connect() sans risque de
+                // flooder logSys. On logue le palier atteint avant l'appel.
+            }
             lastMqttConnectAttemptMs = now;
             Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
                           (unsigned)mqttConsecutiveFailures,
@@ -1085,8 +1150,7 @@ if(!mqttDiscoveryPublished){
             // Désabonnement du pattern de recovery
             String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
             mqttClient.unsubscribe(recovPattern.c_str());
-            // mqttLastActivityMs n'est PAS réarmé ici (unsubscribe() non
-            // plus ne prouve rien côté broker — voir note watchdog plus bas).
+            mqttLastActivityMs = millis(); // activity
             // Flush NVS des valeurs éventuellement restaurées
             valveConsFlushDirty();
             logSys("[CONS] Recovery MQTT terminée — NVS mis à jour");

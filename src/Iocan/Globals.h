@@ -444,17 +444,27 @@ extern uint8_t        mqttConsecutiveFailures;
 extern unsigned long   mqttDisconnectMs;
 const unsigned long MQTT_PUB_INTERVAL_MS    = 10000UL;  // 10 s
 const unsigned long MQTT_RECONNECT_MS       = 15000UL;  // 15 s entre tentatives (throttle simple)
-const unsigned long MQTT_WATCHDOG_MS        = 120000UL; // 2 min sans activité → reconnexion forcée
+// Watchdog 90s = 1.5 × keepalive (60s). Avant ce patch on était à 120s,
+// ce qui laissait une fenêtre de 60s où le broker pouvait avoir coupé la
+// session sans qu'AsyncMqttClient ne s'en aperçoive (pas de PINGREQ dans
+// cet intervalle, donc keepalive muet) et où le watchdog ne se déclenchait
+// pas non plus. Résultat : 60s de "zombie" où l'ESP se croit connecté et
+// HA n'a plus de nouvelles. Avec 90s, on force la purge dès qu'on dépasse
+// l'intervalle de deux keepalives, ce qui correspond au timeout réel
+// qu'un broker Mosquitto applique (1.5 × keepalive côté serveur).
+const unsigned long MQTT_WATCHDOG_MS        = 90000UL;  // 90 s sans activité → reconnexion forcée
 const unsigned long MQTT_BACKOFF_MIN_MS     = 5000UL;   // 5 s avant retry après 1er échec
 const unsigned long MQTT_BACKOFF_MAX_MS     = 60000UL;  // 60 s max entre retries (backoff)
 // Purge périodique de la connexion MQTT (filet de sécurité contre les
 // sessions TCP zombies que ni le watchdog d'inactivité ni le keepalive
 // MQTT ne détectent — voir commentaire dans mqttLoop()).
-// 10 min = 600 s : suffisamment long pour ne pas générer de churn
-// réseau visible côté HA, suffisamment court pour purger un socket
-// bloqué silencieusement par AsyncTCP/AsyncMqttClient sur ESP32-S3
-// (bug connu de certaines versions, socket figée sans FIN/RST).
-const unsigned long MQTT_FORCE_RECONNECT_MS = 600000UL; // 10 min
+// 5 min = 300 s : on a abaissé de 10 min (commit précédent) à 5 min
+// pour mieux couvrir le symptôme "ça reste KO une nuit" observé le
+// 09/07/2026 — la session droppée à 19:36 n'a été purgée qu'à 20:18
+// (42 min) à cause du backoff qui plafonnait à 60s × 10 essais. Avec
+// 5 min, même si l'ESP est dans un état semi-zombie, on a une chance
+// sur deux d'avoir tenté une reco propre dans la fenêtre.
+const unsigned long MQTT_FORCE_RECONNECT_MS = 300000UL; // 5 min
 // Timestamp de la dernière purge/reconnexion forcée périodique.
 // Initialisé à 0 dans Globals.cpp ; armé dans mqttLoop() à chaque
 // passage où on déclenche la purge.
