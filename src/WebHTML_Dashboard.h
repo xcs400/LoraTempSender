@@ -3,28 +3,43 @@
 // WebHTML_Dashboard.h — Page Dashboard HTML
 // ============================================================
 
-#define WEB_DASHBOARD_HTML R"HTML(
-<!-- ══ PAGE DASHBOARD ══════════════════════════════════ -->
+const char WEB_DASHBOARD_HTML[] PROGMEM = R"HTML(
 <div id="page-dashboard" class="page active">
-  
-  <!-- Boîte "État du système" -->
+  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
+    <div>
+      <div style="font-size:1.1rem;font-weight:700">Tableau de bord</div>
+    </div>
+    <div style="display:flex;gap:8px">
+      <button class="btn btn-ghost btn-sm" onclick="closeAll()">Tout fermer</button>
+    </div>
+  </div>
+
+  <!-- ══ BOÎTE STATUS SYSTÈME ══════════════════════════════
+       Distinction visuelle forte vs les cartes de vanne :
+         • fond bleu-dim/var(--surface) au lieu de la grille blanche
+         • cartes internes (uptime, T°, conso) avec icônes inline
+         • tableau conso compact en bas
+       Mise à jour automatique via handleStatus() / refreshConsumption(). -->
   <div class="status-box">
     <div class="status-header">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
+      </svg>
       <h3>État du système</h3>
       <span class="status-time" id="status-time">—</span>
     </div>
+
     <div class="status-grid">
       <!-- Carte uptime -->
       <div class="status-card">
-        <div class="status-card-icon" style="background:var(--surface2)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <div class="status-card-icon" style="background:var(--blue-dim)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
           </svg>
         </div>
         <div class="status-card-body">
           <div class="status-card-label">Uptime</div>
           <div class="status-card-value" id="uptime-label">—</div>
-          <div class="status-card-sub">Temps écoulé</div>
         </div>
       </div>
 
@@ -89,10 +104,31 @@
             <span id="manual-valve-flow" style="color:var(--blue);font-weight:600;margin-left:6px">— L/min</span>
           </div>
           <div style="margin-top:6px">
-            <button class="btn btn-ghost btn-sm" onclick="resetManualValve()" title="Remettre le compteur VanneManuelle à zéro">🔄 RAZ</button>
+            <button class="btn btn-ghost btn-sm" onclick="resetManualValve()" title="Remettre le compteur VanneManuelle à zéro">↻ RAZ</button>
           </div>
         </div>
       </div>
+
+      <!-- Carte mémoire / santé — masquée (encombre la grille, infos
+           redondantes avec les badges header WiFi/MQTT/WS)
+      <div class="status-card">
+        <div class="status-card-icon" style="background:var(--surface2)">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="4" y="4" width="16" height="16" rx="2"/>
+            <rect x="9" y="9" width="6" height="6"/>
+            <line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/>
+            <line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>
+            <line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/>
+            <line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>
+          </svg>
+        </div>
+        <div class="status-card-body">
+          <div class="status-card-label">Santé ESP</div>
+          <div class="status-card-value" id="heap-label">— KB</div>
+          <div class="status-card-sub" id="wifi-label">WiFi —</div>
+        </div>
+      </div>
+      -->
     </div>
 
     <!-- Tableau compact conso par vanne -->
@@ -122,4 +158,7 @@
     <!-- cartes générées par JS -->
   </div>
 </div>
+
+
+
 )HTML";

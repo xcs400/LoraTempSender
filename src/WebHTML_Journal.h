@@ -3,8 +3,9 @@
 // WebHTML_Journal.h — Page Journal HTML
 // ============================================================
 
-#define WEB_JOURNAL_HTML R"HTML(
-<!-- ══ PAGE JOURNAL ════════════════════════════════════ -->
+const char WEB_JOURNAL_HTML[] PROGMEM = R"HTML(
+
+<!-- ══ PAGE JOURNAL ═══════════════════════════════════ -->
 <div id="page-journal" class="page">
   <div class="card">
     <div class="card-header">
@@ -19,4 +20,5 @@
     </div>
   </div>
 </div>
+
 )HTML";

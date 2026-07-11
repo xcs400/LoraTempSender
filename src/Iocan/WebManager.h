@@ -15,7 +15,6 @@
 
 
 
-
 // Helper: réponse JSON 200
 inline void jsonResp(AsyncWebServerRequest* req, const String& body, int code=200){
     AsyncWebServerResponse* r = req->beginResponse(code,"application/json",body);
@@ -120,19 +119,90 @@ inline String schedulesToJson(){
 
 inline void webSetup(){
     // ── SPA principale
-    // On utilise beginResponse_P() pour servir directement depuis PROGMEM,
-    // SANS recopier la chaîne (~52 KB) dans une String heap. C'est essentiel
-    // car req->send(200,"text/html",WEB_HTML) duplique la page en RAM et
-    // peut faire échouer malloc() quand la heap est fragmentée (~138 KB
-    // libres observés sur heltec-Iocan-HS3), donnant une page blanche
-    // sans erreur côté navigateur (Content-Length incorrect / troncature).
+    // beginResponse() avec callback de streaming : chaque bloc PROGMEM
+    // (WEB_HTML, WEB_HTML1, WEB_CALENDRIER_HTML) est envoyé morceau par
+    // morceau directement depuis la flash, SANS jamais être recopié
+    // intégralement dans un buffer RAM. Nécessaire car la page fait
+    // ~52 KB au total : une concaténation en String/malloc échoue quand
+    // la heap est fragmentée (~138 KB libres observés sur heltec-Iocan-HS3),
+    // donnant une page blanche sans erreur côté navigateur (Content-Length
+    // incorrect / troncature).
     server.on("/", HTTP_GET, [](AsyncWebServerRequest* req){
         Serial.println("[HTTP] GET /");
-        const char* p = (const char*)WEB_HTML;
-        const size_t total = strlen_P(p);
-        AsyncWebServerResponse* resp = req->beginResponse_P(
-            200, "text/html; charset=utf-8",
-            (const uint8_t*)p, total);
+
+        // Table des blocs à enchaîner, dans l'ordre d'assemblage
+        // L'ordre reflète l'ordre d'apparition des pages dans la SPA :
+
+        // Le calcul de totalLen et le streaming sont génériques : ajouter
+        // un chunk supplémentaire ne demande AUCUNE autre modification
+        // (la boucle strlen_P + l'index partagé s'adaptent automatiquement).
+        static const char* chunks[] = {
+            WEB_HTML0,       
+            WEB_CSS,
+            WEB_HTML1,    
+                WEB_DASHBOARD_HTML,
+                WEB_PROGRAMMES_HTML,
+                WEB_CALIBRATION_HTML,
+                WEB_CONFIG_HTML,
+                WEB_EOS_HTML,
+                WEB_CALENDRIER_HTML,
+                WEB_JOURNAL_HTML,
+            WEB_HTML2,
+            WEB_PROGRAMMESMODAL_HTML,
+            WEB_JS,
+
+        };
+
+
+
+
+        static const size_t nbChunks = sizeof(chunks) / sizeof(chunks[0]);
+
+        // Longueurs précalculées une seule fois (static = persiste entre requêtes)
+        static size_t lens[nbChunks];
+        static size_t totalLen = 0;
+        static bool initDone = false;
+        if (!initDone) {
+            totalLen = 0;
+            for (size_t i = 0; i < nbChunks; i++) {
+                lens[i] = strlen_P(chunks[i]);
+                totalLen += lens[i];
+            }
+            initDone = true;
+        }
+
+        // État de progression PROPRE A CETTE REQUETE (important si plusieurs
+        // clients se connectent en même temps : chaque lambda capture son
+        // propre shared_ptr, pas une variable static partagée).
+        auto chunkIndex     = std::make_shared<size_t>(0);
+        auto offsetInChunk  = std::make_shared<size_t>(0);
+
+        AsyncWebServerResponse* resp = req->beginResponse(
+            "text/html; charset=utf-8",
+            totalLen,
+            [chunkIndex, offsetInChunk](uint8_t *buffer, size_t maxLen, size_t /*index*/) -> size_t {
+                size_t written = 0;
+
+                while (written < maxLen && *chunkIndex < nbChunks) {
+                    const char* src = chunks[*chunkIndex];
+                    size_t remaining = lens[*chunkIndex] - *offsetInChunk;
+                    size_t toCopy = std::min(remaining, maxLen - written);
+
+                    memcpy_P(buffer + written, src + *offsetInChunk, toCopy);
+
+                    written += toCopy;
+                    *offsetInChunk += toCopy;
+
+                    if (*offsetInChunk >= lens[*chunkIndex]) {
+                        *chunkIndex += 1;
+                        *offsetInChunk = 0;
+                    }
+                }
+
+                return written; // 0 = fin du flux, signale la fin au serveur
+            }
+        );
+
         resp->addHeader("Cache-Control", "no-store");
         req->send(resp);
     });

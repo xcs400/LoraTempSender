@@ -1,9 +1,13 @@
 #pragma once
 // ============================================================
-// WebHTML_Programmes.h — Page Programmes HTML
+// WebHTML_ProgrammesModal.h — Page Programmes HTML
 // ============================================================
 
-#define WEB_PROGRAMMES_HTML R"HTML(
+const char WEB_PROGRAMMES_HTML[] PROGMEM = R"HTML(
+
+
+
+
 <!-- ══ PAGE PROGRAMMES ═════════════════════════════════ -->
 <div id="page-programmes" class="page">
   <div class="card">
@@ -30,4 +34,6 @@
     </div>
   </div>
 </div>
+
+
 )HTML";

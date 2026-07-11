@@ -1,6 +1,3 @@
-
-
-
 #pragma once
 // ============================================================
 // WebContent.h — Interface SPA HTML/CSS/JS
@@ -31,444 +28,24 @@
 
 
 
-
-const char WEB_HTML[] PROGMEM = R"HTMLEOF(
+const char WEB_HTML0[] PROGMEM =  R"HTML0EOF(
 <!DOCTYPE html>
 <html lang="fr">
 <head>
+
 <meta charset="UTF-8"/>
 <meta name="viewport" content="width=device-width,initial-scale=1"/>
 <title>IrrigPro — Contrôleur d'arrosage</title>
-<style>
-/* ── TOKENS ─────────────────────────────────────────── */
-:root {
-  --bg:        #0d1117;
-  --surface:   #161b22;
-  --surface2:  #21262d;
-  --border:    #30363d;
-  --text:      #e6edf3;
-  --text-muted:#8b949e;
-  --green:     #2ea043;
-  --green-dim: #1a4429;
-  --orange:    #d29922;
-  --orange-dim:#3d2b00;
-  --red:       #da3633;
-  --red-dim:   #3d0f0e;
-  --blue:      #388bfd;
-  --blue-dim:  #0d2d6e;
-    /* Couleurs par vanne (8 max) */
-    --vcol0: #1f77b4; 
-    --vcol1: #ff7f0e; 
-    --vcol2: #2ca02c; 
-    --vcol3: #d62728;
-    --vcol4: #9467bd; 
-    --vcol5: #8c564b; 
-    --vcol6: #e377c2; 
-    --vcol7: #7f7f7f;
-  --radius:    10px;
-  --font:      'Inter', system-ui, sans-serif;
-}
-/* ── RESET ──────────────────────────────────────────── */
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh}
-a{color:var(--blue);text-decoration:none}
-button{cursor:pointer;font-family:inherit}
-input,select{font-family:inherit}
 
-/* ── LAYOUT ─────────────────────────────────────────── */
-#app{display:flex;flex-direction:column;min-height:100vh}
-header{
-  background:var(--surface);border-bottom:1px solid var(--border);
-  padding:0 24px;display:flex;align-items:center;gap:16px;height:56px;position:sticky;top:0;z-index:100
-}
-header h1{font-size:1rem;font-weight:600;letter-spacing:.5px;color:var(--text)}
-header .badge{
-  font-size:.7rem;background:var(--green-dim);color:var(--green);
-  border:1px solid var(--green);border-radius:20px;padding:2px 10px
-}
-#ws-status{font-size:.7rem;margin-left:auto;display:flex;align-items:center;gap:6px}
-#ws-dot{width:8px;height:8px;border-radius:50%;background:var(--red)}
-#ws-dot.ok{background:var(--green)}
-/* Badge MQTT (amélioration A) */
-#mqtt-status{font-size:.7rem;display:flex;align-items:center;gap:6px}
-#mqtt-dot{width:8px;height:8px;border-radius:50%;background:var(--text-muted)}
-#mqtt-dot.ok{background:var(--green)}
-#mqtt-dot.off{background:var(--red)}
+)HTML0EOF";
 
-nav{
-  background:var(--surface);border-bottom:1px solid var(--border);
-  display:flex;overflow-x:auto;padding:0 16px
-}
-nav button{
-  background:none;border:none;color:var(--text-muted);padding:14px 18px;
-  font-size:.85rem;font-weight:500;white-space:nowrap;border-bottom:2px solid transparent;
-  transition:color .15s,border-color .15s
-}
-nav button.active{color:var(--blue);border-bottom-color:var(--blue)}
-nav button:hover{color:var(--text)}
+#include  "WebCSS.h"
 
-main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 
-/* ── PAGES ──────────────────────────────────────────── */
-.page{display:none}
-.page.active{display:block}
 
-/* ── CARDS DASHBOARD ────────────────────────────────── */
-.valve-grid{
-  display:grid;
-  grid-template-columns:repeat(auto-fill,minmax(260px,1fr));
-  gap:16px
-}
-.valve-card{
-  /* darker surface with stronger tint */
-  background:color-mix(in srgb, var(--vcol) 16%, var(--surface));
-  /* full saturated border using valve color for emphasis */
-  border:2px solid var(--vcol);
-  border-radius:var(--radius);padding:18px;
-  transition:border-color .2s,box-shadow .2s;position:relative;overflow:hidden;box-shadow:0 6px 18px rgba(0,0,0,0.35)
-}
-.valve-card::before{
-  content:'';position:absolute;top:0;left:0;right:0;height:3px;
-  background:color-mix(in srgb, var(--vcol) 30%, transparent);
-  transition:background .2s, height .2s;
-}
-.valve-card.open::before, .valve-card.forced::before, .valve-card.alarm::before {
-  background:var(--vcol);
-  height: 4px;
-}
+const char WEB_HTML1[] PROGMEM =  R"HTML1EOF(
 
-.valve-card .vc-header{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:12px}
-.valve-card .vc-name{font-weight:600;font-size:.95rem}
-.valve-card .vc-num{
-  font-size:.7rem;color:var(--text-muted);background:var(--surface2);
-  border-radius:20px;padding:2px 8px
-}
-.valve-card .vc-badge{
-  display:inline-block;font-size:.72rem;padding:3px 10px;border-radius:20px;font-weight:600;
-  margin-bottom:10px;
-}
-.badge-closed{background:var(--surface2);color:var(--text-muted)}
-.badge-open{background:var(--green-dim);color:var(--green)}
-.badge-forced{background:var(--orange-dim);color:var(--orange)}
-.badge-alarm{background:var(--red-dim);color:var(--red)}
-/* Petit indicateur "débit calibré" affiché à côté du badge d'état.
-   Toujours visible (vanne ouverte ou fermée) pour rappeler la capacité
-   hydraulique de la ligne, indépendamment de l'état courant. */
-.vc-flow{
-  display:inline-block;font-size:.68rem;padding:2px 8px;border-radius:20px;
-  background:var(--blue-dim);color:var(--blue);font-weight:600;
-  font-variant-numeric:tabular-nums;margin-left:6px;vertical-align:middle;
-  border:1px solid color-mix(in srgb, var(--blue) 40%, transparent);
-}
-.vc-flow.uncal{background:var(--surface2);color:var(--text-muted);border-color:var(--border);font-weight:500}
 
-.valve-card .vc-remaining{font-size:1.4rem;font-weight:700;font-variant-numeric:tabular-nums;min-height:34px;color:var(--text)}
-/* make remaining time red when valve is open/forced/alarm */
-.valve-card.open .vc-remaining,
-.valve-card.forced .vc-remaining,
-.valve-card.alarm .vc-remaining{ color: var(--red); }
-/* ── Volume restant ─────────────────────────────────────────
-   Affiché sous le temps restant quand une vanne est ouverte.
-   Couleur bleue pour différencier visuellement du temps (rouge).
-   Calcul côté client : flowCoeff[i] (pulses/s) × remainingSec /
-   pulsesPerLitre = litres restants. Si pas de calibration, on retombe
-   sur l'estimation "1.0 pulse/s" (= 1.0 / PULSES_PER_LITRE L/s) ce qui
-   correspond au comportement par défaut avant toute calibration. */
-.valve-card .vc-remaining-l{
-  font-size:1rem;font-weight:600;font-variant-numeric:tabular-nums;
-  color:var(--blue);margin-top:2px;min-height:18px;
-}
-.valve-card .vc-remaining-l .vc-remaining-l-label{
-  font-size:.7rem;font-weight:500;color:var(--text-muted);
-  margin-right:6px;text-transform:uppercase;letter-spacing:.4px;
-}
-.valve-card .vc-meta{font-size:.75rem;color:var(--text-muted);margin:6px 0 14px}
-.valve-card .vc-actions{display:flex;gap:8px;flex-wrap:wrap}
-
-.btn{
-  border:none;border-radius:6px;padding:7px 14px;font-size:.8rem;font-weight:600;
-  transition:filter .15s,transform .1s;
-}
-.btn:hover{filter:brightness(1.15)}
-.btn:active{transform:scale(.97)}
-.btn-green{background:var(--green);color:#fff}
-.btn-red{background:var(--red);color:#fff}
-.btn-orange{background:var(--orange);color:#000}
-.btn-ghost{background:var(--surface2);color:var(--text);border:1px solid var(--border)}
-.btn-blue{background:var(--blue);color:#fff}
-.btn-sm{padding:5px 10px;font-size:.75rem}
-
-/* ── JAUGE NVS ──────────────────────────────────────────
- * Petite barre horizontale qui affiche le remplissage de la partition
- * NVS (utilisé / total). Couleur qui vire au rouge/orange au-dessus
- * de 70% / 90% pour alerter visuellement. */
-.nvs-gauge-wrap{
-  display:flex;flex-direction:column;gap:6px;
-  padding:10px 12px;background:var(--surface2);
-  border:1px solid var(--border);border-radius:8px;
-}
-.nvs-gauge-label{
-  display:flex;justify-content:space-between;align-items:center;
-  font-size:.78rem;color:var(--text-muted);
-}
-.nvs-gauge-label .pct{font-weight:600;color:var(--text)}
-.nvs-gauge{
-  width:100%;height:8px;background:var(--border);
-  border-radius:4px;overflow:hidden;
-}
-.nvs-gauge-fill{
-  height:100%;width:0%;background:var(--green);
-  transition:width .3s ease, background-color .3s ease;
-}
-.nvs-gauge-fill.warn{background:var(--orange)}
-.nvs-gauge-fill.danger{background:var(--red)}
-.nvs-gauge-detail{font-size:.7rem;color:var(--text-muted);text-align:right}
-
-/* ── MODAL FORÇAGE ──────────────────────────────────── */
-.modal-overlay{
-  display:none;position:fixed;inset:0;background:rgba(0,0,0,.65);z-index:200;
-  align-items:center;justify-content:center
-}
-.modal-overlay.open{display:flex}
-.modal{
-  background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
-  padding:28px;min-width:320px;max-width:90vw
-}
-.modal h3{font-size:1rem;margin-bottom:16px}
-.modal label{font-size:.82rem;color:var(--text-muted);display:block;margin-bottom:4px}
-.modal input[type=number]{
-  width:100%;background:var(--surface2);border:1px solid var(--border);
-  border-radius:6px;color:var(--text);padding:8px 12px;font-size:.9rem;margin-bottom:14px
-}
-.modal-actions{display:flex;gap:10px;justify-content:flex-end}
-
-/* ── TABLES ─────────────────────────────────────────── */
-.card{
-  background:var(--surface);border:1px solid var(--border);
-  border-radius:var(--radius);overflow:hidden;margin-bottom:20px
-}
-.card-header{
-  padding:16px 20px;border-bottom:1px solid var(--border);
-  display:flex;justify-content:space-between;align-items:center
-}
-.card-header h2{font-size:.95rem;font-weight:600}
-.tbl{width:100%;border-collapse:collapse;font-size:.84rem}
-.tbl th{
-  background:var(--surface2);color:var(--text-muted);font-weight:500;
-  text-align:left;padding:10px 14px;border-bottom:1px solid var(--border)
-}
-.tbl td{padding:10px 14px;border-bottom:1px solid var(--border);vertical-align:middle}
-.tbl tr:last-child td{border-bottom:none}
-.tbl tr:hover td{background:var(--surface2)}
-
-/* ── FORMULAIRE PROGRAMME ───────────────────────────── */
-.form-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));gap:12px;margin-bottom:14px}
-.form-group label{font-size:.78rem;color:var(--text-muted);display:block;margin-bottom:4px}
-.form-group input,.form-group select{
-  width:100%;background:var(--surface2);border:1px solid var(--border);
-  border-radius:6px;color:var(--text);padding:7px 10px;font-size:.85rem
-}
-.days-picker{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px}
-.day-btn{
-  background:var(--surface2);border:1px solid var(--border);color:var(--text-muted);
-  border-radius:6px;padding:5px 10px;font-size:.78rem;cursor:pointer;transition:all .15s
-}
-.day-btn.sel{background:var(--blue-dim);border-color:var(--blue);color:var(--blue)}
-
-/* ── CALENDRIER ─────────────────────────────────────── */
-.cal-nav{display:flex;align-items:center;gap:16px;margin-bottom:16px}
-.cal-nav h2{font-size:1rem;font-weight:600;min-width:160px;text-align:center}
-.cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:4px}
-.cal-day-name{
-  text-align:center;font-size:.72rem;color:var(--text-muted);
-  padding:6px;font-weight:600
-}
-.cal-day{
-  background:var(--surface2);border:1px solid var(--border);
-  border-radius:6px;padding:8px 4px;text-align:center;min-height:56px;
-  font-size:.82rem;cursor:default;position:relative
-}
-.cal-day.today{border-color:var(--blue);color:var(--blue)}
-.cal-day.has-sched{background:var(--green-dim)}
-.cal-day.other-month{opacity:.35}
-.cal-day .cal-dots{display:flex;justify-content:center;gap:2px;margin-top:4px;flex-wrap:wrap}
-.cal-dot{width:5px;height:5px;border-radius:50%;background:var(--green)}
-.cal-badge{display:inline-block;padding:2px 6px;border-radius:8px;font-size:.7rem;background:var(--blue-dim);color:var(--blue);margin:2px}
-.cal-badge[data-valve]{color:#fff}
-
-/* ── JOURNAL ─────────────────────────────────────────── */
-.log-list{max-height:520px;overflow-y:auto;padding:4px 0}
-.log-entry{
-  display:flex;gap:12px;padding:8px 20px;border-bottom:1px solid var(--border);
-  font-size:.82rem;align-items:baseline
-}
-.log-entry:last-child{border-bottom:none}
-.log-ts{color:var(--text-muted);font-variant-numeric:tabular-nums;white-space:nowrap;min-width:90px}
-.log-badge{
-  font-size:.7rem;padding:2px 7px;border-radius:20px;font-weight:600;white-space:nowrap
-}
-.log-badge.sys{background:var(--surface2);color:var(--text-muted)}
-.log-badge.v{background:var(--blue-dim);color:var(--blue)}
-.log-msg{color:var(--text)}
-
-/* ── CONFIG ─────────────────────────────────────────── */
-.config-section{margin-bottom:28px}
-.config-section h3{font-size:.85rem;font-weight:600;color:var(--text-muted);text-transform:uppercase;letter-spacing:.8px;margin-bottom:14px;padding-bottom:8px;border-bottom:1px solid var(--border)}
-.config-row{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:12px}
-.config-row label{font-size:.82rem;color:var(--text-muted);display:block;margin-bottom:4px}
-.config-row input,.config-row select{
-  width:100%;background:var(--surface2);border:1px solid var(--border);
-  border-radius:6px;color:var(--text);padding:8px 12px;font-size:.85rem
-}
-.toggle-row{display:flex;align-items:center;justify-content:space-between;padding:10px 0;border-bottom:1px solid var(--border)}
-.toggle-row label{font-size:.85rem}
-/* Toggle standard (44×24) — utilisé dans le modal programme.
-   Le toggle "compact" du tableau (36×20) est surchargé ci-dessous pour
-   garder un fond visible (le rond blanc doit laisser au moins ~3 px de
-   piste de chaque côté, sinon il masque quasi totalement la couleur
-   "actif" sur les petits écrans). */
-.toggle{position:relative;width:44px;height:24px;flex:0 0 auto}
-.toggle input{opacity:0;width:0;height:0}
-.toggle-slider{
-  position:absolute;cursor:pointer;inset:0;background:var(--border);
-  border-radius:24px;transition:.2s
-}
-.toggle-slider::before{
-  content:'';position:absolute;height:18px;width:18px;left:3px;bottom:3px;
-  background:#fff;border-radius:50%;transition:.2s
-}
-.toggle input:checked+.toggle-slider{background:var(--green)}
-.toggle input:checked+.toggle-slider::before{transform:translateX(20px)}
-
-/* Variante compacte pour la colonne "Actif" du tableau Programmes.
-   Par défaut, le toggle global est 44×24, mais en colonne de table on
-   l'inline à 36×20 : avec les valeurs standards, le curseur rond (18px)
-   ne laisse que 1 px de piste verticale et 3 px latéraux → le fond
-   "actif" vert est quasi invisible. On adapte le rond à 14 px pour
-   qu'il reste une bande colorée visible de chaque côté. */
-.toggle.compact{width:36px;height:20px}
-.toggle.compact .toggle-slider{border-radius:10px}
-.toggle.compact .toggle-slider::before{
-  height:14px;width:14px;left:3px;bottom:3px;
-  box-shadow:0 1px 2px rgba(0,0,0,.25) /* léger relief pour le voir
-    sur fond clair quand même */
-}
-.toggle.compact input:checked+.toggle-slider::before{
-  transform:translateX(16px) /* 36 - 14 - 3*2 = 16 */
-}
-
-/* ── RESPONSIVE ─────────────────────────────────────── */
-@media(max-width:640px){
-  main{padding:14px}
-  .valve-grid{grid-template-columns:1fr}
-  .config-row{grid-template-columns:1fr}
-}
-/* ── LOADER ─────────────────────────────────────────── */
-.spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .7s linear infinite}
-@keyframes spin{to{transform:rotate(360deg)}}
-/* Programmes table: inactive row styling */
-.sched-row.inactive td{opacity:.6;color:var(--text-muted)}
-
-/* ── BOÎTE STATUS SYSTÈME ────────────────────────────────────
-   Regroupe les métriques globales (uptime, T°, conso, santé)
-   dans une zone visuellement distincte des cartes de vannes :
-   fond plus contrasté, cartes internes alignées en grille,
-   couleurs sémantiques par métrique. */
-.status-box{
-  background:linear-gradient(135deg, var(--surface) 0%, var(--surface2) 100%);
-  border:1px solid var(--border);
-  border-radius:var(--radius);
-  padding:16px 18px 12px;
-  margin-bottom:20px;
-  box-shadow:0 1px 3px rgba(0,0,0,.25);
-}
-.status-header{
-  display:flex;align-items:center;gap:10px;
-  padding-bottom:12px;margin-bottom:14px;
-  border-bottom:1px solid var(--border);
-}
-.status-header h3{
-  font-size:.95rem;font-weight:600;color:var(--text);
-  margin:0;flex:1;letter-spacing:.3px;
-}
-.status-time{
-  font-size:.78rem;color:var(--text-muted);
-  font-variant-numeric:tabular-nums;
-}
-.status-grid{
-  display:grid;
-  grid-template-columns:repeat(auto-fit, minmax(170px, 1fr));
-  gap:10px;
-  margin-bottom:14px;
-}
-.status-card{
-  display:flex;align-items:center;gap:10px;
-  background:var(--bg);
-  border:1px solid var(--border);
-  border-radius:8px;
-  padding:10px 12px;
-  min-height:62px;
-}
-/* Carte alarme hydraulique — bordure rouge + clignotement léger
-   pour attirer l'œil sans être trop agressif. */
-.status-card.alarm-active{
-  border-color:var(--red);
-  background:linear-gradient(0deg, rgba(248,81,73,0.08), rgba(248,81,73,0.08)), var(--bg);
-  animation: alarm-blink 1.4s ease-in-out infinite;
-}
-@keyframes alarm-blink{
-  0%,100%{ box-shadow:0 0 0 0 rgba(248,81,73,0.0); }
-  50%    { box-shadow:0 0 0 3px rgba(248,81,73,0.25); }
-}
-.status-card-icon{
-  width:36px;height:36px;border-radius:8px;
-  display:flex;align-items:center;justify-content:center;
-  flex-shrink:0;
-}
-.status-card-body{flex:1;min-width:0;}
-.status-card-label{
-  font-size:.68rem;color:var(--text-muted);
-  text-transform:uppercase;letter-spacing:.5px;
-  margin-bottom:2px;
-}
-.status-card-value{
-  font-size:1rem;font-weight:600;color:var(--text);
-  font-variant-numeric:tabular-nums;
-  line-height:1.2;
-  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
-}
-.status-card-sub{
-  font-size:.72rem;color:var(--text-muted);
-  margin-top:2px;
-  font-variant-numeric:tabular-nums;
-}
-.status-conso{
-  background:var(--bg);
-  border:1px solid var(--border);
-  border-radius:8px;
-  padding:8px 10px;
-}
-.status-conso-header{
-  display:flex;justify-content:space-between;align-items:center;
-  font-size:.8rem;font-weight:600;color:var(--text);
-  padding:4px 4px 8px;
-  border-bottom:1px solid var(--border);
-  margin-bottom:6px;
-}
-.status-conso-tbl{
-  font-size:.78rem;
-}
-.status-conso-tbl th{
-  font-weight:500;color:var(--text-muted);
-  font-size:.7rem;text-transform:uppercase;letter-spacing:.4px;
-  padding:6px 4px;
-}
-.status-conso-tbl td{
-  padding:6px 4px;
-  border-top:1px solid var(--border);
-  font-variant-numeric:tabular-nums;
-}
-</style>
 </head>
 <body>
 <div id="app">
@@ -503,495 +80,22 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
 
 <main>
 
-<!-- ══ PAGE DASHBOARD ══════════════════════════════════ -->
-<div id="page-dashboard" class="page active">
-  <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px">
-    <div>
-      <div style="font-size:1.1rem;font-weight:700">Tableau de bord</div>
-    </div>
-    <div style="display:flex;gap:8px">
-      <button class="btn btn-ghost btn-sm" onclick="closeAll()">Tout fermer</button>
-    </div>
-  </div>
 
-  <!-- ══ BOÎTE STATUS SYSTÈME ══════════════════════════════
-       Distinction visuelle forte vs les cartes de vanne :
-         • fond bleu-dim/var(--surface) au lieu de la grille blanche
-         • cartes internes (uptime, T°, conso) avec icônes inline
-         • tableau conso compact en bas
-       Mise à jour automatique via handleStatus() / refreshConsumption(). -->
-  <div class="status-box">
-    <div class="status-header">
-      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-        <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-      </svg>
-      <h3>État du système</h3>
-      <span class="status-time" id="status-time">—</span>
-    </div>
+)HTML1EOF";
 
-    <div class="status-grid">
-      <!-- Carte uptime -->
-      <div class="status-card">
-        <div class="status-card-icon" style="background:var(--blue-dim)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/>
-          </svg>
-        </div>
-        <div class="status-card-body">
-          <div class="status-card-label">Uptime</div>
-          <div class="status-card-value" id="uptime-label">—</div>
-        </div>
-      </div>
 
-      <!-- Carte températures -->
-      <div class="status-card">
-        <div class="status-card-icon" style="background:var(--orange-dim)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--orange)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M14 14.76V3.5a2.5 2.5 0 0 0-5 0v11.26a4 4 0 1 0 5 0z"/>
-          </svg>
-        </div>
-        <div class="status-card-body">
-          <div class="status-card-label">Températures</div>
-          <div class="status-card-value" id="temps-label">T1: -- °C</div>
-          <div class="status-card-sub" id="tempsR-label">TRem: -- °C</div>
-        </div>
-      </div>
+#include "WebHTML_Dashboard.h"
+#include "WebHTML_Programmes.h"
+#include "WebHTML_Calibration.h"
+#include "WebHTML_Config.h"
+#include "WebHTML_Calendrier.h"
+#include "WebHTML_EOS.h"
+#include "WebHTML_Journal.h"
 
-      <!-- Carte conso globale -->
-      <div class="status-card">
-        <div class="status-card-icon" style="background:var(--green-dim)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
-          </svg>
-        </div>
-        <div class="status-card-body">
-          <div class="status-card-label">Volume total</div>
-          <div class="status-card-value" id="litres-label">— L</div>
-          <div class="status-card-sub">
-            <span id="pulse-label">—</span> pulses ·
-            <span style="color:var(--blue);font-weight:600" id="flow-label">— L/min</span>
-          </div>
-        </div>
-      </div>
+    
 
-      <!-- Carte alarme hydraulique -->
-      <div class="status-card" id="alarm-card">
-        <div class="status-card-icon" id="alarm-icon" style="background:var(--green-dim)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--green)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M9 12l2 2 4-4"/>
-            <circle cx="12" cy="12" r="10"/>
-          </svg>
-        </div>
-        <div class="status-card-body">
-          <div class="status-card-label">Alarme hydraulique</div>
-          <div class="status-card-value" id="alarm-label" style="color:var(--green)">Aucune alarme</div>
-          <div class="status-card-sub" id="alarm-sub">—</div>
-        </div>
-      </div>
 
-      <!-- Carte VanneManuelle (débitmètre voit couler alors qu'aucune vanne auto n'est ouverte) -->
-      <div class="status-card" id="manual-valve-card">
-        <div class="status-card-icon" style="background:var(--blue-dim)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--blue)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M12 2.69l5.66 5.66a8 8 0 1 1-11.31 0z"/>
-          </svg>
-        </div>
-        <div class="status-card-body">
-          <div class="status-card-label">VanneManuelle</div>
-          <div class="status-card-value" id="manual-valve-today">— L</div>
-          <div class="status-card-sub">
-            Total: <span id="manual-valve-total">—</span> L
-            <span id="manual-valve-flow" style="color:var(--blue);font-weight:600;margin-left:6px">— L/min</span>
-          </div>
-          <div style="margin-top:6px">
-            <button class="btn btn-ghost btn-sm" onclick="resetManualValve()" title="Remettre le compteur VanneManuelle à zéro">🔄 RAZ</button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Carte mémoire / santé — masquée (encombre la grille, infos
-           redondantes avec les badges header WiFi/MQTT/WS)
-      <div class="status-card">
-        <div class="status-card-icon" style="background:var(--surface2)">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="var(--text-muted)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <rect x="4" y="4" width="16" height="16" rx="2"/>
-            <rect x="9" y="9" width="6" height="6"/>
-            <line x1="9" y1="1" x2="9" y2="4"/><line x1="15" y1="1" x2="15" y2="4"/>
-            <line x1="9" y1="20" x2="9" y2="23"/><line x1="15" y1="20" x2="15" y2="23"/>
-            <line x1="20" y1="9" x2="23" y2="9"/><line x1="20" y1="14" x2="23" y2="14"/>
-            <line x1="1" y1="9" x2="4" y2="9"/><line x1="1" y1="14" x2="4" y2="14"/>
-          </svg>
-        </div>
-        <div class="status-card-body">
-          <div class="status-card-label">Santé ESP</div>
-          <div class="status-card-value" id="heap-label">— KB</div>
-          <div class="status-card-sub" id="wifi-label">WiFi —</div>
-        </div>
-      </div>
-      -->
-    </div>
-
-    <!-- Tableau compact conso par vanne -->
-    <div class="status-conso">
-      <div class="status-conso-header">
-        <span>💧 Consommation par vanne</span>
-        <button class="btn btn-ghost btn-sm" onclick="refreshConsumption()" title="Actualiser">↻</button>
-      </div>
-      <table class="tbl status-conso-tbl">
-        <thead>
-          <tr>
-            <th>Vanne</th>
-            <th>Nom</th>
-            <th style="text-align:right">Aujourd'hui</th>
-            <th style="text-align:right">Total</th>
-            <th style="text-align:right">Débit (live)</th>
-          </tr>
-        </thead>
-        <tbody id="status-cons-body">
-          <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-
-  <div class="valve-grid" id="valve-grid">
-    <!-- cartes générées par JS -->
-  </div>
-</div>
-
-<!-- ══ PAGE PROGRAMMES ═════════════════════════════════ -->
-<div id="page-programmes" class="page">
-  <div class="card">
-    <div class="card-header">
-      <h2>Programmes d'arrosage</h2>
-      <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-        <button class="btn btn-ghost btn-sm" onclick="exportSchedules()">⬇ Export JSON</button>
-        <button class="btn btn-blue btn-sm" onclick="document.getElementById('sched-import-file').click()">⬆ Import JSON</button>
-        <input id="sched-import-file" type="file" accept="application/json,.json" style="display:none" onchange="importSchedulesFromFile(event)">
-        <button class="btn btn-blue btn-sm" onclick="openSchedModal()">+ Ajouter</button>
-      </div>
-    </div>
-    <div style="overflow-x: auto;">
-      <table class="tbl" id="sched-table">
-        <thead>
-          <tr>
-            <th>Vanne</th><th>Nom</th><th>Heure</th><th>Durée</th><th>Jours</th><th>Mode</th><th>Actif</th><th>Actions</th>
-          </tr>
-        </thead>
-        <tbody id="sched-body">
-          <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
-        </tbody>
-      </table>
-    </div>
-  </div>
-</div>
-
-<!-- ══ PAGE CALIBRATION ═════════════════════════════════ -->
-<div id="page-calibration" class="page">
-  <div class="card">
-    <div class="card-header">
-      <h2>Calibration du débitmètre</h2>
-      <span id="calib-phase-badge" class="badge" style="background:var(--surface2);color:var(--text-muted);font-size:.75rem">inactif</span>
-    </div>
-
-    <div style="padding:8px 4px 16px;color:var(--text-muted);font-size:.86rem;line-height:1.5">
-      La calibration mesure le débit de chaque vanne <strong>une par une</strong>, en l'ouvrant
-      seule pendant la durée choisie. Le coefficient <code>flowCoeff</code> (en pulses/seconde)
-      est calculé automatiquement et utilisé pour répartir les pulses globaux entre vannes
-      ouvertes simultanément. <strong>Fermez toutes les vannes avant de lancer</strong> (sécurité
-      intégrée côté firmware : démarrage refusé si une vanne est ouverte).
-    </div>
-
-    <!-- Formulaire de lancement -->
-    <div class="config-section" id="calib-launch-form">
-      <h3>Lancer une calibration</h3>
-      <div class="config-row">
-        <div>
-          <label>Durée par vanne (secondes)</label>
-          <input type="number" id="calib-duration" value="60" min="5" max="600"/>
-          <div style="font-size:.75rem;color:var(--text-muted);margin-top:4px">
-            Recommandé : 30-120 s. Plus c'est long, plus la mesure est précise.
-          </div>
-        </div>
-      </div>
-      <div style="margin-top:14px;display:flex;gap:8px;align-items:center">
-        <button id="calib-start-btn" class="btn btn-green" onclick="startCalibration()">
-          ▶ Démarrer la calibration
-        </button>
-        <button id="calib-abort-btn" class="btn btn-red" onclick="abortCalibration()" style="display:none">
-          ■ Annuler
-        </button>
-        <span id="calib-msg" style="font-size:.85rem;color:var(--text-muted)"></span>
-      </div>
-    </div>
-
-    <!-- Progression en direct -->
-    <div class="config-section" id="calib-progress" style="display:none">
-      <h3>Progression</h3>
-      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
-        <div>
-          <div style="font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Vanne en cours</div>
-          <div style="font-size:1.5rem;font-weight:700" id="calib-current-valve">—</div>
-        </div>
-        <div>
-          <div style="font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Temps restant</div>
-          <div style="font-size:1.5rem;font-weight:700;color:var(--blue)" id="calib-remaining">— s</div>
-        </div>
-      </div>
-      <div style="background:var(--bg);border-radius:8px;height:8px;overflow:hidden;margin-bottom:6px">
-        <div id="calib-bar" style="height:100%;background:var(--green);width:0%;transition:width 0.5s linear"></div>
-      </div>
-      <div style="font-size:.78rem;color:var(--text-muted);text-align:right">
-        Vanne <span id="calib-progress-valve">0</span> / <span id="calib-progress-total">0</span>
-      </div>
-    </div>
-
-    <!-- Résultats -->
-    <div class="config-section">
-      <h3>Coefficients actuels</h3>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">
-        Mis à jour automatiquement après une calibration. Le firmware les utilise pour
-        pondérer la répartition des pulses entre vannes ouvertes simultanément.
-      </div>
-      <table class="tbl" style="max-width:500px">
-        <thead>
-          <tr>
-            <th>Vanne</th>
-            <th style="text-align:right">flowCoeff (pulses/s)</th>
-            <th style="text-align:right">Équiv. L/min</th>
-          </tr>
-        </thead>
-        <tbody id="calib-coeff-body">
-          <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:18px">Chargement…</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-  </div>
-</div>
-
-<!-- ══ PAGE CALENDRIER ════════════════════════════════ -->
-<div id="page-calendrier" class="page">
-  <div class="card" style="padding:20px">
-    <div class="cal-nav">
-      <button class="btn btn-ghost btn-sm" onclick="calPrev()">◀</button>
-      <h2 id="cal-title">Juin 2024</h2>
-      <button class="btn btn-ghost btn-sm" onclick="calNext()">▶</button>
-    </div>
-    <div class="cal-grid" id="cal-grid">
-      <!-- généré JS -->
-    </div>
-  </div>
-</div>
-
-<!-- ══ PAGE E/S ═════════════════════════════════════ -->
-<div id="page-io" class="page">
-  <div class="card">
-    <div class="card-header">
-      <h2>Entr&eacute;es / Sorties Mat&eacute;rielles</h2>
-    </div>
-    <div style="overflow-x: auto; padding: 16px;">
-      <table class="tbl" style="font-family: monospace; text-align: center; width:100%; max-width:600px; margin:0 auto">
-        <thead>
-          <tr>
-            <th style="text-align:left; width:60px">Pin</th>
-            <th>0</th><th>1</th><th>2</th><th>3</th><th>4</th><th>5</th><th>6</th><th>7</th>
-          </tr>
-        </thead>
-        <tbody id="io-body">
-          <tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px">En attente des donn&eacute;es...</td></tr>
-        </tbody>
-      </table>
-      <div style="margin-top: 24px; font-size: 0.85rem; color: var(--text-muted); max-width:600px; margin-left:auto; margin-right:auto; padding:12px; background:var(--surface2); border-radius:6px">
-        <strong style="color:var(--text)">L&eacute;gende :</strong><br>
-        <div style="margin-top:6px"><strong>oPD</strong> : Sorties Puissance (0-3: Vannes, 4-7: Sorties auxiliaires)</div>
-        <div><strong>oPA</strong> : Sorties LEDs visualisation (0-3: État des vannes)</div>
-        <div><strong>In</strong> : Entr&eacute;es for&ccedil;age manuel (Boutons poussoirs)</div>
-      </div>
-    </div>
-  </div>
-</div>
-
-<!-- ══ PAGE JOURNAL ═══════════════════════════════════ -->
-<div id="page-journal" class="page">
-  <div class="card">
-    <div class="card-header">
-      <h2>Journal des événements</h2>
-      <div style="display:flex;gap:8px;align-items:center">
-        <span id="log-count" style="font-size:.8rem;color:var(--text-muted)"></span>
-        <button class="btn btn-ghost btn-sm" onclick="loadLog()">Actualiser</button>
-      </div>
-    </div>
-    <div class="log-list" id="log-list">
-      <div style="padding:24px;text-align:center;color:var(--text-muted)">Chargement…</div>
-    </div>
-  </div>
-</div>
-
-<!-- ══ PAGE CONFIGURATION ════════════════════════════ -->
-<div id="page-config" class="page">
-  <div class="card" style="padding:24px">
-
-    <div class="config-section">
-      <h3>Noms des vannes</h3>
-      <div id="valve-names-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(200px,1fr));gap:10px"></div>
-    </div>
-
-    <div class="config-section">
-      <h3>WiFi</h3>
-      <div class="config-row">
-        <div><label>SSID</label><input id="cfg-ssid" type="text"></div>
-        <div><label>Mot de passe</label><input id="cfg-wpass" type="password"></div>
-      </div>
-      <!-- Bloc "réseaux détectés" : même fonction que la liste de la page
-           AP du portail captif (SSID + RSSI + type de chiffrement + barres
-           de signal), accessible ici depuis la page de configuration
-           principale quand l'ESP est déjà connecté en STA. -->
-      <div style="margin-top:10px;display:flex;gap:10px;align-items:center">
-        <button class="btn btn-ghost btn-sm" id="wifi-scan-btn" onclick="scanWifiNetworks()">📡 Réseaux détectés</button>
-        <span id="wifi-scan-status" style="font-size:.78rem;color:var(--text-muted)"></span>
-      </div>
-      <div id="wifi-networks" style="margin-top:8px"></div>
-    </div>
-
-    <div class="config-section">
-      <h3>NTP / Heure</h3>
-      <div class="config-row">
-        <div><label>Serveur NTP</label><input id="cfg-ntp" type="text"></div>
-        <div><label>Fuseau horaire (secondes, hiver)</label><input id="cfg-tz" type="number"></div>
-      </div>
-      <div class="config-row" style="margin-top:8px">
-        <div style="flex:1">
-          <label>Fuseau POSIX (heure été/hiver automatique) <a href="https://github.com/nayarsystems/posix_tz_db/blob/master/zones.csv" target="_blank" style="font-size:.75rem;color:var(--blue)">[aide]</a></label>
-          <input id="cfg-tz-posix" type="text" placeholder="ex: CET-1CEST,M3.5.0,M10.5.0/3">
-          <div style="font-size:.72rem;color:var(--text-muted);margin-top:3px">
-            🇫🇷 France (Paris) : <code style="color:var(--blue);cursor:pointer" onclick="document.getElementById('cfg-tz-posix').value=this.textContent">CET-1CEST,M3.5.0,M10.5.0/3</code>
-            &nbsp;—&nbsp;Si renseigné, prend la priorité sur le champ secondes ci-dessus.
-          </div>
-        </div>
-      </div>
-    </div>
-
-    <div class="config-section">
-      <h3>LoRa</h3>
-      <div class="config-row">
-        <div><label>Fréquence (MHz)</label><input id="cfg-lfreq" type="number" step="0.1"></div>
-        <div><label>Puissance (dBm)</label><input id="cfg-lpow" type="number"></div>
-      </div>
-      <div class="config-row">
-        <div><label>ID Nœud</label><input id="cfg-nodeid" type="text"></div>
-      </div>
-      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
-        <button class="btn btn-ghost btn-sm" onclick="api('POST','/api/lora/status').then(()=>alert('Sync LoRa envoyée'))">Sync LoRa</button>
-        <span style="font-size:.78rem;color:var(--text-muted)">Force l'émission immédiate d'un message STATUS vers les autres nœuds.</span>
-      </div>
-    </div>
-
-    <div class="config-section">
-      <h3>Arrosage</h3>
-      <div class="toggle-row">
-        <label>Mode séquentiel (une vanne à la fois)</label>
-        <label class="toggle"><input type="checkbox" id="cfg-seq"><span class="toggle-slider"></span></label>
-      </div>
-      <div class="config-row" style="margin-top:12px">
-        <div><label>Durée max ouverture (s)</label><input id="cfg-maxopen" type="number"></div>
-        <div><label>Durée forçage manuel (s)</label><input id="cfg-forcedu" type="number"></div>
-      </div>
-    </div>
-
-    <div class="config-section">
-      <h3>Compteur d'impulsions</h3>
-      <div style="display:flex;gap:12px;align-items:center;">
-        <div style="font-size:1rem">Total: <span id="pulse-count">—</span> pulses (<span id="pulse-litres">—</span> L)</div>
-        <button class="btn btn-ghost btn-sm" onclick="refreshPulse()">Actualiser</button>
-        <button class="btn btn-red btn-sm" onclick="if(confirm('Remettre le compteur à zéro ?')) resetPulse()">RAZ</button>
-      </div>
-    </div>
-
-    <div class="config-section">
-      <h3>Consommation par vanne</h3>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">
-        Division simple du compteur global par le nombre de vannes ouvertes (calibration à venir).
-      </div>
-      <div style="display:flex;gap:8px;margin-bottom:10px">
-        <button class="btn btn-ghost btn-sm" onclick="refreshConsumption()">Actualiser</button>
-      </div>
-      <div style="overflow-x:auto">
-        <table class="tbl" id="cons-table">
-          <thead>
-            <tr>
-              <th>Vanne</th>
-              <th>Nom</th>
-              <th>Aujourd'hui (L)</th>
-              <th>Total (L)</th>
-              <th>Détails 14 j</th>
-            </tr>
-          </thead>
-          <tbody id="cons-body">
-            <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:18px">Chargement…</td></tr>
-          </tbody>
-        </table>
-      </div>
-    </div>
-
-    <div class="config-section">
-      <h3>Home Assistant (MQTT)</h3>
-      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">
-        Découverte automatique des capteurs + vannes dans Home Assistant.
-        Les switchs sont commandables depuis HA (un clic = ouverture / fermeture).
-      </div>
-      <div class="toggle-row">
-        <label>Activer MQTT</label>
-        <label class="toggle"><input type="checkbox" id="cfg-mqena"><span class="toggle-slider"></span></label>
-      </div>
-      <div class="config-row" style="margin-top:12px">
-        <div><label>Broker (host)</label><input id="cfg-mqhost" type="text"/></div>
-        <div><label>Port</label><input id="cfg-mqport" type="number"/></div>
-      </div>
-      <div class="config-row">
-        <div><label>Utilisateur</label><input id="cfg-mquser" type="text"/></div>
-        <div><label>Mot de passe</label><input id="cfg-mqpass" type="password"/></div>
-      </div>
-      <div class="config-row">
-        <div><label>Préfixe topic (défaut: homeassistant)</label><input id="cfg-mqprefix" type="text"/></div>
-        <div><label>ID nœud MQTT (unique_id HA)</label><input id="cfg-mqid" type="text"/></div>
-      </div>
-    </div>
-
-    <!-- ── MAINTENANCE / ÉTAT NVS ──────────────────────────────
-         Jauge de remplissage de la partition NVS + bouton pour
-         formater (effacer toute la config persistée, mais en gardant
-         le SSID et mot de passe WiFi). Le rafraichissement se fait
-         toutes les 5s par le firmware (cache) + 1 appel à l'ouverture
-         de la page pour avoir la valeur immédiate. -->
-    <div class="config-section">
-      <h3>Maintenance — Mémoire flash (NVS)</h3>
-      <div class="nvs-gauge-wrap" id="nvs-gauge-wrap">
-        <div class="nvs-gauge-label">
-          <span>Remplissage partition NVS</span>
-          <span class="pct" id="nvs-pct">—</span>
-        </div>
-        <div class="nvs-gauge"><div class="nvs-gauge-fill" id="nvs-fill"></div></div>
-        <div class="nvs-gauge-detail" id="nvs-detail">Chargement…</div>
-      </div>
-      <div style="display:flex;gap:10px;align-items:center;margin-top:14px;flex-wrap:wrap">
-        <button class="btn btn-ghost btn-sm" onclick="loadNvsStatus()">↻ Actualiser l'état</button>
-        <button class="btn btn-red btn-sm" onclick="formatNvs()">⚠ Formater la mémoire flash</button>
-        <span style="font-size:.72rem;color:var(--text-muted);flex:1">
-          Le formatage efface toute la configuration (sauf le SSID et mot de passe WiFi qui sont recopiés immédiatement après).<br/>
-          Utile en cas de partition NVS saturée ou corrompue.
-        </span>
-      </div>
-    </div>
-
-    <div style="display:flex;gap:10px;justify-content:flex-end;border-top:1px solid var(--border);padding-top:18px">
-      <button class="btn btn-ghost" onclick="loadConfig()">Annuler</button>
-      <button class="btn btn-blue" onclick="saveConfig()">Sauvegarder</button>
-      <button class="btn btn-red" onclick="if(confirm('Redémarrer ?')) api('POST','/api/reset')">Redémarrer</button>
-    </div>
-
-  </div>
-</div>
+const char WEB_HTML2[] PROGMEM =  R"HTML2EOF(
 
 </main>
 </div><!-- #app -->
@@ -1009,91 +113,481 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   </div>
 </div>
 
-<!-- ══ MODAL PROGRAMME ════════════════════════════════ -->
-<div class="modal-overlay" id="sched-modal">
-  <div class="modal" style="min-width:360px">
-    <h3 id="sched-modal-title">Nouveau programme</h3>
-    <input type="hidden" id="sched-edit-valve"/>
-    <input type="hidden" id="sched-edit-idx"/>
-    <div class="form-grid">
-      <div class="form-group">
-        <label>Vanne</label>
-        <select id="sched-valve">
-          <!-- généré JS -->
-        </select>
-      </div>
-      <div class="form-group">
-        <label>Nom programme</label>
-        <input type="text" id="sched-name" placeholder="Nom (optionnel)" />
-      </div>
-      <div class="form-group">
-        <label>Heure</label>
-        <input type="time" id="sched-time" value="06:00"/>
-      </div>
-      <div class="form-group">
-        <label>Mode calendrier</label>
-        <select id="sched-calmode" onchange="updateSchedCalMode()">
-          <option value="0">Hebdomadaire</option>
-          <option value="1">Intervalle</option>
-          <option value="2">Saisonnier</option>
-        </select>
-      </div>
-      <div class="form-group" style="grid-column: 1 / -1">
-        <label>Unité de la durée</label>
-        <div style="display:flex;gap:6px;flex-wrap:wrap">
-          <button type="button" class="day-btn sel" id="sched-unit-sec" onclick="setSchedUnit('sec')">⏱ Durée (s)</button>
-          <button type="button" class="day-btn" id="sched-unit-l"   onclick="setSchedUnit('L')">💧 Volume (L)</button>
-        </div>
-        <div id="sched-dur-row" class="form-group" style="margin-top:8px">
-          <label>Durée (s)</label>
-          <input type="number" id="sched-dur" value="900" min="30" oninput="syncSchedFromSec()"/>
-        </div>
-        <div id="sched-vol-row" class="form-group" style="margin-top:8px;display:none">
-          <label>Volume (L)</label>
-          <input type="number" id="sched-vol" value="20" min="0.1" step="0.1" oninput="syncSchedFromVol()"/>
-          <div id="sched-vol-hint" style="font-size:.72rem;color:var(--text-muted);margin-top:4px">
-            Conversion basée sur le coefficient de calibration de la vanne.
-          </div>
-        </div>
-      </div>
-    </div>
-    <!-- Jours semaine (mode hebdo) -->
-    <div id="sched-days-row">
-      <label style="font-size:.78rem;color:var(--text-muted);display:block;margin-bottom:6px">Jours</label>
-      <div class="days-picker">
-        <span class="day-btn sel" data-d="0">Lun</span>
-        <span class="day-btn sel" data-d="1">Mar</span>
-        <span class="day-btn sel" data-d="2">Mer</span>
-        <span class="day-btn sel" data-d="3">Jeu</span>
-        <span class="day-btn sel" data-d="4">Ven</span>
-        <span class="day-btn" data-d="5">Sam</span>
-        <span class="day-btn" data-d="6">Dim</span>
-      </div>
-    </div>
-    <!-- Mode intervalle -->
-    <div id="sched-interval-row" style="display:none" class="form-group">
-      <label>Tous les N jours</label>
-      <input type="number" id="sched-interval-n" value="2" min="1" max="365"/>
-      <label style="margin-top:8px">Date de départ</label>
-      <input type="date" id="sched-interval-start" />
-    </div>
-    <!-- Mode saison -->
-    <div id="sched-season-row" style="display:none">
-      <div class="form-grid">
-        <div class="form-group"><label>Début (MM-JJ)</label><input type="text" id="sched-season-start" placeholder="04-01"/></div>
-        <div class="form-group"><label>Fin (MM-JJ)</label><input type="text" id="sched-season-end" placeholder="10-31"/></div>
-      </div>
-    </div>
-    <div class="modal-actions" style="margin-top:16px">
-      <button class="btn btn-ghost" onclick="closeModal('sched-modal')">Annuler</button>
-      <button class="btn btn-blue" onclick="saveSched()">Enregistrer</button>
-    </div>
-  </div>
-</div>
+)HTML2EOF";
 
-// Les fonctions JavaScript sont maintenant dans des fichiers séparés
 
-WEB_JS_CORE
+#include "WebHTML_ProgrammesModal.h"
+
+
+const char WEB_JS[] PROGMEM =  R"JSEOF(
+
+
+<script>
+// ══════════════════════════════════════════════════════════
+// STATE
+// ══════════════════════════════════════════════════════════
+let valves = [];
+let schedules = [];    // flat list {valve,idx,...}
+let logEntries = [];
+let sysConfig = {};
+let wsConn = null;
+let calDate = new Date();
+let forceValveIdx = -1;
+
+// CORRECTIF (bugs 2 & 3) : fallback aligné sur le VANNE_COUNT réel du
+// firmware (5 vannes actuellement), au lieu de 8. Utilisé uniquement
+// quand les données serveur (valves[] ou sysConfig.valveNames) ne sont
+// pas encore disponibles (ex: avant la première réponse status/config).
+// Si le nombre de vannes physiques change côté firmware, mettre à jour
+// cette constante en conséquence (ou, mieux, ne plus en avoir besoin du
+// tout le jour où /api/config est garanti répondre avant tout rendu).
+const VALVE_COUNT_FALLBACK = 5;
+
+// Verrou anti-rebuild pendant l'édition d'un programme.
+// Tant que le modal "sched-modal" est ouvert, on ne reconstruit pas
+// le <select id="sched-valve"> au gré des messages STATUS périodiques
+// (WebSocket ~1×/s). Avant ce correctif, buildSchedValveSelect() était
+// appelée à chaque handleStatus() et pouvait perdre/réinitialiser la
+// sélection de vanne en cours d'édition, donnant l'impression que
+// "la vanne 1 revient toute seule".
+let schedModalOpen = false;
+
+const DAY_NAMES = ['Lun','Mar','Mer','Jeu','Ven','Sam','Dim'];
+const MONTH_NAMES = ['Janvier','Février','Mars','Avril','Mai','Juin','Juillet','Août','Septembre','Octobre','Novembre','Décembre'];
+
+// ══════════════════════════════════════════════════════════
+// UTILS
+// ══════════════════════════════════════════════════════════
+function api(method, url, body) {
+  return fetch(url, {
+    method,
+    headers: body ? {'Content-Type':'application/json'} : {},
+    body: body ? JSON.stringify(body) : undefined
+  }).then(r => r.json()).catch(()=>({}));
+}
+
+function fmtSec(s) {
+  if (!s || s <= 0) return '—';
+  const h = Math.floor(s/3600), m = Math.floor((s%3600)/60), sec = s%60;
+  if (h) return `${h}h ${m.toString().padStart(2,'0')}m`;
+  if (m) return `${m}m ${sec.toString().padStart(2,'0')}s`;
+  return `${sec}s`;
+}
+
+function fmtEpoch(e) {
+  if (!e) return '—';
+  const d = new Date(e*1000);
+  return d.toLocaleString('fr-FR',{month:'2-digit',day:'2-digit',hour:'2-digit',minute:'2-digit'});
+}
+
+function weekdayBits(bits) {
+  return DAY_NAMES.filter((_,i)=> bits & (1<<i)).join(' ');
+}
+
+// CORRECTIF (bug 5) : day-of-year désormais calculé en UTC pur, comme dans
+// renderCalendar(), au lieu d'un calcul basé sur l'heure locale du
+// navigateur. Avant ce correctif, les deux fonctions pouvaient diverger
+// d'un jour autour des changements d'heure été/hiver, ce qui désynchronisait
+// le badge affiché sur le calendrier et le texte "Prochain événement" sur
+// la carte de la vanne pour un même programme en mode intervalle.
+function ydayUTC(dt){
+  return Math.floor((Date.UTC(dt.getFullYear(), dt.getMonth(), dt.getDate()) - Date.UTC(dt.getFullYear(),0,1)) / 86400000);
+}
+
+// Vérifie si le programme `s` est actif pour la date `date` (ignore l'heure)
+function scheduleMatchesOnDate(s, date){
+  if(!s || !s.active) return false;
+  const y = date.getFullYear(), m = date.getMonth(), d = date.getDate();
+  if(s.calMode===0){ // hebdo
+    const dow = (date.getDay()+6)%7; return !!(s.weekDays & (1<<dow));
+  }
+  if(s.calMode===1){ // intervalle
+    if(!s.intervalDays || s.intervalDays<=0) return false;
+    // CORRECTIF (bug 5) : calcul en UTC, cohérent avec renderCalendar()
+    const yday = ydayUTC(date);
+    const startMonth = s.intervalStartMonth || 1;
+    const startDay   = s.intervalStartDay   || 1;
+    const startDate = new Date(y, startMonth-1, startDay);
+    const startYday = ydayUTC(startDate);
+    const isLeap = ((y%4===0) && (y%100!==0 || y%400===0));
+    const daysInYear = 365 + (isLeap?1:0);
+    const diff = (yday - startYday + daysInYear) % s.intervalDays;
+    return diff === 0;
+  }
+  if(s.calMode===2){ // saison
+    const md = (m+1)*100 + d;
+    const start = (s.seasonStartMonth||1)*100 + (s.seasonStartDay||1);
+    const end   = (s.seasonEndMonth||12)*100 + (s.seasonEndDay||31);
+    return md>=start && md<=end;
+  }
+  return false;
+}
+
+// Retourne le prochain événement (objet {text,dt,sched}) pour la vanne idx ou null
+function getNextEventForValve(idx){
+  if(!schedules || !schedules.length) return null;
+  const now = new Date();
+  let best = null;
+  for(const s of schedules){
+    if(!s || !s.active) continue;
+    if(s.valve !== idx) continue;
+    // chercher jusqu'à 365 jours
+    for(let off=0; off<366; off++){
+      const cand = new Date(now.getFullYear(), now.getMonth(), now.getDate()+off);
+      if(!scheduleMatchesOnDate(s, cand)) continue;
+      const hh = s.hour || 0, mm = s.minute || 0;
+      const candDt = new Date(cand.getFullYear(), cand.getMonth(), cand.getDate(), hh, mm, 0);
+      if(candDt <= now) continue;
+      if(!best || candDt < best.dt) best = {dt:candDt, sched:s};
+      break; // pour ce programme on prend la première occurrence future
+    }
+  }
+  if(!best) return null;
+  const ms = best.dt - now;
+  const days = Math.floor(ms/86400000);
+  const hours = Math.floor((ms%86400000)/3600000);
+  const minutes = Math.floor((ms%3600000)/60000);
+  const seconds = Math.floor((ms%60000)/1000);
+  let text='';
+  if(days>0) text = `dans ${days} j${days>1?'s':''} à ${String(best.dt.getHours()).padStart(2,'0')}h${String(best.dt.getMinutes()).padStart(2,'0')}`;
+  else if(hours>0) text = `dans ${hours} h ${minutes} m`;
+  else if(minutes>0) text = `dans ${minutes} m ${seconds} s`;
+  else text = `dans ${seconds} s`;
+  return {text,dt:best.dt,sched:best.sched};
+}
+
+function showPage(id, btn) {
+  document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
+  document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
+  document.getElementById('page-'+id).classList.add('active');
+  if(btn) btn.classList.add('active');
+  if(id==='programmes') renderSchedules();
+  if(id==='calendrier') loadSchedules().then(()=>renderCalendar());
+  if(id==='calibration') refreshCalibration();
+  if(id==='journal') loadLog();
+  if(id==='config') loadConfig();
+}
+
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+  if(id==='sched-modal') schedModalOpen = false;
+}
+
+// ══════════════════════════════════════════════════════════
+// CALIBRATION DÉBITMÈTRE
+// ══════════════════════════════════════════════════════════
+function startCalibration(){
+  const dur = parseInt(document.getElementById('calib-duration').value) || 60;
+  const msg = document.getElementById('calib-msg');
+  msg.textContent = 'Démarrage…';
+  msg.style.color = 'var(--text-muted)';
+  api('POST','/api/calibration/start',{durationSec: dur}).then(d=>{
+    if(d && d.ok){
+      msg.textContent = '';
+      document.getElementById('calib-launch-form').style.display = 'none';
+      document.getElementById('calib-progress').style.display = 'block';
+      document.getElementById('calib-phase-badge').textContent = 'EN COURS';
+      document.getElementById('calib-phase-badge').style.background = 'var(--orange-dim)';
+      document.getElementById('calib-phase-badge').style.color = 'var(--orange)';
+      // Polling toutes les 2 s pour suivre la progression
+      if(window._calibPoll) clearInterval(window._calibPoll);
+      window._calibPoll = setInterval(refreshCalibration, 2000);
+      refreshCalibration();
+    } else {
+      msg.textContent = '✗ Échec : ' + (d && d.reason ? d.reason : 'inconnu');
+      msg.style.color = 'var(--red)';
+    }
+  }).catch(err => {
+    msg.textContent = '✗ Erreur réseau : ' + err;
+    msg.style.color = 'var(--red)';
+  });
+}
+
+function abortCalibration(){
+  if(!confirm('Annuler la calibration en cours ?')) return;
+  api('POST','/api/calibration/abort',{}).then(()=>{
+    refreshCalibration();
+  });
+}
+
+function refreshCalibration(){
+  api('GET','/api/calibration/status').then(d=>{
+    if(!d) return;
+    const phase   = d.phase || 'idle';
+    const phaseFr = {idle:'inactif', running:'EN COURS', done:'terminé', aborted:'annulé', failed:'échoué'}[phase] || phase;
+    const badge = document.getElementById('calib-phase-badge');
+    badge.textContent = phaseFr;
+    const colors = {
+      idle:     {bg:'var(--surface2)', fg:'var(--text-muted)'},
+      running:  {bg:'var(--orange-dim)',fg:'var(--orange)'},
+      done:     {bg:'var(--green-dim)', fg:'var(--green)'},
+      aborted:  {bg:'var(--red-dim)',   fg:'var(--red)'},
+      failed:   {bg:'var(--red-dim)',   fg:'var(--red)'},
+    };
+    const c = colors[phase] || colors.idle;
+    badge.style.background = c.bg;
+    badge.style.color      = c.fg;
+
+    // Affichage progression si en cours
+    const progBox = document.getElementById('calib-progress');
+    const launchBox = document.getElementById('calib-launch-form');
+    if(phase === 'running'){
+      progBox.style.display = 'block';
+      launchBox.style.display = 'none';
+      const v = (d.currentValve !== undefined ? d.currentValve : -1);
+      const total = (window.VANNE_COUNT_FALLBACK || 5);
+      document.getElementById('calib-current-valve').textContent = (v >= 0 ? 'V'+v : '—');
+      const remain = d.remainingSec !== undefined ? d.remainingSec : 0;
+      document.getElementById('calib-remaining').textContent = remain + ' s';
+      document.getElementById('calib-progress-valve').textContent = v;
+      document.getElementById('calib-progress-total').textContent  = total;
+      // Barre de progression : % du cycle en cours
+      const durationSec = d.durationSec || 60;
+      const pct = Math.max(0, Math.min(100, ((durationSec - remain) / durationSec) * 100));
+      document.getElementById('calib-bar').style.width = pct.toFixed(1) + '%';
+    } else {
+      progBox.style.display = 'none';
+      launchBox.style.display = 'block';
+      if(window._calibPoll){ clearInterval(window._calibPoll); window._calibPoll = null; }
+    }
+
+    // Tableau des coefficients — on lit depuis /api/consumption si dispo,
+    // sinon on prend d. flowCoeffs s'il est dans le payload.
+    // pulsesPerLitre est désormais fourni par le firmware dans le même
+    // payload (cf. calibStatusJson() côté C++) pour éviter tout
+    // désynchronisation entre la constante embarquée et la valeur utilisée
+    // par l'UI. On retombe sur la valeur par défaut (741.2, alignée sur
+    // PULSES_PER_LITRE dans Globals.h) si jamais le firmware ne la fournit
+    // pas (rétro-compat).
+    const tbody = document.getElementById('calib-coeff-body');
+    if(d.flowCoeffs && Array.isArray(d.flowCoeffs)){
+      // Mémorise les coeffs pour que le modal "Nouveau programme" puisse
+      // convertir une saisie en litres en secondes (sans avoir à faire un
+      // nouvel appel API). On stocke une copie pour éviter toute
+      // référence croisée avec le DOM.
+      window.__flowCoeffs = d.flowCoeffs.map(c => Number(c) || 0);
+      const ppl = (d.pulsesPerLitre && d.pulsesPerLitre > 0)
+                  ? d.pulsesPerLitre
+                  : (window.PULSES_PER_LITRE || 741.2);
+      // Mémorise pour les rafraîchissements successifs (debug / autres pages).
+      window.PULSES_PER_LITRE = ppl;
+      tbody.innerHTML = d.flowCoeffs.map((c,i)=>{
+        const lpm = (c > 0 && ppl > 0) ? (c * 60 / ppl).toFixed(2) : '—';
+        const cdisp = c > 0 ? c.toFixed(3) : '<span style="color:var(--text-muted)">non calibré</span>';
+        return `<tr>
+          <td><strong>V${i}</strong></td>
+          <td style="text-align:right;font-variant-numeric:tabular-nums">${cdisp}</td>
+          <td style="text-align:right;color:var(--blue);font-weight:600">${lpm}</td>
+        </tr>`;
+      }).join('');
+      // Si le modal programme est ouvert, on doit aussi actualiser
+      // l'état "enabled" du toggle Volume pour la vanne courante
+      // (au cas où une nouvelle calibration vient de finir).
+      if(schedModalOpen) refreshSchedUnitAvailability();
+    }
+  });
+}
+// Constantes exposées pour refreshCalibration() — définies plus haut
+// dans le state (VALVE_COUNT_FALLBACK = 5). On garde une référence
+// directe pour éviter un ReferenceError.
+window.VALNE_COUNT_FALLBACK = 5;
+
+// ══════════════════════════════════════════════════════════
+// WEBSOCKET
+// ══════════════════════════════════════════════════════════
+function connectWS() {
+  const wsUrl = 'ws://' + location.host + '/ws';
+  wsConn = new WebSocket(wsUrl);
+  wsConn.onopen = () => {
+    document.getElementById('ws-dot').className = 'ok';
+    document.getElementById('ws-label').textContent = 'Connecté';
+  };
+  wsConn.onclose = () => {
+    document.getElementById('ws-dot').className = '';
+    document.getElementById('ws-label').textContent = 'Déconnecté';
+    setTimeout(connectWS, 3000);
+  };
+  wsConn.onmessage = (ev) => {
+    try {
+      const data = JSON.parse(ev.data);
+      if (data.type === 'STATUS') handleStatus(data);
+      if (data.type === 'LOG') prependLog(data.entry);
+    } catch(e){}
+  };
+}
+
+function handleStatus(data) {
+  // data: {type, uptime, valves:[{name,state,source,remainingSec,openedAt,totalOpenSec},...]}
+  valves = data.valves || valves;
+  // Show uptime and current time (use data.time if provided)
+  let timeStr = '—';
+  if(data.time){
+    const d = new Date(data.time * 1000);
+    timeStr = d.toLocaleString('fr-FR',{hour: '2-digit', minute: '2-digit', second: '2-digit'});
+  }
+  // Bandeau "État du système" — nouvelle UI (cards au lieu d'un texte brut)
+  const upEl  = document.getElementById('uptime-label');
+  const timeEl = document.getElementById('status-time');
+  if (upEl)  upEl.textContent  = fmtSec(data.uptime || 0);
+  if (timeEl) timeEl.textContent = timeStr;
+
+  if (document.getElementById('temps-label')) {
+    document.getElementById('temps-label').textContent =
+      `T1: ${data.temp1 !== undefined ? Number(data.temp1).toFixed(2) : '--'} °C`;
+  }
+  const tempR = document.getElementById('tempsR-label');
+  if (tempR) {
+    tempR.textContent = `TRem: ${data.tempR !== undefined ? Number(data.tempR).toFixed(2) : '--'} °C`;
+  }
+  const litresEl = document.getElementById('litres-label');
+  if (litresEl) {
+    litresEl.textContent = (data.litres !== undefined ? Number(data.litres).toFixed(2) : '--') + ' L';
+  }
+  const pulseEl = document.getElementById('pulse-label');
+  if (pulseEl) {
+    pulseEl.textContent = (data.pulses !== undefined ? data.pulses : '--');
+  }
+  if (document.getElementById('flow-label')) {
+    const flow = data.flow_lpm !== undefined ? Number(data.flow_lpm).toFixed(2) : '0.00';
+    document.getElementById('flow-label').textContent = flow + ' L/min';
+  }
+  // Carte "Santé ESP" : heap libre + état WiFi — masquée, code conservé
+  // pour réutilisation future si on la réactive.
+  /*
+  const heapEl = document.getElementById('heap-label');
+  if (heapEl) {
+    const kb = (data.heap !== undefined ? Math.round(data.heap/1024) : '--');
+    heapEl.textContent = kb + ' KB libres';
+  }
+  const wifiEl = document.getElementById('wifi-label');
+  if (wifiEl) {
+    // data.heap est exposé par le firmware mais pas l'état WiFi directement ;
+    // on le déduit du badge WebSocket déjà mis à jour plus haut.
+    const wsDot = document.getElementById('ws-dot');
+    wifiEl.textContent = wsDot && wsDot.className === 'ok' ? 'WiFi connecté' : 'WiFi —';
+  }
+  */
+  // Badge MQTT (amélioration A) — reflète mqttConnected envoyé par le firmware
+  const mqttDot = document.getElementById('mqtt-dot');
+  const mqttLabel = document.getElementById('mqtt-label');
+  if (mqttDot && mqttLabel && data.mqttConnected !== undefined) {
+    mqttDot.className = data.mqttConnected ? 'ok' : 'off';
+    mqttLabel.textContent = 'MQTT: ' + (data.mqttConnected ? 'connecté' : 'déconnecté');
+  }
+  // Carte "Alarme hydraulique" — reflète data.alarm publié par WsManager
+  // (mêmes champs que MQTT : active / code / msg / sinceSec). L'alarme
+  // reste affichée même après levée (jusqu'à acquittement ou reload) pour
+  // qu'on garde une trace visuelle du dernier incident.
+  const alarmCard  = document.getElementById('alarm-card');
+  const alarmIcon  = document.getElementById('alarm-icon');
+  const alarmLabel = document.getElementById('alarm-label');
+  const alarmSub   = document.getElementById('alarm-sub');
+  if (alarmCard && alarmLabel && alarmIcon && alarmSub && data.alarm) {
+    const a = data.alarm;
+    const code = (a.code !== undefined) ? Number(a.code) : 0;
+    const active = !!a.active;
+    const codeLabel = (code === 1) ? 'NO_FLOW' : (code === 2 ? 'UNEXPECTED_FLOW' : 'OK');
+    if (active) {
+      alarmCard.classList.add('alarm-active');
+      alarmIcon.style.background = 'var(--red-dim)';
+      alarmIcon.querySelector('svg').setAttribute('stroke', 'var(--red)');
+      alarmLabel.style.color = 'var(--red)';
+      alarmLabel.textContent = codeLabel;
+      // Message + durée écoulée depuis le déclenchement
+      const sec = a.sinceSec || 0;
+      const min = Math.floor(sec / 60), s = sec % 60;
+      const dur = (min > 0) ? (min + ' min ' + s + ' s') : (s + ' s');
+      alarmSub.textContent = (a.msg || '—') + ' · depuis ' + dur;
+    } else {
+      alarmCard.classList.remove('alarm-active');
+      alarmIcon.style.background = 'var(--green-dim)';
+      alarmIcon.querySelector('svg').setAttribute('stroke', 'var(--green)');
+      alarmLabel.style.color = 'var(--green)';
+      alarmLabel.textContent = 'Aucune alarme';
+      alarmSub.textContent = (code > 0) ? ('Dernière: ' + codeLabel) : '—';
+    }
+  }
+  // Carte "VanneManuelle" — reflète data.manualValve publié par WsManager
+  // (mêmes champs que pour une vanne standard : litresToday, litresTotal,
+  // flow_lpm, hasFlow). Permet à l'utilisateur de suivre la conso par la
+  // vanne manuelle (robinet en aval du débitmètre) en temps réel.
+  {
+    const todayEl  = document.getElementById('manual-valve-today');
+    const totalEl  = document.getElementById('manual-valve-total');
+    const flowEl   = document.getElementById('manual-valve-flow');
+    const cardEl   = document.getElementById('manual-valve-card');
+    if(todayEl && totalEl && flowEl && cardEl){
+      if(data.manualValve){
+        const mv = data.manualValve;
+        todayEl.textContent = (mv.litresToday || 0).toFixed(2) + ' L';
+        totalEl.textContent = (mv.litresTotal || 0).toFixed(2);
+        const flow = mv.flow_lpm !== undefined ? Number(mv.flow_lpm) : 0;
+        flowEl.textContent = flow.toFixed(2) + ' L/min';
+        // Indicateur visuel : si eau en train de couler (hasFlow=true),
+        // on met un petit point vert clignotant sur la carte.
+        if(mv.hasFlow){
+          cardEl.classList.add('alarm-active'); // réutilise l'animation clignotante
+          flowEl.style.color = 'var(--green)';
+        } else {
+          cardEl.classList.remove('alarm-active');
+          flowEl.style.color = 'var(--blue)';
+        }
+      } else {
+        todayEl.textContent = '— L';
+        totalEl.textContent = '—';
+        flowEl.textContent = '— L/min';
+        cardEl.classList.remove('alarm-active');
+      }
+    }
+  }
+  // Jauge NVS — on l'actualise à chaque STATUS (≈1×/s par le WebSocket)
+  // pour que l'utilisateur suive l'évolution du remplissage en direct
+  // sans avoir à cliquer sur "Actualiser". On ne fait la mise à jour
+  // DOM QUE si la page Config est visible, pour ne pas manipuler
+  // inutilement des éléments cachés.
+  if (data.nvs && document.getElementById('page-config') &&
+      document.getElementById('page-config').classList.contains('active')) {
+    const pctEl = document.getElementById('nvs-pct');
+    const fill  = document.getElementById('nvs-fill');
+    const det   = document.getElementById('nvs-detail');
+    if(pctEl && fill && det){
+      const pct = data.nvs.usedPct || 0;
+      pctEl.textContent = pct + '%';
+      fill.style.width  = pct + '%';
+      fill.classList.remove('warn','danger');
+      if(pct >= 90)      fill.classList.add('danger');
+      else if(pct >= 70) fill.classList.add('warn');
+      det.textContent = `${data.nvs.used} / ${data.nvs.total} entrées utilisées (${data.nvs.free} libres)`;
+    }
+  }
+  // Ne reconstruit le select des vannes du modal programme QUE si ce
+  // dernier n'est pas en cours d'édition — sinon la sélection de
+  // l'utilisateur est préservée jusqu'à la fermeture du modal.
+  if(!schedModalOpen) buildSchedValveSelect();
+  renderValveCards();
+  
+  if (data.ioOut && data.ioLed && data.ioIn) {
+    const buildRow = (label, arr) => {
+      let r = `<tr><td style="text-align:left; font-weight:bold">${label}</td>`;
+      for(let i=0; i<8; i++) {
+        const val = arr[i];
+        if(val < 0) r += `<td style="color:var(--text-muted)">--</td>`;
+        else r += `<td><span style="display:inline-block;width:24px;height:24px;line-height:24px;border-radius:4px;background:${val===1?'var(--green)':'var(--surface2)'};color:${val===1?'#fff':''}">${val}</span></td>`;
+      }
+      return r + `</tr>`;
+    };
+    const html = buildRow('oPD', data.ioOut) + buildRow('oPA', data.ioLed) + buildRow('In', data.ioIn);
+    const tbody = document.getElementById('io-body');
+    if(tbody) tbody.innerHTML = html;
+  }
+  // Pulse info via WS (if present)
+  if(data.pulses !== undefined){
+    const p = data.pulses || 0;
+    const l = data.litres || 0;
+    const elP = document.getElementById('pulse-count'); if(elP) elP.textContent = p;
+    const elL = document.getElementById('pulse-litres'); if(elL) elL.textContent = l.toFixed(2);
+  }
+}
 
 
 
@@ -1133,7 +627,7 @@ function renderValveCards() {
       // Débit mesuré > 0 : on affiche la valeur réelle. Couleur bleue
       // pour signaler "mesure live". Tooltip rappelle qu'il s'agit
       // d'une moyenne lissée sur FLOW_WINDOW_MS (4 s).
-      lpmHtml = `<span class="vc-flow" title="Débit instantané mesuré (moyenne lissée sur ~4 s)">💧 ${_liveFlow.toFixed(2)} L/min</span>`;
+      lpmHtml = `<span class="vc-flow" title="Débit instantané mesuré (moyenne lissée sur ~4 s)">? ${_liveFlow.toFixed(2)} L/min</span>`;
     } else if(_capLpm > 0){
       // Pas (encore) de débit mesuré, vanne calibrée : on affiche la
       // capacité théorique. Couleur discrète pour différencier d'une
@@ -1172,7 +666,7 @@ function renderValveCards() {
                    ? (s.durationSec * fc / ppl).toFixed(2) + ' L'
                    : null;
       const volHtml = vol
-        ? `<span style="color:var(--blue);font-weight:600;margin-left:4px">💧 ${vol}</span>`
+        ? `<span style="color:var(--blue);font-weight:600;margin-left:4px">? ${vol}</span>`
         : '';
       nextHtml = `
         <div style="color:var(--text);font-weight:600;margin-bottom:3px">${name}</div>
@@ -1196,12 +690,12 @@ function renderValveCards() {
       const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
       if(fc > 0 && ppl > 0){
         const l = (fc * (v.remainingSec || 0)) / ppl;
-        remainingLitresHtml = `<div class="vc-remaining-l"><span class="vc-remaining-l-label">💧 Restant</span>${l.toFixed(2)} L</div>`;
+        remainingLitresHtml = `<div class="vc-remaining-l"><span class="vc-remaining-l-label">? Restant</span>${l.toFixed(2)} L</div>`;
       } else {
         // Vanne ouverte mais pas (encore) calibrée : on affiche un libellé
         // discret plutôt qu'une valeur inventée, pour rester honnête avec
         // l'utilisateur. "calibrer" est cliquable vers la page calibration.
-        remainingLitresHtml = `<div class="vc-remaining-l" style="color:var(--text-muted);font-weight:500"><span class="vc-remaining-l-label">💧 Restant</span>— (non calibré)</div>`;
+        remainingLitresHtml = `<div class="vc-remaining-l" style="color:var(--text-muted);font-weight:500"><span class="vc-remaining-l-label">? Restant</span>— (non calibré)</div>`;
       }
     }
     return `
@@ -1217,7 +711,7 @@ function renderValveCards() {
         Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
       <div style="margin: 4px 0 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
         <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue);display:flex;align-items:center;gap:6px">
-          💧 Aujourd'hui: <strong>${(v.litresToday||0).toFixed(2)} L</strong>
+          ? Aujourd'hui: <strong>${(v.litresToday||0).toFixed(2)} L</strong>
           <button class="btn" style="padding:0 4px;height:18px;font-size:0.6rem;font-weight:bold;background:var(--blue);color:#fff;border:none;border-radius:10px" onclick="resetValveCons(${i}, 'today')" title="Remettre le jour à zéro">RAZ</button>
         </span>
         <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--surface2);color:var(--text-muted);display:flex;align-items:center;gap:6px">
@@ -1919,7 +1413,38 @@ function renderCalendar() {
   });
 }
 
-WEB_JS_CORE
+// ══════════════════════════════════════════════════════════
+// JOURNAL
+// ══════════════════════════════════════════════════════════
+function loadLog() {
+  api('GET','/api/log?n=200').then(data=>{
+    logEntries = data||[];
+    document.getElementById('log-count').textContent = logEntries.length + ' événements';
+    renderLog();
+  });
+}
+
+function renderLog() {
+  const list = document.getElementById('log-list');
+  if(!logEntries.length){
+    list.innerHTML='<div style="padding:24px;text-align:center;color:var(--text-muted)">Aucun événement</div>';
+    return;
+  }
+  list.innerHTML = [...logEntries].reverse().map(e=>{
+    const dt = e.epoch ? new Date(e.epoch*1000).toLocaleString('fr-FR') : '—';
+    const badge = e.valve==='SYS'
+      ? '<span class="log-badge sys">SYS</span>'
+      : `<span class="log-badge v">V${e.valve}</span>`;
+    return `<div class="log-entry"><span class="log-ts">${dt}</span>${badge}<span class="log-msg">${e.msg}</span></div>`;
+  }).join('');
+}
+
+function prependLog(entry) {
+  logEntries.push(entry);
+  if(logEntries.length>1000) logEntries.shift();
+  const list=document.getElementById('log-list');
+  if(list && document.getElementById('page-journal').classList.contains('active')) renderLog();
+}
 
 // ══════════════════════════════════════════════════════════
 // CONFIGURATION
@@ -2245,15 +1770,187 @@ function resetPulse(){
   api('POST','/api/pulse/reset').then(r=>{ refreshPulse(); refreshConsumption(); alert('Compteur + suivi par vanne remis à zéro'); });
 }
 
+function resetManualValve(){
+  if(!confirm('Remettre à zéro le compteur VanneManuelle ?\n\nCela ne touche pas le compteur global ni les vannes automatisées.')) return;
+  api('POST','/api/manual_valve/reset').then(r=>{
+    refreshPulse();
+    refreshConsumption();
+    // Force un refresh du status pour mettre à jour la carte VanneManuelle
+    requestStatus();
+    alert('Compteur VanneManuelle remis à zéro');
+  });
+}
+
 function fmtYMD(v){
   if(!v || v<10000000) return '—';
   const s = String(v);
   return s.substring(6,8)+'/'+s.substring(4,6);
 }
 
-WEB_JS_CONFIG
+function refreshConsumption(){
+  api('GET','/api/consumption').then(d=>{
+    if(!d || !d.valves){
+      const msg = '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:18px">Pas de données</td></tr>';
+      const tb1 = document.getElementById('cons-body');
+      const tb2 = document.getElementById('status-cons-body');
+      if(tb1) tb1.innerHTML = msg;
+      if(tb2) tb2.innerHTML = msg.replace('colspan="5"','colspan="4"');
+      return;
+    }
+    // Mémorise les flowCoeffs exposés par /api/consumption pour qu'ils
+    // soient disponibles au moment où l'utilisateur ouvre le modal
+    // "Nouveau programme" sans avoir à attendre un passage par l'onglet
+    // Calibration (autre source d'initialisation de window.__flowCoeffs).
+    if(Array.isArray(d.valves)){
+      // Initialise le tableau si pas déjà fait (sinon on conserve
+      // d'éventuelles valeurs plus précises venues de /api/calibration/status).
+      if(!window.__flowCoeffs || !window.__flowCoeffs.length){
+        window.__flowCoeffs = d.valves.map(v => Number(v.flowCoeff) || 0);
+      } else {
+        // Met à jour seulement les entrées qui étaient à 0 (pas calibrées) :
+        // la calibration reste la source de vérité la plus précise.
+        d.valves.forEach((v, i) => {
+          if(!window.__flowCoeffs[i] && v.flowCoeff && v.flowCoeff > 0){
+            window.__flowCoeffs[i] = Number(v.flowCoeff);
+          }
+        });
+      }
+    }
+    // Version longue pour la page Configuration (5 colonnes : nom + détails 14j)
+    const longHtml = d.valves.map(v=>{
+      const detail = (v.history && v.history.length)
+        ? v.history.slice().reverse().map(h=>`<span style="display:inline-block;padding:2px 6px;margin:2px;border-radius:4px;background:var(--surface2);color:var(--text);font-size:.72rem">${fmtYMD(h.ymd)}: <strong>${(h.litres||0).toFixed(1)} L</strong></span>`).join('')
+        : '<span style="color:var(--text-muted)">—</span>';
+      return `<tr>
+        <td><strong>V${v.valve}</strong></td>
+        <td>${v.name||'V'+v.valve}</td>
+        <td style="color:var(--blue);font-weight:600">${(v.litresToday||0).toFixed(2)}</td>
+        <td>${(v.litresTotal||0).toFixed(2)}</td>
+        <td>${detail}</td>
+      </tr>`;
+    }).join('');
+    // Version compacte pour la boîte "État du système" du dashboard
+    // (5 colonnes, sans l'historique détaillé — plus lisible sur petit écran).
+    // La 5e colonne "Débit (live)" réutilise v.instantFlowLpm exposé
+    // par /api/consumption (même calcul que valves[i].flow_lpm dans
+    // buildStatusJson() côté WebSocket, lissé sur FLOW_WINDOW_MS = 4s).
+    // On retrouve la valeur par vanne en cherchant dans valves[] (le
+    // cache global rafraîchi par handleStatus), plutôt que d'appeler
+    // /api/status — ça évite un round-trip HTTP et garantit la
+    // cohérence visuelle entre le badge des cartes de vanne et cette
+    // colonne du tableau (même source, même valeur).
+    const shortHtml = d.valves.map(v=>{
+      const today  = v.litresToday  || 0;
+      const total  = v.litresTotal  || 0;
+      // Récupère la valeur live du cache (valves[] est mis à jour 1×/s par
+      // handleStatus). Fallback sur l'instantFlowLpm exposé par
+      // /api/consumption si jamais le WS n'a pas encore reçu de STATUS.
+      let flowLpm = null;
+      if(Array.isArray(valves) && valves[v.valve] && valves[v.valve].flow_lpm !== undefined){
+        flowLpm = Number(valves[v.valve].flow_lpm);
+      } else if(v.instantFlowLpm !== undefined){
+        flowLpm = Number(v.instantFlowLpm);
+      }
+      let flowCell;
+      if(flowLpm !== null && !isNaN(flowLpm) && flowLpm > 0.005){
+        flowCell = `<span style="color:var(--blue);font-weight:600">${flowLpm.toFixed(2)}</span>`;
+      } else {
+        flowCell = '<span style="color:var(--text-muted)">0.00</span>';
+      }
+      return `<tr>
+        <td><strong>V${v.valve}</strong></td>
+        <td>${v.name||'V'+v.valve}</td>
+        <td style="text-align:right;color:${today>0?'var(--blue)':'var(--text-muted)'};font-weight:600">${today.toFixed(2)} L</td>
+        <td style="text-align:right">${total.toFixed(2)} L</td>
+        <td style="text-align:right">${flowCell} <span style="color:var(--text-muted);font-size:.7rem">L/min</span></td>
+      </tr>`;
+    }).join('');
+    // ── Ligne "VanneManuelle" (si exposée par /api/consumption) ──
+    let manualRow = '';
+    if(d.manualValve){
+      const mv = d.manualValve;
+      const mvToday  = mv.litresToday  || 0;
+      const mvTotal  = mv.litresTotal  || 0;
+      const mvFlow   = mv.instantFlowLpm || 0;
+      const mvFlowCell = (mvFlow > 0.005)
+        ? `<span style="color:var(--blue);font-weight:600">${mvFlow.toFixed(2)}</span>`
+        : '<span style="color:var(--text-muted)">0.00</span>';
+      manualRow = `<tr style="border-top:2px solid var(--border)">
+        <td><strong style="color:var(--blue)">Man</strong></td>
+        <td>VanneManuelle</td>
+        <td style="text-align:right;color:${mvToday>0?'var(--blue)':'var(--text-muted)'};font-weight:600">${mvToday.toFixed(2)} L</td>
+        <td style="text-align:right">${mvTotal.toFixed(2)} L</td>
+        <td style="text-align:right">${mvFlowCell} <span style="color:var(--text-muted);font-size:.7rem">L/min</span></td>
+      </tr>`;
+    }
+    const tb1 = document.getElementById('cons-body');
+    const tb2 = document.getElementById('status-cons-body');
+    if(tb1) tb1.innerHTML = longHtml;
+    if(tb2) tb2.innerHTML = (shortHtml + manualRow) || '<tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:10px">—</td></tr>';
+  });
+}
+
+// ══════════════════════════════════════════════════════════
+// INIT
+// ══════════════════════════════════════════════════════════
+function buildSchedValveSelect() {
+  const sel = document.getElementById('sched-valve');
+  // CORRECTIF (bug 3) : fallback aligné sur VALVE_COUNT_FALLBACK (5) au lieu
+  // de 8 — évite de proposer des vannes fantômes (V6/V7/V8) dans le modal
+  // programme si l'utilisateur clique "+ Ajouter" avant la première réponse
+  // status/config qui peuple le tableau valves[].
+  const count = (valves && valves.length) ? valves.length : VALVE_COUNT_FALLBACK;
+  const prev = sel.value;
+  sel.innerHTML = Array.from({length:count},(_,i)=>`<option value="${i}">${(valves[i]&&valves[i].name)?('V'+i+' — '+valves[i].name):('V'+i)}</option>`).join('');
+  // restore previous selection if still valid
+  if(prev !== undefined && prev !== null && prev !== ''){
+    const opt = sel.querySelector(`option[value="${prev}"]`);
+    if(opt) sel.value = prev;
+  }
+  // Listener "change" : à chaque changement de vanne, on ré-évalue
+  // la disponibilité du mode Volume (la vanne cible a son propre
+  // flowCoeff) et on resynchronise le champ litres↔secondes.
+  // On attache le listener en mode "une fois" pour ne pas empiler
+  // des handlers à chaque reconstruction du <select>.
+  if(!sel.dataset.listenerAttached){
+    sel.addEventListener('change', () => {
+      if(schedModalOpen){
+        refreshSchedUnitAvailability();
+        // Si on est en mode secondes, on recalcule le champ litres
+        // miroir ; si on est en mode litres, le champ secondes
+        // miroir (les deux fonctions no-op sur le mode opposé).
+        if(schedUnit === 'sec')      syncSchedFromSec();
+        else if(schedUnit === 'L')   syncSchedFromVol();
+      }
+    });
+    sel.dataset.listenerAttached = '1';
+  }
+}
+
+function init() {
+  buildSchedValveSelect();
+  connectWS();
+  requestStatus();
+  refreshPulse();
+  refreshConsumption();
+  loadSchedules();
+  // Charge aussi les coefficients de calibration au boot : ils sont
+  // nécessaires au calcul du "volume restant" sur les cartes vanne du
+  // dashboard (cf. renderValveCards). Sans cet appel, le premier
+  // affichage après chargement de la page n'aurait que "— (non
+  // calibré)" pour toutes les vannes, même celles déjà calibrées.
+  // L'appel est léger (StaticJsonDocument de quelques centaines d'octets)
+  // et idempotent : refreshCalibration() se contente de mettre à jour
+  // window.__flowCoeffs et window.PULSES_PER_LITRE.
+  refreshCalibration();
+  // Actualisation auto toutes les 10s si WS déconnecté
+  setInterval(()=>{ if(!wsConn||wsConn.readyState!==1) requestStatus(); }, 10000);
+  // La conso par vanne change lentement, on rafraîchit toutes les 30 s
+  setInterval(refreshConsumption, 30000);
+}
+
+init();
 </script>
 </body>
 </html>
-)HTMLEOF";
-
+)JSEOF";

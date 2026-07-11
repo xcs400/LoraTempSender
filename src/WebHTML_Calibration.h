@@ -2,8 +2,22 @@
 // ============================================================
 // WebHTML_Calibration.h — Page Calibration HTML
 // ============================================================
+// Contenu identique à l'ancien bloc PAGE CALIBRATION de WebContent.h.
+// IDs conservés à l'identique pour que refreshCalibration() (JS dans
+// WebContent.h) retrouve tous les éléments qu'il manipule :
+//   • calib-phase-badge, calib-launch-form, calib-progress
+//   • calib-duration, calib-start-btn, calib-abort-btn, calib-msg
+//   • calib-current-valve, calib-remaining, calib-bar
+//   • calib-progress-valve, calib-progress-total
+//   • calib-coeff-body
+// Ne pas modifier les IDs sans mettre à jour refreshCalibration() en
+// parallèle.
 
-#define WEB_CALIBRATION_HTML R"HTML(
+
+
+const char WEB_CALIBRATION_HTML[] PROGMEM = R"HTML(
+
+
 <!-- ══ PAGE CALIBRATION ═════════════════════════════════ -->
 <div id="page-calibration" class="page">
   <div class="card">
@@ -12,7 +26,7 @@
       <span id="calib-phase-badge" class="badge" style="background:var(--surface2);color:var(--text-muted);font-size:.75rem">inactif</span>
     </div>
 
-    <div style="padding:8px 4px 16px;color:var(--text-muted;font-size:.86rem;line-height:1.5">
+    <div style="padding:8px 4px 16px;color:var(--text-muted);font-size:.86rem;line-height:1.5">
       La calibration mesure le débit de chaque vanne <strong>une par une</strong>, en l'ouvrant
       seule pendant la durée choisie. Le coefficient <code>flowCoeff</code> (en pulses/seconde)
       est calculé automatiquement et utilisé pour répartir les pulses globaux entre vannes
@@ -43,30 +57,49 @@
       </div>
     </div>
 
-    <!-- Tableau des coefficients -->
-    <div class="config-section">
-      <h3>Coefficients de calibration</h3>
-      <div style="overflow-x:auto">
-        <table class="tbl">
-          <thead>
-            <tr>
-              <th>Vanne</th>
-              <th>Nom</th>
-              <th>flowCoeff (pulses/s)</th>
-              <th title="Estimation débit nominal (L/min)">Estim. débit</th>
-              <th title="Capacité calibrée (L/min)">Capacité</th>
-            </tr>
-          </thead>
-          <tbody id="calib-tbl-body">
-            <tr><td colspan="5" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
-          </tbody>
-        </table>
+    <!-- Progression en direct -->
+    <div class="config-section" id="calib-progress" style="display:none">
+      <h3>Progression</h3>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:14px">
+        <div>
+          <div style="font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Vanne en cours</div>
+          <div style="font-size:1.5rem;font-weight:700" id="calib-current-valve">—</div>
+        </div>
+        <div>
+          <div style="font-size:.78rem;color:var(--text-muted);text-transform:uppercase;letter-spacing:.5px">Temps restant</div>
+          <div style="font-size:1.5rem;font-weight:700;color:var(--blue)" id="calib-remaining">— s</div>
+        </div>
       </div>
-      <div style="margin-top:12px;font-size:.8rem;color:var(--text-muted">
-        <strong>Capacité calibrée</strong> = flowCoeff / PULSES_PER_LITRE × 60.
-        Si une vanne n'a jamais été calibrée, flowCoeff = 0 → capacité = 0 L/min.
+      <div style="background:var(--bg);border-radius:8px;height:8px;overflow:hidden;margin-bottom:6px">
+        <div id="calib-bar" style="height:100%;background:var(--green);width:0%;transition:width 0.5s linear"></div>
+      </div>
+      <div style="font-size:.78rem;color:var(--text-muted);text-align:right">
+        Vanne <span id="calib-progress-valve">0</span> / <span id="calib-progress-total">0</span>
       </div>
     </div>
+
+    <!-- Résultats -->
+    <div class="config-section">
+      <h3>Coefficients actuels</h3>
+      <div style="font-size:.78rem;color:var(--text-muted);margin-bottom:10px">
+        Mis à jour automatiquement après une calibration. Le firmware les utilise pour
+        pondérer la répartition des pulses entre vannes ouvertes simultanément.
+      </div>
+      <table class="tbl" style="max-width:500px">
+        <thead>
+          <tr>
+            <th>Vanne</th>
+            <th style="text-align:right">flowCoeff (pulses/s)</th>
+            <th style="text-align:right">Équiv. L/min</th>
+          </tr>
+        </thead>
+        <tbody id="calib-coeff-body">
+          <tr><td colspan="3" style="text-align:center;color:var(--text-muted);padding:18px">Chargement…</td></tr>
+        </tbody>
+      </table>
+    </div>
+
   </div>
 </div>
+
 )HTML";

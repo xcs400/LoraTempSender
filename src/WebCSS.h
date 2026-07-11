@@ -3,7 +3,8 @@
 // WebCSS.h — Styles CSS de l'interface web
 // ============================================================
 
-#define WEB_CSS_HTML R"CSS(
+const char WEB_CSS[] PROGMEM = R"CSS(
+<style>
 /* ── TOKENS ─────────────────────────────────────────── */
 :root {
   --bg:        #0d1117;
@@ -432,4 +433,5 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   border-top:1px solid var(--border);
   font-variant-numeric:tabular-nums;
 }
+</style>
 )CSS";
