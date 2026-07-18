@@ -103,6 +103,47 @@
 //    dériver de ±1 pulse — trade-off très largement préférable à un
 //    pulsesTotal corrompu à ~2 milliards.
 inline void pulseDistribute(unsigned long totalPulsesGlobal){
+    // ── ROLLOVER JOURNALIER (vérification indépendante des pulses) ──
+    // IMPORTANT : ce rollover doit être vérifié ICI, AVANT les early returns,
+    // car à minuit sans pulses, delta=0 et la fonction retournait avant
+    // d'atteindre le code de rollover. Le rollover doit fonctionner
+    // indépendamment de la présence de pulses.
+    {
+        uint16_t todayAll = todayYMD();
+        if(todayAll != 0){
+            for(int i=0;i<VANNE_COUNT;i++){
+                if(todayAll != valveCons[i].todayYmd){
+                    // Clôture éventuelle du jour précédent dans l'historique
+                    if(valveCons[i].todayYmd != 0 && valveCons[i].todayPulses > 0){
+                        DayStat ds;
+                        ds.ymd = valveCons[i].todayYmd;
+                        ds.pulses = valveCons[i].todayPulses;
+                        ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
+                        valveCons[i].history[valveCons[i].todayIdx % CONS_HISTORY_DAYS] = ds;
+                        valveCons[i].todayIdx = (uint16_t)((valveCons[i].todayIdx + 1) % CONS_HISTORY_DAYS);
+                    }
+                    valveCons[i].todayYmd = todayAll;
+                    valveCons[i].todayPulses = 0;
+                    valveConsMarkDirty(i);
+                }
+            }
+            // ROLLOVER de la vanne manuelle
+            if(todayAll != manualValveState.todayYmd){
+                if(manualValveState.todayYmd != 0 && manualValveState.todayPulses > 0){
+                    DayStat ds;
+                    ds.ymd    = manualValveState.todayYmd;
+                    ds.pulses = manualValveState.todayPulses;
+                    ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
+                    manualValveState.history[manualValveState.todayIdx % CONS_HISTORY_DAYS] = ds;
+                    manualValveState.todayIdx = (uint16_t)((manualValveState.todayIdx + 1) % CONS_HISTORY_DAYS);
+                }
+                manualValveState.todayYmd    = todayAll;
+                manualValveState.todayPulses = 0;
+                manualValveDirty = true;
+            }
+        }
+    }
+
     if(totalPulsesGlobal < lastDistributedTotal){
         // Compteur régressé (RAZ via Web) : on resynchronise sans attribution
         lastDistributedTotal = totalPulsesGlobal;
@@ -140,25 +181,6 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
         // que pour les vannes, pour ne perdre aucun pulse sur des débits
         // très faibles. Voir plus bas le bloc "Répartition par
         // accumulateur d'erreur" pour le détail.
-        uint16_t todayMV = todayYMD(); // déclaré ici (la branche avec vannes
-                                       // ouvertes le redéclare plus bas en
-                                       // réutilisant la même variable).
-        // ── ROLLOVER JOURNALIER (vanne manuelle) ──
-        // Si on a changé de jour, on capture l'ancien jour dans
-        // l'historique AVANT de remettre todayPulses à 0 (cohérent avec
-        // ce qui est fait pour les vannes dans le bloc plus bas).
-        if(todayMV != manualValveState.todayYmd){
-            if(manualValveState.todayYmd != 0 && manualValveState.todayPulses > 0){
-                DayStat ds;
-                ds.ymd    = manualValveState.todayYmd;
-                ds.pulses = manualValveState.todayPulses;
-                ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
-                manualValveState.history[manualValveState.todayIdx % CONS_HISTORY_DAYS] = ds;
-                manualValveState.todayIdx = (uint16_t)((manualValveState.todayIdx + 1) % CONS_HISTORY_DAYS);
-            }
-            manualValveState.todayYmd    = todayMV;
-            manualValveState.todayPulses = 0;
-        }
         // ── Attribution des pulses à la vanne manuelle ──
         // Tous les pulses delta (puisqu'aucune vanne n'est ouverte) vont
         // à la vanne manuelle, modulo le carry. flowCoeff=1.0 (pas de
@@ -236,77 +258,8 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
         }
     }
 
-    // ── ROLLOVER JOURNALIER GLOBAL (toutes vannes + vanne manuelle) ──
-    // Avant le fix, ce bloc était à l'intérieur de la boucle suivante
-    // (`for(int i=0;...){ if(!valves[i].isOpen) continue; ... }`), ce qui
-    // avait deux effets pervers :
-    //   1) Les vannes FERMÉES à minuit n'avaient JAMAIS leur todayYmd
-    //      remis à jour, donc leur `litres_today` restait collé à la
-    //      valeur d'hier sur le broker MQTT (retained) tant qu'elles
-    //      ne rouvraient pas. Symptôme : "la vanne 3 dit qu'elle a
-    //      consommé 12 L aujourd'hui alors qu'elle n'a pas bougé depuis
-    //      hier soir".
-    //   2) La condition `todayYmd == today` (utilisée par mqttPublishState,
-    //      WsManager.h, WebManager.h pour publier 0 si autre jour) restait
-    //      fausse pour les vannes fermées → la valeur était publiée
-    //      comme "litres_today = pulsesTotal / PULSES_PER_LITRE" (car
-    //      le ternaire `todayYmd == today ? todayPulses : 0` tombait
-    //      dans la branche 0 et la valeur affichée était 0, MAIS le
-    //      total pulsesTotal continuait à être incrémenté par
-    //      d'autres vannes, donc litresToday sur le broker était
-    //      désynchronisé du todayPulses RAM).
-    //
-    // On fait donc UNE passe unique en amont sur TOUTES les vannes, fermées
-    // ou ouvertes. Coût négligeable (5 vannes × ~5 lignes) et résout le
-    // problème de désynchronisation MQTT à la racine.
-    //
-    // On en profite pour appliquer le MÊME rollover à `manualValveState`
-    // (VanneManuelle) : sans ça, le rollover journalier de la vanne
-    // manuelle ne se déclencherait QUE dans la branche `openCount==0`
-    // ci-dessus, c'est-à-dire UNIQUEMENT quand on est en train d'attribuer
-    // des pulses à la vanne manuelle. Si une vanne automatisée s'ouvre à
-    // 00:00:01 pile, le rollover de la vanne manuelle serait repoussé à
-    // la prochaine nuit où la vanne manuelle reçoit des pulses — pas
-    // acceptable, la valeur MQTT retained pourrait afficher 2 jours
-    // décalés pendant 24h.
-    {
-        uint16_t todayAll = today;
-        for(int i=0;i<VANNE_COUNT;i++){
-            if(todayAll != valveCons[i].todayYmd){
-                // Clôture éventuelle du jour précédent dans l'historique
-                if(valveCons[i].todayYmd != 0 && valveCons[i].todayPulses > 0){
-                    DayStat ds;
-                    ds.ymd = valveCons[i].todayYmd;
-                    ds.pulses = valveCons[i].todayPulses;
-                    ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
-                    valveCons[i].history[valveCons[i].todayIdx % CONS_HISTORY_DAYS] = ds;
-                    valveCons[i].todayIdx = (uint16_t)((valveCons[i].todayIdx + 1) % CONS_HISTORY_DAYS);
-                }
-                valveCons[i].todayYmd = todayAll;
-                valveCons[i].todayPulses = 0;
-            }
-        }
-        // ROLLOVER de la vanne manuelle (même logique, une seule itération)
-        if(todayAll != manualValveState.todayYmd){
-            if(manualValveState.todayYmd != 0 && manualValveState.todayPulses > 0){
-                DayStat ds;
-                ds.ymd    = manualValveState.todayYmd;
-                ds.pulses = manualValveState.todayPulses;
-                ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
-                manualValveState.history[manualValveState.todayIdx % CONS_HISTORY_DAYS] = ds;
-                manualValveState.todayIdx = (uint16_t)((manualValveState.todayIdx + 1) % CONS_HISTORY_DAYS);
-            }
-            manualValveState.todayYmd    = todayAll;
-            manualValveState.todayPulses = 0;
-        }
-    }
-
     for(int i=0;i<VANNE_COUNT;i++){
         if(!valves[i].isOpen) continue;
-        // NB : le rollover journalier a déjà été appliqué en amont (voir
-        // le bloc "ROLLOVER JOURNALIER GLOBAL" juste au-dessus). On n'a
-        // plus besoin de le re-vérifier ici — todayYmd == today est
-        // garanti par construction.
         valveCons[i].pulsesTotal += shares[i];
         valveCons[i].todayPulses += shares[i];
     }

@@ -6,7 +6,7 @@
 // Schéma HA : <prefix>/<component>/<mqttId>/<object_id>/config retained.
 // Commandes HA : <prefix>/switch/<mqttId>/<objId>/set → valveHardOpen/Close.
 //
-// Mécanismes de fiabilité :
+// Mécanismes de fiabilité conservés (voir discussion) :
 //   - Watchdog d'inactivité : armé uniquement sur PUBACK/SUBACK/message reçu
 //     (un publish() QoS 0 ne prouve rien sur l'état réel de la session).
 //   - Canari QoS 1 toutes les 45s (< keepAlive 60s) comme preuve de vie.
@@ -14,6 +14,20 @@
 //   - Backoff exponentiel 5/10/20/40/60s plafonné à 10 échecs.
 //   - LWT sur <prefix>/<mqttId>/availability (static String — voir mqttSetup).
 //   - IPAddress pour setServer() (char* numérique = bug hostname ESP32-S3).
+//
+// Simplifications apportées vs version précédente :
+//   - Suppression du double sondage TCP manuel (setup + loop) : redondant
+//     avec onMqttDisconnect(), qui donne déjà la raison de l'échec.
+//   - mqttSetup() n'est plus bloquant (plus de boucle connect()+delay()) :
+//     mqttLoop() gère déjà proprement les retries avec backoff.
+//   - Discovery HA : entités "sensor" par vanne générées via une table
+//     (ValveSensorDef[]) au lieu de 5 blocs JSON copiés-collés.
+//   - Recovery MQTT (CONS_MQTT_ONLY) : comparaison + log factorisés dans
+//     mqttRecoverIfGreater(), le rollover journalier via la macro
+//     MQTT_ROLLOVER_TODAY() (les champs todayYmd sont des bitfields et
+//     ne supportent pas une prise de référence).
+//   - Reset des compteurs vanne / vanne-manuelle factorisé dans
+//     resetValveCounters() / resetManualValveCounters().
 // ============================================================
 
 #include "Globals.h"
@@ -41,6 +55,10 @@ inline unsigned long lastMqttDownHeartbeatMs  = 0;
 #define MQTT_FORCED_RECONNECT_MS 900000UL // 15 min
 #endif
 
+// ────────────────────────────────────────────────────────────
+// Helpers topics / payloads
+// ────────────────────────────────────────────────────────────
+
 inline String mqttTopic(const char* component, const char* objId){
     // ex: homeassistant/sensor/irrpro_hs3/temperature1
     String s;
@@ -62,6 +80,10 @@ inline String mqttTopicNode(){
     s += '/';
     s += sysConfig.mqttId;
     return s;
+}
+
+inline String mqttAvailabilityTopic(){
+    return mqttTopicNode() + "/availability";
 }
 
 inline String mqttPayloadFloat(float value){
@@ -104,6 +126,12 @@ inline void injectDevice(JsonObject doc){
     }
 }
 
+// Champs d'availability communs à toutes les entités HA
+inline void fillAvailability(JsonObject doc){
+    doc["availability_topic"]    = mqttAvailabilityTopic();
+    doc["payload_available"]     = "online";
+    doc["payload_not_available"] = "offline";
+}
 
 inline bool parseValveObjId(const String& objId, const char* suffix, int& vOut){
     if(!objId.startsWith("valve_") || !objId.endsWith(suffix)) return false;
@@ -114,318 +142,177 @@ inline bool parseValveObjId(const String& objId, const char* suffix, int& vOut){
     return vOut >= 0 && vOut < VANNE_COUNT;
 }
 
+// ────────────────────────────────────────────────────────────
+// Discovery HA — helpers génériques par type d'entité
+// ────────────────────────────────────────────────────────────
+
+// entityObjId : object_id/unique_id (peut différer du topicId, ex. switch)
+inline void publishSensorDiscovery(const char* topicId, const char* entityObjId, const String& name,
+                                    const char* unit, const char* deviceClass, const char* stateClass,
+                                    const char* icon = nullptr){
+    StaticJsonDocument<512> doc;
+    doc["name"]      = name;
+    doc["object_id"] = String(entityObjId);
+    doc["unique_id"] = String(sysConfig.mqttId) + "_" + entityObjId;
+    doc["state_topic"] = mqttTopic("sensor", topicId);
+    fillAvailability(doc.as<JsonObject>());
+    if(unit && unit[0])        doc["unit_of_measurement"] = unit;
+    if(deviceClass && deviceClass[0]) doc["device_class"] = deviceClass;
+    if(stateClass && stateClass[0])   doc["state_class"]  = stateClass;
+    if(icon && icon[0])        doc["icon"] = icon;
+    injectDevice(doc.as<JsonObject>());
+    String out; serializeJson(doc, out);
+    mqttPublishConfig("sensor", topicId, out);
+}
+
+inline void publishButtonDiscovery(const char* objId, const String& name, const char* icon = "mdi:water-minus"){
+    StaticJsonDocument<512> doc;
+    doc["name"]          = name;
+    doc["object_id"]     = String(objId);
+    doc["unique_id"]     = String(sysConfig.mqttId) + "_" + objId;
+    doc["command_topic"] = mqttTopic("button", objId) + "/set";
+    fillAvailability(doc.as<JsonObject>());
+    doc["payload_press"] = "PRESS";
+    if(icon && icon[0]) doc["icon"] = icon;
+    injectDevice(doc.as<JsonObject>());
+    String out; serializeJson(doc, out);
+    mqttPublishConfig("button", objId, out);
+}
+
+inline void publishBinarySensorDiscovery(const char* topicId, const char* entityObjId, const String& name,
+                                          const char* deviceClass = nullptr){
+    StaticJsonDocument<512> doc;
+    doc["name"]      = name;
+    doc["object_id"] = String(entityObjId);
+    doc["unique_id"] = String(sysConfig.mqttId) + "_" + entityObjId;
+    doc["state_topic"] = mqttTopic("binary_sensor", topicId);
+    fillAvailability(doc.as<JsonObject>());
+    doc["payload_on"]  = "ON";
+    doc["payload_off"] = "OFF";
+    if(deviceClass && deviceClass[0]) doc["device_class"] = deviceClass;
+    injectDevice(doc.as<JsonObject>());
+    String out; serializeJson(doc, out);
+    mqttPublishConfig("binary_sensor", topicId, out);
+}
+
+inline void publishSwitchDiscovery(const char* topicId, const char* entityObjId, const String& name){
+    StaticJsonDocument<512> doc;
+    doc["name"]          = name;
+    doc["object_id"]     = String(entityObjId);
+    doc["unique_id"]     = String(sysConfig.mqttId) + "_" + entityObjId;
+    doc["state_topic"]   = mqttTopic("switch", topicId);
+    doc["command_topic"] = mqttTopic("switch", topicId) + "/set";
+    fillAvailability(doc.as<JsonObject>());
+    doc["payload_on"]  = "ON";
+    doc["payload_off"] = "OFF";
+    doc["retain"]      = false;
+    injectDevice(doc.as<JsonObject>());
+    String out; serializeJson(doc, out);
+    mqttPublishConfig("switch", topicId, out);
+}
+
+// Table des 5 sensors "vanne" partageant strictement le même schéma
+// (object_id == topic id, component "sensor"). Le suffixe est ajouté au
+// nom de la vanne pour le libellé HA et à "valve_N" pour le topic/objId.
+struct ValveSensorDef {
+    const char* suffix;      // ex: "_litres_today"
+    const char* nameSuffix;  // ex: " — litres aujourd'hui"
+    const char* unit;
+    const char* deviceClass; // "" si aucun
+    const char* stateClass;
+};
+static const ValveSensorDef VALVE_SENSOR_DEFS[] = {
+    {"_litres_today", " — litres aujourd'hui",  "L",      "volume", "total_increasing"},
+    {"_litres_total", " — litres total",        "L",      "volume", "total_increasing"},
+    {"_pulses_today", " — pulses aujourd'hui",  "pulses", "",       "total_increasing"},
+    {"_pulses_total", " — pulses total",        "pulses", "",       "total_increasing"},
+    // Débit instantané par vanne, lissé sur FLOW_WINDOW_MS (4s), mis à
+    // jour 1×/s par valveFlowUpdateAll() (voir ValveCons.h) et publié à
+    // chaque mqttPublishState() (~10s). Utile pour détecter une vanne qui
+    // goutte, ou avoir une vision temps réel dans HA hors WebSocket.
+    {"_flow_lpm",      " — débit instantané",   "L/min",  "volume_flow_rate", "measurement"},
+};
+
+// ────────────────────────────────────────────────────────────
+// Discovery HA — publication complète
+// ────────────────────────────────────────────────────────────
 
 inline void mqttPublishDiscovery(){
     if(!mqttConnected) return;
-    String nodeTopic = mqttTopicNode();
 
     // Capteurs globaux
     struct SensDef { const char* obj; const char* name; const char* unit; const char* devClass; };
     SensDef defs[] = {
-        {"temperature1",     "Température locale",       "°C",   "temperature"},
+        {"temperature1",      "Température locale",       "°C",   "temperature"},
         {"temperature_remote","Température distante",     "°C",   "temperature"},
-        {"pulse_total",      "Compteur pulses (total)",  "pulses",""},
-        {"litres_total",     "Litres total",             "L",    "volume"},
-        {"flow_lpm",         "Débit instantané",         "L/min","volume_flow_rate"},
+        {"pulse_total",       "Compteur pulses (total)",  "pulses",""},
+        {"litres_total",      "Litres total",             "L",    "volume"},
+        {"flow_lpm",          "Débit instantané",         "L/min","volume_flow_rate"},
     };
-    for(size_t i=0;i<sizeof(defs)/sizeof(defs[0]);i++){
-        StaticJsonDocument<512> doc;
-        doc["name"]           = defs[i].name;
-        doc["object_id"]      = String(defs[i].obj);
-        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + defs[i].obj;
-        doc["state_topic"]    = mqttTopic("sensor", defs[i].obj);
-        doc["availability_topic"] = nodeTopic + "/availability";
-        doc["payload_available"]  = "online";
-        doc["payload_not_available"] = "offline";
-        if(defs[i].devClass[0]) doc["device_class"] = defs[i].devClass;
-        if(defs[i].unit[0])     doc["unit_of_measurement"] = defs[i].unit;
-        doc["state_class"]     = "measurement";
-        injectDevice(doc.as<JsonObject>());
-        String out; serializeJson(doc, out);
-        mqttPublishConfig("sensor", defs[i].obj, out);
+    for(auto& d : defs){
+        publishSensorDiscovery(d.obj, d.obj, d.name, d.unit, d.devClass, "measurement");
     }
 
     // Bouton de réinitialisation compteur global
-    {
-        StaticJsonDocument<512> doc;
-        doc["name"]           = "Remise à zéro conso globale";
-        doc["object_id"]      = "pulse_total_reset";
-        doc["unique_id"]      = String(sysConfig.mqttId) + "_pulse_total_reset";
-        doc["command_topic"]  = mqttTopic("button", "pulse_total_reset") + "/set";
-        doc["availability_topic"] = nodeTopic + "/availability";
-        doc["payload_available"]  = "online";
-        doc["payload_not_available"] = "offline";
-        doc["payload_press"]  = "PRESS";
-        doc["icon"]           = "mdi:water-minus";
-        injectDevice(doc.as<JsonObject>());
-        String out; serializeJson(doc, out);
-        mqttPublishConfig("button", "pulse_total_reset", out);
-    }
+    publishButtonDiscovery("pulse_total_reset", "Remise à zéro conso globale");
 
-    // Compteurs "Vanne manuelle" (cf. Globals.h::ManualValveState) :
-    // 4 sensors (litres/pulses × today/total) + 1 button RAZ dédié.
-    // Permet à HA de tracer l'usage manuel (tuyau, etc.) séparément des
-    // vannes automatisées. L'alarme UNEXPECTED_FLOW reste active.
-    {
-        struct MVS { const char* obj; const char* name; const char* unit; bool isLitres; };
-        MVS mvs[] = {
-            {"manual_valve_litres_today", "VanneManuelle — litres aujourd'hui", "L",     true},
-            {"manual_valve_litres_total", "VanneManuelle — litres total",        "L",     true},
-            {"manual_valve_pulses_today", "VanneManuelle — pulses aujourd'hui",  "pulses",false},
-            {"manual_valve_pulses_total", "VanneManuelle — pulses total",        "pulses",false},
-        };
-        for(auto& m : mvs){
-            StaticJsonDocument<512> doc;
-            doc["name"]         = m.name;
-            doc["object_id"]    = String(m.obj);
-            doc["unique_id"]    = String(sysConfig.mqttId) + "_" + m.obj;
-            doc["state_topic"]  = mqttTopic("sensor", m.obj);
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["unit_of_measurement"] = m.unit;
-            doc["state_class"]  = "total_increasing";
-            if(m.isLitres){
-                doc["device_class"] = "volume";
-                doc["icon"] = "mdi:water-pump";
-            } else {
-                doc["icon"] = "mdi:pulse";
-            }
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("sensor", m.obj, out);
-        }
-    }
+    // Compteurs "Vanne manuelle" (cf. Globals.h::ManualValveState) : 4
+    // sensors (litres/pulses × today/total) + 1 bouton RAZ dédié. Permet à
+    // HA de tracer l'usage manuel (tuyau, etc.) séparément des vannes
+    // automatisées. L'alarme UNEXPECTED_FLOW reste active.
+    publishSensorDiscovery("manual_valve_litres_today", "manual_valve_litres_today",
+                            "VanneManuelle — litres aujourd'hui", "L", "volume", "total_increasing", "mdi:water-pump");
+    publishSensorDiscovery("manual_valve_litres_total", "manual_valve_litres_total",
+                            "VanneManuelle — litres total", "L", "volume", "total_increasing", "mdi:water-pump");
+    publishSensorDiscovery("manual_valve_pulses_today", "manual_valve_pulses_today",
+                            "VanneManuelle — pulses aujourd'hui", "pulses", "", "total_increasing", "mdi:pulse");
+    publishSensorDiscovery("manual_valve_pulses_total", "manual_valve_pulses_total",
+                            "VanneManuelle — pulses total", "pulses", "", "total_increasing", "mdi:pulse");
     // Bouton RAZ dédié "VanneManuelle" — n'affecte QUE ce compteur.
-    {
-        const char* objId = "manual_valve_reset";
-        StaticJsonDocument<512> doc;
-        doc["name"]           = "VanneManuelle — Remise à zéro";
-        doc["object_id"]      = String(objId);
-        doc["unique_id"]      = String(sysConfig.mqttId) + "_" + objId;
-        doc["command_topic"]  = mqttTopic("button", objId) + "/set";
-        doc["availability_topic"] = nodeTopic + "/availability";
-        doc["payload_available"]  = "online";
-        doc["payload_not_available"] = "offline";
-        doc["payload_press"]  = "PRESS";
-        doc["icon"]           = "mdi:water-minus";
-        injectDevice(doc.as<JsonObject>());
-        String out; serializeJson(doc, out);
-        mqttPublishConfig("button", objId, out);
-    }
+    publishButtonDiscovery("manual_valve_reset", "VanneManuelle — Remise à zéro");
 
     // Alarmes hydrauliques (3 entités : agrégat ON/OFF + code 0/1/2 + libellé)
     // Codes : 0=OK, 1=NO_FLOW (vanne ouverte mais pas de débit), 2=UNEXPECTED_FLOW (fuite)
-    {
-        // binary_sensor : alarme active
-        StaticJsonDocument<512> doc;
-        doc["name"]           = "Alarme hydraulique";
-        doc["object_id"]      = "alarm";
-        doc["unique_id"]      = String(sysConfig.mqttId) + "_alarm";
-        doc["state_topic"]    = mqttTopic("binary_sensor", "alarm");
-        doc["availability_topic"] = nodeTopic + "/availability";
-        doc["payload_available"]  = "online";
-        doc["payload_not_available"] = "offline";
-        doc["payload_on"]     = "ON";
-        doc["payload_off"]    = "OFF";
-        doc["device_class"]   = "problem";
-        injectDevice(doc.as<JsonObject>());
-        String out; serializeJson(doc, out);
-        mqttPublishConfig("binary_sensor", "alarm", out);
-    }
-    {
-        // sensor : code d'alarme
-        StaticJsonDocument<512> doc;
-        doc["name"]           = "Code alarme";
-        doc["object_id"]      = "alarm_code";
-        doc["unique_id"]      = String(sysConfig.mqttId) + "_alarm_code";
-        doc["state_topic"]    = mqttTopic("sensor", "alarm_code");
-        doc["availability_topic"] = nodeTopic + "/availability";
-        doc["payload_available"]  = "online";
-        doc["payload_not_available"] = "offline";
-        doc["state_class"]    = "measurement";
-        doc["icon"]           = "mdi:water-alert";
-        injectDevice(doc.as<JsonObject>());
-        String out; serializeJson(doc, out);
-        mqttPublishConfig("sensor", "alarm_code", out);
-    }
-    {
-        // sensor : libellé court de l'alarme
-        StaticJsonDocument<512> doc;
-        doc["name"]           = "Message alarme";
-        doc["object_id"]      = "alarm_message";
-        doc["unique_id"]      = String(sysConfig.mqttId) + "_alarm_message";
-        doc["state_topic"]    = mqttTopic("sensor", "alarm_message");
-        doc["availability_topic"] = nodeTopic + "/availability";
-        doc["payload_available"]  = "online";
-        doc["payload_not_available"] = "offline";
-        doc["icon"]           = "mdi:message-alert-outline";
-        injectDevice(doc.as<JsonObject>());
-        String out; serializeJson(doc, out);
-        mqttPublishConfig("sensor", "alarm_message", out);
-    }
+    publishBinarySensorDiscovery("alarm", "alarm", "Alarme hydraulique", "problem");
+    publishSensorDiscovery("alarm_code", "alarm_code", "Code alarme", nullptr, nullptr, "measurement", "mdi:water-alert");
+    publishSensorDiscovery("alarm_message", "alarm_message", "Message alarme", nullptr, nullptr, nullptr, "mdi:message-alert-outline");
 
-    // ── Une entité par vanne : sensor (litres today+total) + binary_sensor + switch
-    for(int v=0;v<VANNE_COUNT;v++){
+    // ── Une entité par vanne : 5 sensors (table) + binary_sensor + switch + bouton RAZ
+    for(int v=0; v<VANNE_COUNT; v++){
         char objBuf[24];
         const char* vname = (valves[v].name[0] ? valves[v].name : (snprintf(objBuf,sizeof(objBuf),"V%d",v), objBuf));
 
-        // Sensor litres_today
-        {
-            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_today",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — litres aujourd'hui";
-            doc["object_id"]      = String(oid);
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
-            doc["state_topic"]    = mqttTopic("sensor", oid);
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["unit_of_measurement"] = "L";
-            doc["state_class"]    = "total_increasing";
-            doc["device_class"]   = "volume";
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("sensor", oid, out);
+        for(auto& sd : VALVE_SENSOR_DEFS){
+            char oid[32];
+            snprintf(oid, sizeof(oid), "valve_%d%s", v, sd.suffix);
+            publishSensorDiscovery(oid, oid, String(vname) + sd.nameSuffix, sd.unit, sd.deviceClass, sd.stateClass);
         }
-        // Sensor litres_total
+
+        char vOid[16]; snprintf(vOid, sizeof(vOid), "valve_%d", v);
+
+        // Binary sensor : ouvert/fermé (object_id/unique_id = vOid + "_state")
         {
-            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_litres_total",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — litres total";
-            doc["object_id"]      = String(oid);
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
-            doc["state_topic"]    = mqttTopic("sensor", oid);
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["unit_of_measurement"] = "L";
-            doc["state_class"]    = "total_increasing";
-            doc["device_class"]   = "volume";
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("sensor", oid, out);
+            String entityId = String(vOid) + "_state";
+            publishBinarySensorDiscovery(vOid, entityId.c_str(), String(vname) + " — état");
         }
-        // Sensor pulses_today (valeur brute, sans conversion en litres)
-        // Utile pour le debug et les automations qui veulent raisonner
-        // directement en nombre d'impulsions (notamment quand la valeur
-        // convertie en litres est suspecte — arrondi, overflow, etc.).
+        // Switch : commande on/off (object_id/unique_id = vOid + "_switch")
         {
-            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_pulses_today",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — pulses aujourd'hui";
-            doc["object_id"]      = String(oid);
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
-            doc["state_topic"]    = mqttTopic("sensor", oid);
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["unit_of_measurement"] = "pulses";
-            doc["state_class"]    = "total_increasing";
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("sensor", oid, out);
-        }
-        // Sensor pulses_total (valeur brute, sans conversion en litres)
-        {
-            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_pulses_total",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — pulses total";
-            doc["object_id"]      = String(oid);
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
-            doc["state_topic"]    = mqttTopic("sensor", oid);
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["unit_of_measurement"] = "pulses";
-            doc["state_class"]    = "total_increasing";
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("sensor", oid, out);
-        }
-        // Sensor instant_flow_lpm : débit instantané PAR VANNE, lissé sur
-        // FLOW_WINDOW_MS (4s) — publié à chaque mqttPublishState() (~10s)
-        // via valveCons[v].instantFlowLpm (mis à jour 1×/s par
-        // valveFlowUpdateAll() dans ValveCons.h). Utile pour détecter
-        // une vanne qui goutte (débit non nul alors qu'elle est fermée),
-        // ou pour avoir une vision en temps réel dans HA même quand le
-        // WebSocket n'est pas ouvert. Voir buildStatusJson() côté
-        // WebSocket qui expose la même valeur via valves[i].flow_lpm.
-        {
-            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d_flow_lpm",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — débit instantané";
-            doc["object_id"]      = String(oid);
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
-            doc["state_topic"]    = mqttTopic("sensor", oid);
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["unit_of_measurement"] = "L/min";
-            doc["state_class"]    = "measurement";
-            doc["device_class"]   = "volume_flow_rate";
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("sensor", oid, out);
-        }
-        // Binary sensor : ouvert/fermé
-        {
-            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — état";
-            doc["object_id"]      = String(oid) + "_state";
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_state";
-            doc["state_topic"]    = mqttTopic("binary_sensor", oid);
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["payload_on"]    = "ON";
-            doc["payload_off"]   = "OFF";
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("binary_sensor", oid, out);
-        }
-        // Switch : commande on/off
-        {
-            char oid[24]; snprintf(oid,sizeof(oid),"valve_%d",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — commande";
-            doc["object_id"]      = String(oid) + "_switch";
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid + "_switch";
-            doc["state_topic"]    = mqttTopic("switch", oid);
-            doc["command_topic"]  = mqttTopic("switch", oid) + "/set";
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["payload_on"]    = "ON";
-            doc["payload_off"]   = "OFF";
-            doc["retain"]        = false;
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("switch", oid, out);
+            String entityId = String(vOid) + "_switch";
+            publishSwitchDiscovery(vOid, entityId.c_str(), String(vname) + " — commande");
         }
         // Bouton de RAZ pour cette vanne
         {
-            char oid[32]; snprintf(oid,sizeof(oid),"valve_%d_reset_cons",v);
-            StaticJsonDocument<512> doc;
-            doc["name"]           = String(vname) + " — Remise à zéro conso";
-            doc["object_id"]      = String(oid);
-            doc["unique_id"]      = String(sysConfig.mqttId) + "_" + oid;
-            doc["command_topic"]  = mqttTopic("button", oid) + "/set";
-            doc["availability_topic"] = nodeTopic + "/availability";
-            doc["payload_available"]  = "online";
-            doc["payload_not_available"] = "offline";
-            doc["payload_press"]  = "PRESS";
-            doc["icon"]           = "mdi:water-minus";
-            injectDevice(doc.as<JsonObject>());
-            String out; serializeJson(doc, out);
-            mqttPublishConfig("button", oid, out);
+            char oid[32]; snprintf(oid, sizeof(oid), "valve_%d_reset_cons", v);
+            publishButtonDiscovery(oid, String(vname) + " — Remise à zéro conso");
         }
     }
     // Serial.println("[MQTT] Discovery publié");
 }
 
-// ── Publication de l'état complet (capteurs + vannes)
+// ────────────────────────────────────────────────────────────
+// Publication de l'état complet (capteurs + vannes)
+// ────────────────────────────────────────────────────────────
+
 inline void mqttPublishState(){
     if(!mqttConnected) return;
     // Calculs partagés
@@ -434,11 +321,12 @@ inline void mqttPublishState(){
     unsigned long totalPulses = persistedPulseCount + cnt;
     float litresTotal = (float)totalPulses / PULSES_PER_LITRE;
 
-    // Capteurs globaux
     auto pub = [](const char* comp, const char* oid, const String& payload){
         String topic = mqttTopic(comp, oid);
         mqttClient.publish(topic.c_str(), 0, true, payload.c_str(), payload.length());
     };
+
+    // Capteurs globaux
     pub("sensor","temperature1", mqttPayloadFloat(temperature1));
     pub("sensor","temperature_remote", mqttPayloadFloat(temperatureRemote));
     if (totalPulses > 4290000000UL) {
@@ -447,9 +335,8 @@ inline void mqttPublishState(){
         pub("sensor","pulse_total", String((unsigned long)totalPulses));
         pub("sensor","litres_total", String(litresTotal,2));
     }
-    // CORRECTIF : flow_lpm est désormais calculé via computeFlowLpm(), la même
-    // fonction partagée utilisée par buildStatusJson() pour le WebSocket — au
-    // lieu de republier 0.0 en permanence comme c'était le cas auparavant.
+    // flow_lpm calculé via computeFlowLpm(), la même fonction partagée
+    // utilisée par buildStatusJson() pour le WebSocket.
     pub("sensor","flow_lpm", String(computeFlowLpm(totalPulses),2));
 
     // Vannes
@@ -460,10 +347,10 @@ inline void mqttPublishState(){
                           ? (float)valveCons[v].todayPulses / PULSES_PER_LITRE
                           : 0.0f;
         float litresTotV = (float)valveCons[v].pulsesTotal / PULSES_PER_LITRE;
-        
+
         snprintf(oid,sizeof(oid),"valve_%d_litres_today",v);
         if (valveCons[v].todayPulses > 4290000000UL) {
-            // Rejet silently
+            // Rejet silencieux
         } else {
             pub("sensor", oid, String(litresToday,2));
         }
@@ -475,15 +362,15 @@ inline void mqttPublishState(){
         } else {
             pub("sensor", oid, String(litresTotV,2));
         }
+
         // Valeurs brutes (pulses) par vanne, miroir de valveCons[v].pulsesTotal
         // et valveCons[v].todayPulses. Mêmes garde-fous > 4.29G que pour la
-        // version litres : un unsigned long 32 bits ne peut pas représenter
-        // plus de ~4.29×10^9, donc on n'envoie PAS la valeur retenue dans
-        // ce cas (Home Assistant recevrait "4294967295" qui empoisonnerait
-        // ses statistiques "total_increasing" sur le long terme).
+        // version litres (un unsigned long 32 bits ne peut pas représenter
+        // plus de ~4.29×10^9 ; HA recevrait sinon "4294967295" qui
+        // empoisonnerait ses statistiques "total_increasing" durablement).
         snprintf(oid,sizeof(oid),"valve_%d_pulses_today",v);
         if (valveCons[v].todayPulses > 4290000000UL) {
-            // Rejet silencieux (cohérent avec litres_today)
+            // Rejet silencieux
         } else {
             pub("sensor", oid, String((unsigned long)valveCons[v].todayPulses));
         }
@@ -494,14 +381,11 @@ inline void mqttPublishState(){
         } else {
             pub("sensor", oid, String((unsigned long)valveCons[v].pulsesTotal));
         }
+
+        // Débit instantané par vanne (RAM, 1 Hz). Pas de garde >4.29G ici :
+        // un float ne peut pas atteindre cette valeur (PULSES_PER_LITRE=741.2
+        // → max mesurable ≈ 5300 L/min).
         snprintf(oid,sizeof(oid),"valve_%d_flow_lpm",v);
-        // Débit instantané par vanne, calculé en RAM par
-        // valveFlowUpdateAll() à 1 Hz. On formate à 2 décimales (idem
-        // flow_lpm global) pour rester cohérent avec ce que l'UI
-        // affiche. Pas de garde >4.29G ici (un float ne peut pas
-        // atteindre cette valeur : PULSES_PER_LITRE=741.2 → max débit
-        // mesurable = 65535pulses/s × 60/741.2 ≈ 5300 L/min, soit
-        // ~5300.00 une fois sérialisé).
         pub("sensor", oid, String(valveCons[v].instantFlowLpm, 2));
 
         snprintf(oid,sizeof(oid),"valve_%d",v);
@@ -509,21 +393,17 @@ inline void mqttPublishState(){
         pub("switch", oid, valves[v].isOpen ? "ON" : "OFF");
     }
 
-    // ── Alarmes hydrauliques (voir AlarmManager.h) ──
-    // Publié en retained pour que HA garde la dernière valeur connue
-    // même après un reboot / déco du broker — une alarme fuite doit
-    // rester visible tant qu'elle n'a pas été acquittée.
+    // Alarmes hydrauliques (retained pour que HA garde la dernière valeur
+    // connue après reboot/déco broker — une alarme fuite doit rester
+    // visible tant qu'elle n'a pas été acquittée).
     pub("binary_sensor", "alarm", alarmState.active ? "ON" : "OFF");
     pub("sensor",        "alarm_code",    String((unsigned)alarmState.code));
     pub("sensor",        "alarm_message", String(alarmState.msg));
 
-    // ── Compteurs "Vanne manuelle" (cf. Globals.h::ManualValveState) ──
-    // Litres aujourd'hui + total. Publiés en retained pour que HA garde
-    // la dernière valeur connue même après reboot / déco broker — la
-    // recovery MQTT au prochain boot s'en servira pour ré-hydrater la
-    // RAM (mode CONS_MQTT_ONLY). Mêmes seuils de rejet > 4.29G que les
-    // autres compteurs pour éviter d'empoisonner HA avec une valeur
-    // castée en unsigned long 32 bits.
+    // Compteurs "Vanne manuelle" (cf. Globals.h::ManualValveState). Publiés
+    // en retained pour que la recovery MQTT au prochain boot (mode
+    // CONS_MQTT_ONLY) puisse ré-hydrater la RAM. Mêmes seuils de rejet
+    // > 4.29G que les autres compteurs.
     float mvlLitresToday = (manualValveState.todayYmd == today)
                           ? (float)manualValveState.todayPulses / PULSES_PER_LITRE
                           : 0.0f;
@@ -536,264 +416,205 @@ inline void mqttPublishState(){
         pub("sensor", "manual_valve_pulses_total", String((unsigned long)manualValveState.pulsesTotal));
     }
     if(manualValveState.todayPulses > 4290000000UL){
-        // silencieux (cohérent avec litres_today)
+        // Rejet silencieux
     } else {
         pub("sensor", "manual_valve_pulses_today", String((unsigned long)manualValveState.todayPulses));
     }
-
-
-
 }
 
-// ★ FIX : canari de confirmation de vie de la session.
+// ★ Canari de confirmation de vie de la session.
 // Contrairement aux valeurs de capteurs publiées en QoS 0 par
 // mqttPublishState() (aucune garantie de livraison, aucun accusé de
 // réception possible), ce message dédié est publié en QoS 1. Le broker
 // répond obligatoirement par un PUBACK, capté par onMqttPublishAck()
 // ci-dessous — c'est cette confirmation, et elle seule, qui réarme le
 // watchdog d'inactivité. Publié plus fréquemment que le keepAlive MQTT
-// (60s) pour ne pas dépendre uniquement du PINGREQ natif de la lib (qui
-// de toute façon ne partirait jamais tant qu'il y a du trafic sortant
-// périodique, cf. explication en tête de fichier).
+// (60s) pour ne pas dépendre uniquement du PINGREQ natif de la lib.
 inline void mqttSendCanary(){
     if(!mqttConnected) return;
-    String availTopic = mqttTopicNode() + "/availability";
+    String availTopic = mqttAvailabilityTopic();
     mqttClient.publish(availTopic.c_str(), 1, true, "online", 6);
 }
 
-// ── Handler des commandes switch venues de HA + récupération des retained
+// ────────────────────────────────────────────────────────────
+// Reset des compteurs (partagé entre commandes HA et endpoints Web)
+// ────────────────────────────────────────────────────────────
+
+inline void resetValveCounters(int v){
+    valveCons[v].pulsesTotal = 0;
+    valveCons[v].todayPulses = 0;
+    valveCons[v].carry = 0.0f;
+    for(int d=0;d<CONS_HISTORY_DAYS;d++) valveCons[v].history[d] = {0,0,0.0f};
+}
+
+inline void resetManualValveCounters(){
+    manualValveState.pulsesTotal = 0;
+    manualValveState.todayPulses = 0;
+    manualValveState.todayYmd    = todayYMD();
+    manualValveState.todayIdx    = 0;
+    manualValveState.carry       = 0.0f;
+    for(int d=0;d<CONS_HISTORY_DAYS;d++) manualValveState.history[d] = {0,0,0.0f};
+}
+
+// ────────────────────────────────────────────────────────────
+// Recovery MQTT (mode CONS_MQTT_ONLY) — helpers
+// ────────────────────────────────────────────────────────────
+
+#ifdef CONS_MQTT_ONLY
+// Compare une valeur restaurée depuis MQTT retained à l'état RAM courant.
+// Un compteur ne peut que progresser entre deux sessions : une valeur MQTT
+// plus basse que la RAM est forcément anormale et on garde la valeur locale.
+// Retourne true (et logue) si mqttVal doit remplacer currentVal.
+inline bool mqttRecoverIfGreater(unsigned long mqttVal, unsigned long currentVal, const char* label){
+    if(mqttVal > currentVal){
+        char b[140];
+        snprintf(b, sizeof(b), "[RECOVERY] %s: RAM=%lu < MQTT=%lu — restauré",
+                 label, currentVal, mqttVal);
+        logSys(b);
+        return true;
+    }
+    return false;
+}
+
+// NOTE : pas de helper par référence pour le rollover todayYmd/todayPulses
+// (certains de ces champs sont des bitfields dans leurs structs — on peut
+// leur assigner une valeur mais pas y lier une référence non-const). Le
+// rollover est donc fait inline à chaque site d'appel via la macro
+// ci-dessous, qui reste lisible tout en restant compatible bitfields.
+// Sans cette étape AVANT la comparaison de recovery (todayYmd à 0 après un
+// reset NVS, ou pointant sur une date antérieure), la condition d'égalité
+// serait toujours fausse et la recovery ne se déclencherait jamais.
+#define MQTT_ROLLOVER_TODAY(stateRef, today) \
+    do { if((stateRef).todayYmd != (today)) { (stateRef).todayYmd = (today); (stateRef).todayPulses = 0; } } while(0)
+#endif
+
+// ────────────────────────────────────────────────────────────
+// Handler des commandes switch venues de HA + récupération des retained
+// ────────────────────────────────────────────────────────────
+
 inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     String t(topic);
     String p(payload, len);
     // Tout message REÇU = preuve réelle d'activité bidirectionnelle sur la
-    // socket → reset du watchdog. (Contrairement à un simple publish()
-    // sortant, ceci prouve que le broker nous parle encore.)
+    // socket → reset du watchdog (contrairement à un simple publish()
+    // sortant, ceci prouve que le broker nous parle encore).
     mqttLastActivityMs = millis();
-
-
-  //  char b[200];
-  //  snprintf(b, sizeof(b), "MQTT RX : %s = %s",
-  //          topic,
-   //         p.c_str());
-//
-  //  logSys(b);
 
 #ifdef CONS_MQTT_ONLY
     // ── Phase de récupération au boot : fenêtre de 3s après connexion MQTT.
-    // On lit les valeurs retained publiées lors de la session précédente et on
-    // met à jour la RAM si MQTT > NVS (un compteur ne peut que progresser).
-    // On ne traite pas comme commande switch pour ne pas interférer.
+    // On lit les valeurs retained publiées lors de la session précédente et
+    // on met à jour la RAM si MQTT > NVS. On ne traite pas comme commande
+    // switch pour ne pas interférer.
     //
-    // NOTE : `pulse_total` et `litres_total` (compteur global) SONT
-    // récupérés depuis MQTT retained au boot, au même titre que les
-    // compteurs par vanne. En mode CONS_MQTT_ONLY, rien n'est persisté
-    // en NVS pour le total (ConfigManager.h::pulseLoad/pulseSave sont
-    // des no-ops), donc MQTT retained EST la source de vérité après
-    // chaque reboot.
-    //
-    // Règle de récupération : on ne récupère la valeur MQTT que si elle
-    // est strictement supérieure à l'état RAM courant (persistedPulseCount
-    // + pulseCount). Un compteur ne peut que progresser entre deux
-    // sessions, donc une valeur MQTT plus basse que notre RAM est
-    // forcément anormale et on conserve notre valeur locale.
+    // `pulse_total`/`litres_total` (compteur global) SONT récupérés depuis
+    // MQTT retained au boot, au même titre que les compteurs par vanne : en
+    // CONS_MQTT_ONLY rien n'est persisté en NVS pour le total (pulseLoad/
+    // pulseSave sont des no-ops), donc MQTT retained EST la source de
+    // vérité après chaque reboot.
     if(!mqttRecoveryDone){
         String sensorBase = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/";
         if(t.startsWith(sensorBase)){
             String objId = t.substring(sensorBase.length());
             float val = p.toFloat();
+            uint16_t today = todayYMD();
+            unsigned long cnt;
+
+            int v = -1;
             if(objId == "pulse_total"){
                 // Compteur global en pulses (source de vérité, plus précise
-                // que litres_total qui n'a que 2 décimales). En CONS_MQTT_ONLY
-                // rien n'est persisté en NVS pour le total, donc MQTT retained
-                // EST la seule référence entre deux boots.
+                // que litres_total qui n'a que 2 décimales).
                 unsigned long mqttPulses = (unsigned long)(val + 0.5f);
-                unsigned long cnt;
                 noInterrupts(); cnt = pulseCount; interrupts();
                 unsigned long liveTotal = persistedPulseCount + cnt;
-                if(mqttPulses > liveTotal){
-                    char b[120]; snprintf(b,sizeof(b),
-                        "[RECOVERY] pulse_total: live=%lu < MQTT=%lu — restauré",
-                        liveTotal, mqttPulses);
-                    logSys(b);
+                if(mqttRecoverIfGreater(mqttPulses, liveTotal, "pulse_total")){
                     persistedPulseCount = mqttPulses;
-                    // CRITIQUE : realigner lastDistributedTotal sur le
-                    // total restauré, sinon pulseDistribute() verra un
-                    // delta énorme (mqttPulses - 0) au prochain tour et
-                    // attribuera TOUS ces pulses à la vanne manuelle (si
-                    // aucune vanne auto n'est ouverte) — contaminant
-                    // manualValveState.pulsesTotal avec le compteur global.
+                    // CRITIQUE : realigner lastDistributedTotal sur le total
+                    // restauré, sinon pulseDistribute() verra un delta énorme
+                    // (mqttPulses - 0) au prochain tour et attribuera TOUS
+                    // ces pulses à la vanne manuelle (si aucune vanne auto
+                    // n'est ouverte) — contaminant manualValveState.pulsesTotal.
                     lastDistributedTotal = mqttPulses + cnt;
-                    // pas de pulseSave() : no-op en CONS_MQTT_ONLY
-                    // (cf. ConfigManager.h). Au prochain reboot, la
-                    // valeur sera de nouveau lue depuis MQTT retained.
+                    // pas de pulseSave() : no-op en CONS_MQTT_ONLY.
                 }
             } else if(objId == "litres_total"){
-                // Fallback si pulse_total n'a pas été retenu (ex. : valeur
+                // Fallback si pulse_total n'a pas été retenu (ex. valeur
                 // > 4.29G publiée une fois, ou discovery régénérée sans).
-                // Conversion L→pulses moins précise (2 décimales perdues),
-                // mais toujours mieux que de repartir de 0.
+                // Conversion L→pulses moins précise, mais toujours mieux
+                // que de repartir de 0.
                 unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
-                unsigned long cnt;
                 noInterrupts(); cnt = pulseCount; interrupts();
                 unsigned long liveTotal = persistedPulseCount + cnt;
-                if(mqttPulses > liveTotal){
-                    char b[120]; snprintf(b,sizeof(b),
-                        "[RECOVERY] litres_total: live=%lu < MQTT=%lu pulses — restauré",
-                        liveTotal, mqttPulses);
-                    logSys(b);
+                if(mqttRecoverIfGreater(mqttPulses, liveTotal, "litres_total (fallback pulses)")){
                     persistedPulseCount = mqttPulses;
-                    // CRITIQUE : realigner lastDistributedTotal (même
-                    // raison que pour pulse_total ci-dessus — sinon
-                    // pulseDistribute() attribue le delta à la vanne
-                    // manuelle).
-                    lastDistributedTotal = mqttPulses + cnt;
+                    lastDistributedTotal = mqttPulses + cnt; // même raison que ci-dessus
                 }
-            } else {
-                    // valve_N_litres_today ou valve_N_litres_total (publiés en litres)
-                    int v = -1;
-                    if(parseValveObjId(objId, "_litres_total", v)){
-                        unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
-                        if(mqttPulses > valveCons[v].pulsesTotal){
-                            char b[120]; snprintf(b,sizeof(b),
-                                "[RECOVERY] V%d litres_total: RAM=%lu < MQTT=%lu pulses — restauré",
-                                v+1, valveCons[v].pulsesTotal, mqttPulses);
-                            logSys(b);
-                            valveCons[v].pulsesTotal = mqttPulses;
-                            valveConsMarkDirty(v);
-                        }
-                    } else if( parseValveObjId(objId, "_litres_today", v  )){
-                        unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
-                        uint16_t today = todayYMD();
-
-                        if(today != 0){
-                            // Init / rollover journalier : si todayYmd est 0
-                            // (NVS jamais initialisée, ex. après un reset
-                            // complet) ou pointe sur une date antérieure, on
-                            // bascule sur la date du jour AVANT de comparer
-                            // les compteurs. Sans cette étape, la condition
-                            // `todayYmd == today` est toujours fausse et la
-                            // recovery ne se déclenche jamais alors que la
-                            // valeur MQTT retained est valide.
-                            if(valveCons[v].todayYmd != today){
-                                valveCons[v].todayYmd = today;
-                                valveCons[v].todayPulses = 0;
-                            }
-                            if(mqttPulses > valveCons[v].todayPulses){
-                                char b[120]; snprintf(b,sizeof(b),
-                                    "[RECOVERY] V%d litres_today: RAM=%u < MQTT=%lu pulses — restauré",
-                                    v+1, valveCons[v].todayPulses, mqttPulses);
-                                logSys(b);
-                                valveCons[v].todayPulses = (uint32_t)mqttPulses;
-                                valveConsMarkDirty(v);
-                            }
-                        }
-                    } else if(parseValveObjId(objId, "_pulses_total", v)){
-                        // Valeur brute en pulses (pas de conversion depuis des litres).
-                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
-                        if(mqttPulses > valveCons[v].pulsesTotal){
-                            char b[120]; snprintf(b,sizeof(b),
-                                "[RECOVERY] V%d pulses_total: RAM=%lu < MQTT=%lu — restauré",
-                                v+1, valveCons[v].pulsesTotal, mqttPulses);
-                            logSys(b);
-                            valveCons[v].pulsesTotal = mqttPulses;
-                            valveConsMarkDirty(v);
-                        }
-                    } else if(parseValveObjId(objId, "_pulses_today", v)){
-                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
-                        uint16_t today = todayYMD();
-                        if(today != 0){
-                            // Mêmes règles que litres_today ci-dessus : on
-                            // initialise/roule todayYmd AVANT de comparer.
-                            if(valveCons[v].todayYmd != today){
-                                valveCons[v].todayYmd = today;
-                                valveCons[v].todayPulses = 0;
-                            }
-                            if(mqttPulses > valveCons[v].todayPulses){
-                                char b[120]; snprintf(b,sizeof(b),
-                                    "[RECOVERY] V%d pulses_today: RAM=%u < MQTT=%lu — restauré",
-                                    v+1, valveCons[v].todayPulses, mqttPulses);
-                                logSys(b);
-                                valveCons[v].todayPulses = (uint32_t)mqttPulses;
-                                valveConsMarkDirty(v);
-                            }
-                        }
-                    } else if(objId == "manual_valve_litres_total"){
-                        // ── Recovery "Vanne manuelle" (cf. Globals.h) ──
-                        unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
-                        char b[140];
-                        snprintf(b,sizeof(b),
-                            "[RECOVERY] VanneManuelle litres_total: RAM=%lu pulses MQTT=%lu (val=%.2f)",
-                            manualValveState.pulsesTotal, mqttPulses, val);
-                        logSys(b);
-                        if(mqttPulses > manualValveState.pulsesTotal){
-                            snprintf(b,sizeof(b),
-                                "[RECOVERY] VanneManuelle litres_total: RAM=%lu < MQTT=%lu pulses — restauré",
-                                manualValveState.pulsesTotal, mqttPulses);
-                            logSys(b);
-                            manualValveState.pulsesTotal = mqttPulses;
-                            manualValveDirty = true;
-                        }
-                    } else if(objId == "manual_valve_litres_today"){
-                        unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
-                        uint16_t today = todayYMD();
-                        char b[140];
-                        snprintf(b,sizeof(b),
-                            "[RECOVERY] VanneManuelle litres_today: RAM=%u pulses MQTT=%lu (val=%.2f)",
-                            (unsigned)manualValveState.todayPulses, mqttPulses, val);
-                        logSys(b);
-                        if(today != 0){
-                            if(manualValveState.todayYmd != today){
-                                manualValveState.todayYmd = today;
-                                manualValveState.todayPulses = 0;
-                            }
-                            if(mqttPulses > manualValveState.todayPulses){
-                                snprintf(b,sizeof(b),
-                                    "[RECOVERY] VanneManuelle litres_today: RAM=%u < MQTT=%lu pulses — restauré",
-                                    (unsigned)manualValveState.todayPulses, mqttPulses);
-                                logSys(b);
-                                manualValveState.todayPulses = (uint32_t)mqttPulses;
-                                manualValveDirty = true;
-                            }
-                        }
-                    } else if(objId == "manual_valve_pulses_total"){
-                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
-                        char b[140];
-                        snprintf(b,sizeof(b),
-                            "[RECOVERY] VanneManuelle pulses_total: RAM=%lu MQTT=%lu (val=%.1f)",
-                            manualValveState.pulsesTotal, mqttPulses, val);
-                        logSys(b);
-                        if(mqttPulses > manualValveState.pulsesTotal){
-                            snprintf(b,sizeof(b),
-                                "[RECOVERY] VanneManuelle pulses_total: RAM=%lu < MQTT=%lu — restauré",
-                                manualValveState.pulsesTotal, mqttPulses);
-                            logSys(b);
-                            manualValveState.pulsesTotal = mqttPulses;
-                            manualValveDirty = true;
-                        }
-                    } else if(objId == "manual_valve_pulses_today"){
-                        unsigned long mqttPulses = (unsigned long)(val + 0.5f);
-                        uint16_t today = todayYMD();
-                        char b[140];
-                        snprintf(b,sizeof(b),
-                            "[RECOVERY] VanneManuelle pulses_today: RAM=%u MQTT=%lu (val=%.1f)",
-                            (unsigned)manualValveState.todayPulses, mqttPulses, val);
-                        logSys(b);
-                        if(today != 0){
-                            if(manualValveState.todayYmd != today){
-                                manualValveState.todayYmd = today;
-                                manualValveState.todayPulses = 0;
-                            }
-                            if(mqttPulses > manualValveState.todayPulses){
-                                snprintf(b,sizeof(b),
-                                    "[RECOVERY] VanneManuelle pulses_today: RAM=%u < MQTT=%lu — restauré",
-                                    (unsigned)manualValveState.todayPulses, mqttPulses);
-                                logSys(b);
-                                manualValveState.todayPulses = (uint32_t)mqttPulses;
-                                manualValveDirty = true;
-                            }
-                        }
+            } else if(parseValveObjId(objId, "_litres_total", v)){
+                unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                char lbl[24]; snprintf(lbl,sizeof(lbl),"V%d litres_total",v+1);
+                if(mqttRecoverIfGreater(mqttPulses, valveCons[v].pulsesTotal, lbl)){
+                    valveCons[v].pulsesTotal = mqttPulses;
+                    valveConsMarkDirty(v);
+                }
+            } else if(parseValveObjId(objId, "_litres_today", v)){
+                unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                if(today != 0){
+                    MQTT_ROLLOVER_TODAY(valveCons[v], today);
+                    char lbl[24]; snprintf(lbl,sizeof(lbl),"V%d litres_today",v+1);
+                    if(mqttRecoverIfGreater(mqttPulses, valveCons[v].todayPulses, lbl)){
+                        valveCons[v].todayPulses = (uint32_t)mqttPulses;
+                        valveConsMarkDirty(v);
                     }
                 }
+            } else if(parseValveObjId(objId, "_pulses_total", v)){
+                // Valeur brute en pulses (pas de conversion depuis des litres).
+                unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                char lbl[24]; snprintf(lbl,sizeof(lbl),"V%d pulses_total",v+1);
+                if(mqttRecoverIfGreater(mqttPulses, valveCons[v].pulsesTotal, lbl)){
+                    valveCons[v].pulsesTotal = mqttPulses;
+                    valveConsMarkDirty(v);
+                }
+            } else if(parseValveObjId(objId, "_pulses_today", v)){
+                unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                if(today != 0){
+                    MQTT_ROLLOVER_TODAY(valveCons[v], today);
+                    char lbl[24]; snprintf(lbl,sizeof(lbl),"V%d pulses_today",v+1);
+                    if(mqttRecoverIfGreater(mqttPulses, valveCons[v].todayPulses, lbl)){
+                        valveCons[v].todayPulses = (uint32_t)mqttPulses;
+                        valveConsMarkDirty(v);
+                    }
+                }
+            } else if(objId == "manual_valve_litres_total"){
+                // ── Recovery "Vanne manuelle" (cf. Globals.h) ──
+                unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                if(mqttRecoverIfGreater(mqttPulses, manualValveState.pulsesTotal, "VanneManuelle litres_total")){
+                    manualValveState.pulsesTotal = mqttPulses;
+                    manualValveDirty = true;
+                }
+            } else if(objId == "manual_valve_litres_today"){
+                unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                if(today != 0){
+                    MQTT_ROLLOVER_TODAY(manualValveState, today);
+                    if(mqttRecoverIfGreater(mqttPulses, manualValveState.todayPulses, "VanneManuelle litres_today")){
+                        manualValveState.todayPulses = (uint32_t)mqttPulses;
+                        manualValveDirty = true;
+                    }
+                }
+            } else if(objId == "manual_valve_pulses_total"){
+                unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                if(mqttRecoverIfGreater(mqttPulses, manualValveState.pulsesTotal, "VanneManuelle pulses_total")){
+                    manualValveState.pulsesTotal = mqttPulses;
+                    manualValveDirty = true;
+                }
+            } else if(objId == "manual_valve_pulses_today"){
+                unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                if(today != 0){
+                    MQTT_ROLLOVER_TODAY(manualValveState, today);
+                    if(mqttRecoverIfGreater(mqttPulses, manualValveState.todayPulses, "VanneManuelle pulses_today")){
+                        manualValveState.todayPulses = (uint32_t)mqttPulses;
+                        manualValveDirty = true;
+                    }
+                }
+            }
             return; // message de récupération traité — pas une commande switch
         }
     }
@@ -810,7 +631,7 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     int s = base.lastIndexOf('/');
     if(s < 0) return;
     String obj = base.substring(s+1); // ex: valve_0 ou pulse_total_reset
-    
+
     // Identifier composant
     String componentStr = sysConfig.mqttPrefix;
     bool isSwitch = t.startsWith(componentStr + "/switch/");
@@ -828,29 +649,19 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                 logAdd(v, "Fermée via Home Assistant");
             }
         }
-    } 
+    }
     else if(isButton && p.indexOf("PRESS")>=0) {
         if(obj == "pulse_total_reset") {
             noInterrupts(); pulseCount = 0; interrupts();
-            persistedPulseCount = 0; // no-op effectif en CONS_MQTT_ONLY (pulseSave() vide), mais conservé pour la version non-CONS_MQTT_ONLY
+            persistedPulseCount = 0; // no-op effectif en CONS_MQTT_ONLY, conservé pour la version non-CONS_MQTT_ONLY
             for(int vv=0;vv<VANNE_COUNT;vv++){
-                valveCons[vv].pulsesTotal = 0;
-                valveCons[vv].todayPulses = 0;
-                valveCons[vv].carry = 0.0f;
-                for(int d=0;d<CONS_HISTORY_DAYS;d++) valveCons[vv].history[d] = {0,0,0.0f};
+                resetValveCounters(vv);
                 valveConsSaveOne(vv);
             }
-            // Reset aussi le compteur "Vanne manuelle" (cf. Globals.h) —
-            // le bouton "pulse_total_reset" remet TOUT à zéro, par
-            // cohérence avec l'endpoint Web /api/pulse/reset.
-            manualValveState.pulsesTotal = 0;
-            manualValveState.todayPulses  = 0;
-            manualValveState.todayYmd     = todayYMD();
-            manualValveState.todayIdx     = 0;
-            manualValveState.carry        = 0.0f;
-            for(int d=0;d<CONS_HISTORY_DAYS;d++){
-                manualValveState.history[d] = {0,0,0.0f};
-            }
+            // Reset aussi le compteur "Vanne manuelle" — le bouton
+            // "pulse_total_reset" remet TOUT à zéro, par cohérence avec
+            // l'endpoint Web /api/pulse/reset.
+            resetManualValveCounters();
             manualValveFlushOne();
             pulseSave(); // no-op en CONS_MQTT_ONLY, persiste en mode normal
             lastDistributedTotal = 0;
@@ -858,17 +669,10 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
             logSys("Compteur global remis a zero via Home Assistant");
         }
         else if(obj == "manual_valve_reset"){
-            // ── Reset dédié "Vanne manuelle" (cf. Globals.h) ──
-            // N'affecte QUE le compteur manuel (et son rollover jour),
-            // pas le compteur global ni les vannes automatisées.
-            manualValveState.pulsesTotal = 0;
-            manualValveState.todayPulses  = 0;
-            manualValveState.todayYmd     = todayYMD();
-            manualValveState.todayIdx     = 0;
-            manualValveState.carry        = 0.0f;
-            for(int d=0;d<CONS_HISTORY_DAYS;d++){
-                manualValveState.history[d] = {0,0,0.0f};
-            }
+            // ── Reset dédié "Vanne manuelle" ── N'affecte QUE ce compteur
+            // (et son rollover jour), pas le compteur global ni les vannes
+            // automatisées.
+            resetManualValveCounters();
             manualValveFlushOne();
             lastMqttPubMs = 0; // Force MAJ MQTT immédiate
             logSys("Compteur VanneManuelle remis a zero via Home Assistant");
@@ -876,10 +680,7 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
         else {
             int v = -1;
             if(sscanf(obj.c_str(),"valve_%d_reset_cons",&v)==1 && v>=0 && v<VANNE_COUNT){
-                valveCons[v].pulsesTotal = 0;
-                valveCons[v].todayPulses = 0;
-                valveCons[v].carry = 0.0f;
-                for(int d=0;d<CONS_HISTORY_DAYS;d++) valveCons[v].history[d] = {0,0,0.0f};
+                resetValveCounters(v);
                 valveConsFlushOne(v);
                 lastMqttPubMs = 0; // Force update MQTT
                 logAdd(v, "Compteur conso remis a zero via HA");
@@ -921,7 +722,7 @@ inline void onMqttConnect(bool sessionPresent){
     mqttClient.subscribe(cmdTopic.c_str(), 0);
     String btnTopic = String(sysConfig.mqttPrefix) + "/button/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(btnTopic.c_str(), 0);
-    String availTopic = mqttTopicNode() + "/availability";
+    String availTopic = mqttAvailabilityTopic();
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
 #ifdef CONS_MQTT_ONLY
     // Recovery : s'abonne aux retained et ouvre la fenêtre 3s
@@ -973,6 +774,13 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     }
 }
 
+// ────────────────────────────────────────────────────────────
+// Setup — non bloquant : configure le client et lance UNE tentative de
+// connexion. mqttLoop() prend le relais avec son propre backoff en cas
+// d'échec ; onMqttDisconnect() donne déjà la raison précise (plus besoin
+// d'un sondage TCP manuel redondant ici).
+// ────────────────────────────────────────────────────────────
+
 inline void mqttSetup(){
     if(!sysConfig.mqttEnabled) return;
 
@@ -985,32 +793,18 @@ inline void mqttSetup(){
         mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
     }
 
-    // Test TCP brut : si le port est fermé, on bloque les retries 60s
-    {
-        WiFiClient probe;
-        probe.setTimeout(2000);
-        if(probe.connect(brokerIp, sysConfig.mqttPort)){
-            logSys("[MQTT] Test TCP OK — broker joignable");
-            probe.stop();
-        } else {
-            logSys("[MQTT] ✗ Test TCP ÉCHEC — (broker injoignable: check VLAN/DNS)");
-            lastMqttConnectAttemptMs = millis() + 45000UL;
-            return;
-        }
-    }
-
     mqttClient.setClientId(sysConfig.mqttId);
     if(strlen(sysConfig.mqttUser)>0){
         mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
     }
 
-    // ★ CRITICAL : AsyncMqttClient ne COPIE pas la chaîne du topic LWT —
-    // il stocke le pointeur c_str() tel quel. Une String locale serait
-    // détruite à la fin de mqttSetup() et Mosquitto recevrait des déchets
-    // mémoire en guise de topic → RST instantané. static String garantit
-    // que le buffer reste vivant pour tous les connect() ultérieurs.
+    // ★ CRITICAL : AsyncMqttClient ne COPIE pas la chaîne du topic LWT — il
+    // stocke le pointeur c_str() tel quel. Une String locale serait détruite
+    // à la fin de mqttSetup() et Mosquitto recevrait des déchets mémoire en
+    // guise de topic → RST instantané. static String garantit que le buffer
+    // reste vivant pour tous les connect() ultérieurs.
     static String availTopic;
-    availTopic = mqttTopicNode() + "/availability";
+    availTopic = mqttAvailabilityTopic();
     mqttClient.setWill(availTopic.c_str(), 0, true, "offline");
 
     mqttClient.setKeepAlive(60);
@@ -1031,30 +825,15 @@ inline void mqttSetup(){
         logSys(b);
     }
 
-    for(int attempt=0; attempt<3; attempt++){
-        if(attempt > 0){
-            char rb[80];
-            snprintf(rb, sizeof(rb), "[MQTT] Retry connect() #%d après %d ms", attempt+1, 500 * attempt);
-            logSys(rb);
-            delay(500 * attempt);
-        }
-        mqttClient.connect();
-        for(int wait=0; wait<30; wait++){
-            if(mqttConnected) break;
-            delay(50);
-        }
-        if(mqttConnected){
-            char cb[80];
-            snprintf(cb, sizeof(cb), "[MQTT] ✓ Connecté dès la tentative #%d", attempt+1);
-            logSys(cb);
-            break;
-        }
-    }
-    if(!mqttConnected){
-        logSys("[MQTT] ✗ Setup: 3 tentatives échouées — retry via mqttLoop()");
-    }
+    // Une seule tentative non bloquante ici ; mqttLoop() gère le reste
+    // (retry + backoff exponentiel) si elle échoue.
+    mqttClient.connect();
     lastMqttConnectAttemptMs = millis();
 }
+
+// ────────────────────────────────────────────────────────────
+// Loop
+// ────────────────────────────────────────────────────────────
 
 inline void mqttLoop(){
     if(!sysConfig.mqttEnabled){ mqttConnected = false; return; }
@@ -1063,50 +842,41 @@ inline void mqttLoop(){
     bool wifiUp = (WiFi.status() == WL_CONNECTED);
 
     // ── RESET DU COMPTEUR D'ÉCHECS QUAND LE WIFI EST KO ──
-    // Si on a une rafale d'échecs MQTT, c'est potentiellement à cause
-    // d'une perte WiFi transitoire. Tant que le WiFi n'est pas rétabli,
-    // on n'incrémente pas le compteur d'échecs (la pile TCP refusera
-    // toujours le connect()). Sans ce reset, on accumulerait des
-    // échecs fantômes pendant la coupure WiFi et on aurait un backoff
-    // de 60s APRÈS le retour du WiFi — exactement le bug observé
-    // "ça reste KO toute la nuit".
+    // Si on a une rafale d'échecs MQTT, c'est potentiellement à cause d'une
+    // perte WiFi transitoire. Tant que le WiFi n'est pas rétabli, on
+    // n'incrémente pas le compteur d'échecs (la pile TCP refusera toujours
+    // le connect()). Sans ce reset, on accumulerait des échecs fantômes
+    // pendant la coupure WiFi et on aurait un backoff de 60s APRÈS le
+    // retour du WiFi — exactement le bug observé "ça reste KO toute la nuit".
     if(!wifiUp){
         mqttConsecutiveFailures = 0;
     }
 
     // ── WATCHDOG D'INACTIVITÉ ──
-    // Seules les confirmations réelles (PUBACK/SUBACK/messages) réarment
-    // ce timer, garantissant la détection d'une socket zombie.
-    if(mqttConnected && mqttLastActivityMs > 0 
+    // Seules les confirmations réelles (PUBACK/SUBACK/messages) réarment ce
+    // timer, garantissant la détection d'une socket zombie.
+    if(mqttConnected && mqttLastActivityMs > 0
        && (now - mqttLastActivityMs) > MQTT_WATCHDOG_MS){
-        // Serial.printf("[MQTT] ⚠ Watchdog: aucune activité CONFIRMÉE depuis %lu s — forçage reconnexion\n",
-        //              (unsigned long)((now - mqttLastActivityMs) / 1000UL));
         logSys("[MQTT] Watchdog inactivité (aucun PUBACK/SUBACK/RX) — reconnexion forcée");
-        // Déconnexion brutale pour éviter de polluer la pile TCP asynchrone
+        mqttClient.disconnect(true); // brutale, pour éviter de polluer la pile TCP asynchrone
+        mqttConnected = false;
+        mqttLastActivityMs = 0;
+        lastMqttConnectAttemptMs = millis(); // redémarre le calcul du backoff
+    }
+
+    // Reconnexion préventive périodique (purge état zombie éventuel).
+    if (mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS) {
+        lastMqttForceReconnectMs = now;
+        logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
         mqttClient.disconnect(true);
         mqttConnected = false;
         mqttLastActivityMs = 0;
-        // On pose l'instant d'échec pour redémarrer le calcul du backoff
-        // et éviter une boucle de reconnexion ininterrompue
         lastMqttConnectAttemptMs = millis();
     }
 
-        // Reconnexion préventive périodique.
-        if (mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS) {
-            lastMqttForceReconnectMs = now;
-            logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
-            delay(100);
-            mqttClient.disconnect(true);
-            mqttConnected = false;
-            mqttLastActivityMs = 0;
-            // Éviter l'integer underflow dans le script de reconnexion
-            lastMqttConnectAttemptMs = millis();
-        }
-
     if(!mqttConnected && wifiUp){
-        now = millis(); // FIX : actualisation de now après delay() ou callbacks
         // ── CALCUL DU DÉLAI DE RETRY (backoff exponentiel) ──
-        // Pour 1 échec : 5s ; 2 échecs : 10s ; 3 : 20s ; 4 : 40s ; 5+ : 60s
+        // 1 échec : 5s ; 2 : 10s ; 3 : 20s ; 4 : 40s ; 5+ : 60s
         unsigned long backoffDelay = MQTT_RECONNECT_MS;
         if(mqttConsecutiveFailures > 0){
             unsigned long shift = min((unsigned long)mqttConsecutiveFailures - 1, 4UL);
@@ -1115,12 +885,9 @@ inline void mqttLoop(){
         }
         if(now - lastMqttConnectAttemptMs > backoffDelay){
             lastMqttConnectAttemptMs = now;
-            // Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
-            //              (unsigned)mqttConsecutiveFailures,
-            //              (unsigned long)(backoffDelay / 1000UL));
-            // On logue via logSys uniquement lors d'une transition
-            // pour ne pas spammer les logs une fois arrivé au backoff max (60s).
-            // Un rappel discret est émis toutes les 30 min (MQTT_DOWN_HEARTBEAT_MS).
+            // Log uniquement lors d'une transition, pour ne pas spammer une
+            // fois arrivé au backoff max (60s). Rappel discret toutes les
+            // 30 min (MQTT_DOWN_HEARTBEAT_MS) sinon.
             if(mqttConsecutiveFailures != lastLoggedMqttFailureCount){
                 lastLoggedMqttFailureCount = mqttConsecutiveFailures;
                 lastMqttDownHeartbeatMs = now;
@@ -1140,78 +907,53 @@ inline void mqttLoop(){
                 logSys(b);
             }
 
-            // ── DIAGNOSTIC TCP SYNCHRONE AVANT ASYNCMQTTCLIENT ──
-            {
-                WiFiClient probe;
-                probe.setTimeout(2000);
-                bool tcpOk = probe.connect(sysConfig.mqttHost, sysConfig.mqttPort);
-                if(tcpOk){
-                    probe.stop();
-                    // Test TCP Ok. On injecte explicitement l'IPAddress
-                    // ou le hostname à configurer.
-                    IPAddress brokerIp;
-                    bool ipOk = brokerIp.fromString(sysConfig.mqttHost);
-                    {
-                        char tb[120];
-                        snprintf(tb, sizeof(tb), "[MQTT] probe OK → setServer(%s) + connect()",
-                                 ipOk ? brokerIp.toString().c_str() : sysConfig.mqttHost);
-                        logSys(tb);
-                    }
-                    if(ipOk){
-                        mqttClient.setServer(brokerIp, sysConfig.mqttPort);
-                    } else {
-                        mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
-                    }
-                    mqttClient.setClientId(sysConfig.mqttId);
-                    if(strlen(sysConfig.mqttUser)>0){
-                        mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
-                    }
-                    mqttClient.connect();
-                } else {
-                    logSys("[MQTT] ✗ Diagnostic: Probe TCP a échoué ! LwIP/routeur refuse le trafic sur ce port.");
-                    onMqttDisconnect(AsyncMqttClientDisconnectReason::TCP_DISCONNECTED);
-                }
+            // Reconfigure au cas où l'IP du broker aurait changé (DHCP),
+            // puis tente la connexion. onMqttDisconnect() nous donnera la
+            // raison précise en cas d'échec (plus besoin d'un sondage TCP
+            // manuel préalable, redondant avec ce callback).
+            IPAddress brokerIp;
+            if(brokerIp.fromString(sysConfig.mqttHost)){
+                mqttClient.setServer(brokerIp, sysConfig.mqttPort);
+            } else {
+                mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
             }
+            mqttClient.connect();
         }
     }
 
     if(mqttConnected){
-if(!mqttDiscoveryPublished){
-    mqttDiscoveryPublished = true;
-    #ifdef CONS_MQTT_ONLY
-        // En mode CONS_MQTT_ONLY on est encore abonné aux topics sensor/+
-        // pour la recovery : publier maintenant provoquerait un auto-écho
-        // (le firmware recevrait son propre message retained comme une
-        // "valeur de session précédente" et la re-traiterait). On diffère
-        // ce premier publish à la fin de la fenêtre de recovery.
-        if(mqttRecoveryDone){
+        if(!mqttDiscoveryPublished){
+            mqttDiscoveryPublished = true;
+#ifdef CONS_MQTT_ONLY
+            // En mode CONS_MQTT_ONLY on est encore abonné aux topics
+            // sensor/+ pour la recovery : publier maintenant provoquerait un
+            // auto-écho (le firmware recevrait son propre message retained
+            // comme une "valeur de session précédente" et le retraiterait).
+            // On diffère ce premier publish à la fin de la fenêtre de recovery.
+            if(mqttRecoveryDone){
+                mqttPublishDiscovery();
+                mqttPublishState();
+                lastMqttPubMs = now;
+            }
+#else
             mqttPublishDiscovery();
             mqttPublishState();
             lastMqttPubMs = now;
+#endif
         }
-    #else
-        mqttPublishDiscovery();
-        mqttPublishState();
-        lastMqttPubMs = now;
-    #endif
-    }
-
 
 #ifdef CONS_MQTT_ONLY
-        // ── Fin de fenêtre de récupération (3 s après connexion) ─────────────
-        // On ferme la fenêtre, on flush les valeurs restaurées en NVS, on
-        // se désabonne du pattern sensor (pour ne plus recevoir les états
-        // futurs comme des retained de récupération), puis on publie
-        // la discovery et l'état fusionné final.
+        // ── Fin de fenêtre de récupération (3 s après connexion) ──
+        // On ferme la fenêtre, on flush les valeurs restaurées en NVS, on se
+        // désabonne du pattern sensor (pour ne plus recevoir les états
+        // futurs comme des retained de récupération), puis on publie la
+        // discovery et l'état fusionné final.
         if(!mqttRecoveryDone && (now - mqttRecoveryStartMs >= 3000UL)){
             mqttRecoveryDone = true;
-            // Désabonnement du pattern de recovery
             String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
             mqttClient.unsubscribe(recovPattern.c_str());
-            // Flush NVS des valeurs éventuellement restaurées
             valveConsFlushDirty();
             logSys("[CONS] Recovery MQTT terminée — NVS mis à jour");
-            // Publication discovery + état fusionné après récupération
             mqttPublishDiscovery();
             mqttPublishState();
             lastMqttPubMs = now;
@@ -1220,19 +962,20 @@ if(!mqttDiscoveryPublished){
         if(now - lastMqttPubMs > MQTT_PUB_INTERVAL_MS){
             lastMqttPubMs = now;
 #ifdef CONS_MQTT_ONLY
-            // En mode recovery, ne pas publier l'état avant la fin de la fenêtre
-            // (on ne voudrait pas retained avec des valeurs partielles sur le broker)
+            // En mode recovery, ne pas publier l'état avant la fin de la
+            // fenêtre (on ne voudrait pas de retained avec des valeurs
+            // partielles sur le broker).
             if(mqttRecoveryDone) mqttPublishState();
 #else
             mqttPublishState();
 #endif
-            // ★ FIX : plus de mqttLastActivityMs=millis() ici — un publish()
-            // QoS 0 sortant ne prouve rien. Voir watchdog ci-dessus et
-            // canari ci-dessous pour la vraie confirmation.
+            // Pas de mqttLastActivityMs=millis() ici — un publish() QoS 0
+            // sortant ne prouve rien. Voir watchdog ci-dessus et canari
+            // ci-dessous pour la vraie confirmation.
         }
 
-        // ★ FIX : canari QoS 1 périodique — seule source de confirmation
-        // continue de vie de la session en dehors des messages reçus.
+        // Canari QoS 1 périodique — seule source de confirmation continue de
+        // vie de la session en dehors des messages reçus.
         if(now - lastMqttCanaryMs > MQTT_CANARY_INTERVAL_MS){
             lastMqttCanaryMs = now;
             mqttSendCanary();
