@@ -151,6 +151,10 @@ const char WEB_CONFIG_HTML[] PROGMEM = R"HTML(
         <div><label>Préfixe topic (défaut: homeassistant)</label><input id="cfg-mqprefix" type="text"/></div>
         <div><label>ID nœud MQTT (unique_id HA)</label><input id="cfg-mqid" type="text"/></div>
       </div>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-ghost btn-sm" onclick="api('POST','/api/mqtt/disconnect').then(()=>alert('Déconnexion MQTT forcée (Debug)'))">⚠ Forcer Déconnexion</button>
+        <span style="font-size:.78rem;color:var(--text-muted)">Pour debug (simule une perte de connexion réseau).</span>
+      </div>
     </div>
 
     <!-- ── MAINTENANCE / ÉTAT NVS ──────────────────────────────

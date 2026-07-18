@@ -4,26 +4,8 @@
 // Contrôleur d'arrosage professionnel 8 vannes
 // Séparée de MainIocan.cpp pour lisibilité
 //
-// CORRECTIFS appliqués dans cette révision (revue complète demandée) :
-//   1) handleStatus() lit désormais data.tempR, qui est maintenant bien
-//      envoyé par buildStatusJson() côté firmware (voir MainIocan.cpp).
-//   2) saveConfig() : fallback "8" remplacé par une constante VALVE_COUNT_FALLBACK
-//      alignée sur le VANNE_COUNT réel du firmware (5), pour éviter d'envoyer
-//      des noms de vannes fantômes si /api/config n'a pas encore répondu.
-//   3) buildSchedValveSelect() : même fallback corrigé (5 au lieu de 8), pour
-//      éviter de proposer des vannes inexistantes dans le modal programme
-//      avant la première réponse status.
-//   4) closeAll() : ajout d'une confirmation utilisateur avant de fermer
-//      toutes les vannes (action destructive sans garde-fou auparavant).
-//   5) scheduleMatchesOnDate() (mode intervalle) : calcul du jour de l'année
-//      aligné sur UTC (comme renderCalendar()) au lieu d'un calcul en heure
-//      locale, pour éviter une désynchronisation d'un jour entre le badge
-//      du calendrier et le texte "Prochain événement" sur la carte vanne.
-//   6) Commentaire weekDays par défaut clarifié (cohérent avec le firmware).
-//   B) saveConfig() : vérifie désormais d.ok avant d'afficher "sauvegardée",
-//      pour ne pas induire l'utilisateur en erreur en cas d'échec réseau.
-//   A) Badge MQTT ajouté dans le header, reflète mqttConnected envoyé par
-//      le firmware dans buildStatusJson().
+// Contient les chunks HTML/CSS/JS de l'interface web, stockés en PROGMEM
+// voir chargement dans webmanager.h  et doc dans le readme.me
 // ============================================================
 
 
@@ -690,12 +672,12 @@ function renderValveCards() {
       const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0) ? window.PULSES_PER_LITRE : 0;
       if(fc > 0 && ppl > 0){
         const l = (fc * (v.remainingSec || 0)) / ppl;
-        remainingLitresHtml = `<div class="vc-remaining-l"><span class="vc-remaining-l-label">? Restant</span>${l.toFixed(2)} L</div>`;
+        remainingLitresHtml = `<div class="vc-remaining-l"><span class="vc-remaining-l-label">💧 Restant</span>${l.toFixed(2)} L</div>`;
       } else {
         // Vanne ouverte mais pas (encore) calibrée : on affiche un libellé
         // discret plutôt qu'une valeur inventée, pour rester honnête avec
         // l'utilisateur. "calibrer" est cliquable vers la page calibration.
-        remainingLitresHtml = `<div class="vc-remaining-l" style="color:var(--text-muted);font-weight:500"><span class="vc-remaining-l-label">? Restant</span>— (non calibré)</div>`;
+        remainingLitresHtml = `<div class="vc-remaining-l" style="color:var(--text-muted);font-weight:500"><span class="vc-remaining-l-label">💧 Restant</span>— (non calibré)</div>`;
       }
     }
     return `
@@ -711,7 +693,7 @@ function renderValveCards() {
         Total cumulé: ${fmtSec(v.totalOpenSec)}</div>
       <div style="margin: 4px 0 10px; display:flex; gap:8px; flex-wrap:wrap; align-items:center;">
         <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--blue-dim);color:var(--blue);display:flex;align-items:center;gap:6px">
-          ? Aujourd'hui: <strong>${(v.litresToday||0).toFixed(2)} L</strong>
+          💧 Aujourd'hui: <strong>${(v.litresToday||0).toFixed(2)} L</strong>
           <button class="btn" style="padding:0 4px;height:18px;font-size:0.6rem;font-weight:bold;background:var(--blue);color:#fff;border:none;border-radius:10px" onclick="resetValveCons(${i}, 'today')" title="Remettre le jour à zéro">RAZ</button>
         </span>
         <span style="font-size:.75rem;padding:4px 10px;border-radius:20px;background:var(--surface2);color:var(--text-muted);display:flex;align-items:center;gap:6px">

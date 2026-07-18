@@ -148,7 +148,6 @@ inline String mqttPayloadFloat(float value){
 inline void mqttPublishConfig(const char* component, const char* objId, const String& payload){
     if(!mqttConnected) return;
     String topic = mqttTopic(component, objId) + "/config";
-    Serial.printf("[MQTT] discovery -> %s\n", topic.c_str());
     // qos 0, retain true
     mqttClient.publish(topic.c_str(), 0, true, payload.c_str(), payload.length());
 }
@@ -552,7 +551,7 @@ inline void mqttPublishDiscovery(){
             mqttPublishConfig("button", oid, out);
         }
     }
-    Serial.println("[MQTT] Discovery publié");
+    // Serial.println("[MQTT] Discovery publié");
 }
 
 // ── Publication de l'état complet (capteurs + vannes)
@@ -746,6 +745,13 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                         liveTotal, mqttPulses);
                     logSys(b);
                     persistedPulseCount = mqttPulses;
+                    // CRITIQUE : realigner lastDistributedTotal sur le
+                    // total restauré, sinon pulseDistribute() verra un
+                    // delta énorme (mqttPulses - 0) au prochain tour et
+                    // attribuera TOUS ces pulses à la vanne manuelle (si
+                    // aucune vanne auto n'est ouverte) — contaminant
+                    // manualValveState.pulsesTotal avec le compteur global.
+                    lastDistributedTotal = mqttPulses + cnt;
                     // pas de pulseSave() : no-op en CONS_MQTT_ONLY
                     // (cf. ConfigManager.h). Au prochain reboot, la
                     // valeur sera de nouveau lue depuis MQTT retained.
@@ -765,6 +771,11 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                         liveTotal, mqttPulses);
                     logSys(b);
                     persistedPulseCount = mqttPulses;
+                    // CRITIQUE : realigner lastDistributedTotal (même
+                    // raison que pour pulse_total ci-dessus — sinon
+                    // pulseDistribute() attribue le delta à la vanne
+                    // manuelle).
+                    lastDistributedTotal = mqttPulses + cnt;
                 }
             } else {
                     // valve_N_litres_today ou valve_N_litres_total (publiés en litres)
@@ -837,16 +848,14 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                         }
                     } else if(objId == "manual_valve_litres_total"){
                         // ── Recovery "Vanne manuelle" (cf. Globals.h) ──
-                        // Mêmes règles que les vannes : on ne récupère
-                        // que si la valeur MQTT retained est strictement
-                        // supérieure à la RAM (un compteur ne peut que
-                        // progresser entre deux sessions). Conversion
-                        // L→pulses moins précise que la version pulses
-                        // brutes, mais sert de fallback si la version
-                        // pulses n'est pas retained.
                         unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
+                        char b[140];
+                        snprintf(b,sizeof(b),
+                            "[RECOVERY] VanneManuelle litres_total: RAM=%lu pulses MQTT=%lu (val=%.2f)",
+                            manualValveState.pulsesTotal, mqttPulses, val);
+                        logSys(b);
                         if(mqttPulses > manualValveState.pulsesTotal){
-                            char b[120]; snprintf(b,sizeof(b),
+                            snprintf(b,sizeof(b),
                                 "[RECOVERY] VanneManuelle litres_total: RAM=%lu < MQTT=%lu pulses — restauré",
                                 manualValveState.pulsesTotal, mqttPulses);
                             logSys(b);
@@ -856,13 +865,18 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                     } else if(objId == "manual_valve_litres_today"){
                         unsigned long mqttPulses = (unsigned long)(val * PULSES_PER_LITRE + 0.5f);
                         uint16_t today = todayYMD();
+                        char b[140];
+                        snprintf(b,sizeof(b),
+                            "[RECOVERY] VanneManuelle litres_today: RAM=%u pulses MQTT=%lu (val=%.2f)",
+                            (unsigned)manualValveState.todayPulses, mqttPulses, val);
+                        logSys(b);
                         if(today != 0){
                             if(manualValveState.todayYmd != today){
                                 manualValveState.todayYmd = today;
                                 manualValveState.todayPulses = 0;
                             }
                             if(mqttPulses > manualValveState.todayPulses){
-                                char b[120]; snprintf(b,sizeof(b),
+                                snprintf(b,sizeof(b),
                                     "[RECOVERY] VanneManuelle litres_today: RAM=%u < MQTT=%lu pulses — restauré",
                                     (unsigned)manualValveState.todayPulses, mqttPulses);
                                 logSys(b);
@@ -872,8 +886,13 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                         }
                     } else if(objId == "manual_valve_pulses_total"){
                         unsigned long mqttPulses = (unsigned long)(val + 0.5f);
+                        char b[140];
+                        snprintf(b,sizeof(b),
+                            "[RECOVERY] VanneManuelle pulses_total: RAM=%lu MQTT=%lu (val=%.1f)",
+                            manualValveState.pulsesTotal, mqttPulses, val);
+                        logSys(b);
                         if(mqttPulses > manualValveState.pulsesTotal){
-                            char b[120]; snprintf(b,sizeof(b),
+                            snprintf(b,sizeof(b),
                                 "[RECOVERY] VanneManuelle pulses_total: RAM=%lu < MQTT=%lu — restauré",
                                 manualValveState.pulsesTotal, mqttPulses);
                             logSys(b);
@@ -883,13 +902,18 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                     } else if(objId == "manual_valve_pulses_today"){
                         unsigned long mqttPulses = (unsigned long)(val + 0.5f);
                         uint16_t today = todayYMD();
+                        char b[140];
+                        snprintf(b,sizeof(b),
+                            "[RECOVERY] VanneManuelle pulses_today: RAM=%u MQTT=%lu (val=%.1f)",
+                            (unsigned)manualValveState.todayPulses, mqttPulses, val);
+                        logSys(b);
                         if(today != 0){
                             if(manualValveState.todayYmd != today){
                                 manualValveState.todayYmd = today;
                                 manualValveState.todayPulses = 0;
                             }
                             if(mqttPulses > manualValveState.todayPulses){
-                                char b[120]; snprintf(b,sizeof(b),
+                                snprintf(b,sizeof(b),
                                     "[RECOVERY] VanneManuelle pulses_today: RAM=%u < MQTT=%lu — restauré",
                                     (unsigned)manualValveState.todayPulses, mqttPulses);
                                 logSys(b);
@@ -1013,12 +1037,7 @@ inline void onMqttSubscribeAck(uint16_t packetId, uint8_t qos){
 inline void onMqttConnect(bool sessionPresent){
     mqttConnected = true;
     mqttDiscoveryPublished = false;
-    // Reset du compteur d'échecs et armement du watchdog d'inactivité.
-    // Le watchdog a besoin d'un timestamp d'activité fraîche à chaque
-    // connexion réussie, sinon il considérerait immédiatement la connexion
-    // comme morte. (Cette mise à jour initiale est un armement de départ,
-    // pas une preuve broker — les preuves viendront ensuite via
-    // onMqttPublishAck/onMqttSubscribeAck/mqttHandleMessage.)
+    logSys("[MQTT] onMqttConnect callback reçu");
     unsigned long downtimeMs = (mqttDisconnectMs > 0) ? (millis() - mqttDisconnectMs) : 0;
     mqttConsecutiveFailures = 0;
     mqttLastActivityMs      = millis();
@@ -1031,7 +1050,7 @@ inline void onMqttConnect(bool sessionPresent){
     // la prochaine coupure reloggue bien à partir de "échecs=1".
     lastLoggedMqttFailureCount = 0;
     lastMqttDownHeartbeatMs    = millis();
-    Serial.println("[MQTT] Connecté");
+    // Serial.println("[MQTT] Connecté");
     {
         char b[160];
         snprintf(b, sizeof(b), "[MQTT] ✓ Reconnecté (downtime ~%lu s, échecs consécutifs remis à 0)",
@@ -1042,8 +1061,8 @@ inline void onMqttConnect(bool sessionPresent){
     mqttClient.subscribe(cmdTopic.c_str(), 0);
     String btnTopic = String(sysConfig.mqttPrefix) + "/button/" + sysConfig.mqttId + "/+/set";
     mqttClient.subscribe(btnTopic.c_str(), 0);
-    Serial.print("[MQTT] Abonné à: "); Serial.println(cmdTopic);
-    Serial.print("[MQTT] Abonné à: "); Serial.println(btnTopic);
+    // Serial.print("[MQTT] Abonné à: "); Serial.println(cmdTopic);
+    // Serial.print("[MQTT] Abonné à: "); Serial.println(btnTopic);
     // Publication disponibilité
     String availTopic = mqttTopicNode() + "/availability";
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
@@ -1059,7 +1078,7 @@ inline void onMqttConnect(bool sessionPresent){
     mqttClient.subscribe(recovPattern.c_str(), 0);
     mqttRecoveryDone    = false;
     mqttRecoveryStartMs = millis();
-    Serial.print("[MQTT] Recovery MQTT activée, abonné à: "); Serial.println(recovPattern);
+    // Serial.print("[MQTT] Recovery MQTT activée, abonné à: "); Serial.println(recovPattern);
     logSys("[CONS] Recovery MQTT démarrée (fenêtre 3s)");
     // NB : on NE publie pas discovery ni state ici — on attend la fin de la
     // fenêtre de récupération (mqttLoop) pour publier l'état fusionné juste.
@@ -1073,6 +1092,14 @@ inline void onMqttConnect(bool sessionPresent){
 inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     mqttConnected = false;
     mqttDiscoveryPublished = false;
+    // Trace : temps écoulé depuis le dernier connect() pour comprendre
+    // si la déco est instantanée (socket refusée) ou après un délai.
+    {
+        char tb[120];
+        snprintf(tb, sizeof(tb), "[MQTT] onMqttDisconnect: reason=%d, %lu ms après dernier connect()",
+                 (int)r, (unsigned long)(millis() - lastMqttConnectAttemptMs));
+        logSys(tb);
+    }
     // ── RESET DU THROTTLE DE RECONNEXION ──
     // ★ FIX (juillet 2026, bug #2 — LE VRAI GROS BUG du flood de logs) :
     // l'ancienne version faisait `lastMqttConnectAttemptMs = 0`. Or dans
@@ -1102,10 +1129,10 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
     // 40s, 60s (plafond). Remis à 0 dans onMqttConnect() lors d'une
     // reconnexion réussie.
     if(mqttConsecutiveFailures < 10) mqttConsecutiveFailures++;
-    Serial.printf("[MQTT] Échecs consécutifs: %u (prochain retry dans %lu s)\n",
-                  (unsigned)mqttConsecutiveFailures,
-                  (unsigned long)(min(MQTT_BACKOFF_MAX_MS,
-                                      MQTT_BACKOFF_MIN_MS * (1UL << min((int)mqttConsecutiveFailures-1, 4)))) / 1000UL);
+    // Serial.printf("[MQTT] Échecs consécutifs: %u (prochain retry dans %lu s)\n",
+    //              (unsigned)mqttConsecutiveFailures,
+    //              (unsigned long)(min(MQTT_BACKOFF_MAX_MS,
+    //                                  MQTT_BACKOFF_MIN_MS * (1UL << min((int)mqttConsecutiveFailures-1, 4)))) / 1000UL);
     // Libellé lisible de la raison — pratique quand le broker refuse la
     // connexion (auth invalide, version protocole incompatible, etc.) ou
     // quand l'ESP n'arrive simplement pas à joindre le port TCP.
@@ -1121,7 +1148,7 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
         case AsyncMqttClientDisconnectReason::TLS_BAD_FINGERPRINT:       reasonStr = "TLS_BAD_FINGERPRINT"; break;
         default:                                                        reasonStr = "UNKNOWN"; break;
     }
-    Serial.printf("[MQTT] Déconnecté (%d = %s)\n", (int)r, reasonStr);
+    // Serial.printf("[MQTT] Déconnecté (%d = %s)\n", (int)r, reasonStr);
     // ── TRACE logSys — c'est ÇA qu'on cherche le matin ! ──
     // Avant ce patch, seule la trace Serial était écrite, donc rien n'était
     // visible via l'API /logs (logToJson) et la page Logs de l'UI. On logue
@@ -1140,12 +1167,11 @@ inline void onMqttDisconnect(AsyncMqttClientDisconnectReason r){
 
 inline void mqttSetup(){
     if(!sysConfig.mqttEnabled){
-        Serial.println("[MQTT] Désactivé dans la config — client non démarré");
         return;
     }
-    Serial.printf("[MQTT] Démarrage: host='%s' port=%u user='%s' id='%s'\n",
-                  sysConfig.mqttHost, (unsigned)sysConfig.mqttPort,
-                  sysConfig.mqttUser, sysConfig.mqttId);
+    // Serial.printf("[MQTT] Démarrage: host='%s' port=%u user='%s' id='%s'\n",
+    //              sysConfig.mqttHost, (unsigned)sysConfig.mqttPort,
+    //              sysConfig.mqttUser, sysConfig.mqttId);
 
     // setServer() a un comportement différent selon qu'on lui passe une IP
     // numérique ou un hostname. Pour une IP (notre cas par défaut), on
@@ -1157,10 +1183,8 @@ inline void mqttSetup(){
     // d'erreur intermédiaire).
     IPAddress brokerIp;
     if(brokerIp.fromString(sysConfig.mqttHost)){
-        Serial.printf("[MQTT] Broker IP parsée: %s\n", brokerIp.toString().c_str());
         mqttClient.setServer(brokerIp, sysConfig.mqttPort);
     } else {
-        Serial.printf("[MQTT] Host non-IP, résolution DNS: %s\n", sysConfig.mqttHost);
         mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
     }
 
@@ -1170,19 +1194,21 @@ inline void mqttSetup(){
     // les logs avec des TCP_DISCONNECTED en boucle. À l'inverse, si le
     // port répond ici mais qu'AsyncMqttClient échoue quand même, on
     // saura que le problème vient de la lib asynchrone et pas du réseau.
-    Serial.printf("[MQTT] Test TCP brut vers %s:%u...\n",
-                  brokerIp.toString().c_str(), (unsigned)sysConfig.mqttPort);
+    // Serial.printf("[MQTT] Test TCP brut vers %s:%u...\n",
+    //              brokerIp.toString().c_str(), (unsigned)sysConfig.mqttPort);
     {
         WiFiClient probe;
         probe.setTimeout(2000);
         bool tcpOk = probe.connect(brokerIp, sysConfig.mqttPort);
         if(tcpOk){
-            Serial.println("[MQTT] Test TCP OK — broker joignable");
+            // Serial.println("[MQTT] Test TCP OK — broker joignable");
+            logSys("[MQTT] Test TCP OK — broker joignable");
             probe.stop();
         } else {
-            Serial.println("[MQTT] Test TCP ÉCHEC — broker injoignable depuis l'ESP32");
-            Serial.println("[MQTT] Causes possibles: VLAN séparé, isolation AP, route manquante");
-            Serial.println("[MQTT] Connexion MQTT abandonnée — pas de retry pendant 60s");
+            // Serial.println("[MQTT] Test TCP ÉCHEC — broker injoignable depuis l'ESP32");
+            // Serial.println("[MQTT] Causes possibles: VLAN séparé, isolation AP, route manquante");
+            // Serial.println("[MQTT] Connexion MQTT abandonnée — pas de retry pendant 60s");
+            logSys("[MQTT] ✗ Test TCP ÉCHEC — (broker injoignable: check VLAN/VLAN guest/DNS)");
             // On bloque les retries pendant 60s pour éviter le spam
             lastMqttConnectAttemptMs = millis() + 45000UL;
             return;
@@ -1199,7 +1225,13 @@ inline void mqttSetup(){
     // Home Assistant continuait à afficher l'appareil comme "online" pour
     // toujours après un crash, car le topic availability restait figé sur
     // la dernière valeur retained ("online") publiée avant la coupure.
-    String availTopic = mqttTopicNode() + "/availability";
+    // ★ CRITICAL FIX : AsyncMqttClient ne copie PAS la chaine, il garde
+    // le pointeur c_str() en mémoire ! Si on utilise une variable locale,
+    // le pointeur devient invalide dès la fin de mqttSetup(), provoquant 
+    // l'envoi de requêtes MQTT totalement corrompues 15min plus tard lors
+    // des reconnexions (ce qui force Mosquitto à Fermer / RST sans répondre).
+    static String availTopic;
+    availTopic = mqttTopicNode() + "/availability";
     mqttClient.setWill(availTopic.c_str(), 0, true, "offline");
     mqttClient.setKeepAlive(60);
     mqttClient.setCleanSession(true);
@@ -1219,8 +1251,8 @@ inline void mqttSetup(){
     // préalable réussi ci-dessus, mais AsyncMqttClient utilise un
     // canal asynchrone différent. On retente plusieurs fois avec délai
     // croissant pour donner à la pile le temps de se stabiliser.
-    Serial.printf("[MQTT] WiFi status=%d, RSSI=%d, heap=%u — lancement connect()\n",
-                  (int)WiFi.status(), WiFi.RSSI(), (unsigned)ESP.getFreeHeap());
+    // Serial.printf("[MQTT] WiFi status=%d, RSSI=%d, heap=%u — lancement connect()\n",
+    //              (int)WiFi.status(), WiFi.RSSI(), (unsigned)ESP.getFreeHeap());
     {
         char b[160];
         snprintf(b, sizeof(b), "[MQTT] Setup: host=%s port=%u id=%s (heap=%u, RSSI=%d)",
@@ -1230,8 +1262,8 @@ inline void mqttSetup(){
     }
     for(int attempt=0; attempt<3; attempt++){
         if(attempt > 0){
-            Serial.printf("[MQTT] Retry connect() #%d après %d ms\n",
-                          attempt+1, 500 * attempt);
+            // Serial.printf("[MQTT] Retry connect() #%d après %d ms\n",
+            //              attempt+1, 500 * attempt);
             char rb[80];
             snprintf(rb, sizeof(rb), "[MQTT] Retry connect() #%d après %d ms",
                      attempt+1, 500 * attempt);
@@ -1246,7 +1278,7 @@ inline void mqttSetup(){
             delay(50);
         }
         if(mqttConnected){
-            Serial.printf("[MQTT] ✓ Connecté dès la tentative #%d\n", attempt+1);
+            // Serial.printf("[MQTT] ✓ Connecté dès la tentative #%d\n", attempt+1);
             char cb[80];
             snprintf(cb, sizeof(cb), "[MQTT] ✓ Connecté dès la tentative #%d", attempt+1);
             logSys(cb);
@@ -1254,7 +1286,7 @@ inline void mqttSetup(){
         }
     }
     if(!mqttConnected){
-        Serial.println("[MQTT] ✗ Toutes les tentatives échouées — mqttLoop() retentera périodiquement");
+        // Serial.println("[MQTT] ✗ Toutes les tentatives échouées — mqttLoop() retentera périodiquement");
         logSys("[MQTT] ✗ Setup: 3 tentatives échouées — retry via mqttLoop()");
     }
     lastMqttConnectAttemptMs = millis();
@@ -1294,16 +1326,14 @@ inline void mqttLoop(){
     // ce qui permet à ce watchdog de détecter une session zombie même
     // quand le firmware continue d'émettre du trafic sortant en
     // apparence normal.
-    if(mqttConnected && mqttLastActivityMs > 0
+    if(mqttConnected && mqttLastActivityMs > 0 
        && (now - mqttLastActivityMs) > MQTT_WATCHDOG_MS){
-        Serial.printf("[MQTT] ⚠ Watchdog: aucune activité CONFIRMÉE depuis %lu s — forçage reconnexion\n",
-                      (unsigned long)((now - mqttLastActivityMs) / 1000UL));
+        // Serial.printf("[MQTT] ⚠ Watchdog: aucune activité CONFIRMÉE depuis %lu s — forçage reconnexion\n",
+        //              (unsigned long)((now - mqttLastActivityMs) / 1000UL));
         logSys("[MQTT] Watchdog inactivité (aucun PUBACK/SUBACK/RX) — reconnexion forcée");
-        mqttClient.disconnect();
-        // On force mqttConnected à false ici, en plus de onMqttDisconnect,
-        // pour que la branche de reconnexion ci-dessous s'exécute tout
-        // de suite au prochain tour de loop() (disconnect() étant
-        // asynchrone, onMqttDisconnect peut arriver après).
+        // forçage brutal avec (true) pour détruire instantanément la socket TCP
+        // au lieu d'attendre un ACK MQTT, ce qui évite de polluer le prochain connect
+        mqttClient.disconnect(true);
         mqttConnected = false;
         mqttLastActivityMs = 0;
         // ★ FIX (juillet 2026, bug #3) : sans cette ligne, le bloc
@@ -1318,24 +1348,28 @@ inline void mqttLoop(){
         // socket se libère). En estampillant ici, on force le bloc de
         // reconnexion à attendre au moins le backoff minimal avant de
         // retenter, laissant le temps à la pile de faire le ménage.
-        lastMqttConnectAttemptMs = now;
+        lastMqttConnectAttemptMs = millis(); // FIX : utiliser millis() au lieu de now 
     }
 
         // ★ FIX : reconnexion préventive périodique, indépendante de tout symptôme détecté.
         if (mqttConnected && (now - lastMqttForceReconnectMs) > MQTT_FORCED_RECONNECT_MS) {
             lastMqttForceReconnectMs = now;
-            Serial.println("[MQTT] ↻ Reconnexion préventive périodique");
+            // Serial.println("[MQTT] ↻ Reconnexion préventive périodique");
             logSys("[MQTT] Reconnexion préventive périodique (purge état zombie éventuel)");
             // Petite pause pour laisser la pile TCP se stabiliser avant le disconnect asynchrone
             delay(100);
-            mqttClient.disconnect();          // asynchrone
+            mqttClient.disconnect(true);
             mqttConnected = false;
             mqttLastActivityMs = 0;
-            // *** NE PAS RE‑INITIALISER lastMqttConnectAttemptMs ici ***
-            // Le back‑off normal (MQTT_RECONNECT_MS, MQTT_BACKOFF_…) prendra le relais.
+            // CORRECTIF BUG : il FAUT ré-initialiser lastMqttConnectAttemptMs ici !
+            // La valeur de now date de l'entrée de la boucle. Si un delay() ou callback synchrone 
+            // est passé, "now - lastMqttConnectAttemptMs" peut déclencher un dépassement d'entier 
+            // ("Integer Underflow") et entraîner des tentatives de reconnexion en boucle instantanées.
+            lastMqttConnectAttemptMs = millis();
         }
 
     if(!mqttConnected && wifiUp){
+        now = millis(); // FIX : actualisation de now après delay() ou callbacks
         // ── CALCUL DU DÉLAI DE RETRY (backoff exponentiel) ──
         // Pour 1 échec : 5s ; 2 échecs : 10s ; 3 : 20s ; 4 : 40s ; 5+ : 60s
         unsigned long backoffDelay = MQTT_RECONNECT_MS;
@@ -1346,9 +1380,9 @@ inline void mqttLoop(){
         }
         if(now - lastMqttConnectAttemptMs > backoffDelay){
             lastMqttConnectAttemptMs = now;
-            Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
-                          (unsigned)mqttConsecutiveFailures,
-                          (unsigned long)(backoffDelay / 1000UL));
+            // Serial.printf("[MQTT] Reconnexion (échecs=%u, délai=%lu s)…\n",
+            //              (unsigned)mqttConsecutiveFailures,
+            //              (unsigned long)(backoffDelay / 1000UL));
             // ★ FIX (juillet 2026, bug #2) : on ne logge (logSys, visible
             // dans l'UI) que sur une TRANSITION du compteur d'échecs, càd
             // la première fois qu'on atteint un nouveau palier. Une fois
@@ -1377,7 +1411,43 @@ inline void mqttLoop(){
                          (int)wifiUp);
                 logSys(b);
             }
-            mqttClient.connect();
+
+            // ── DIAGNOSTIC TCP SYNCHRONE AVANT ASYNCMQTTCLIENT ──
+            {
+                WiFiClient probe;
+                probe.setTimeout(2000);
+                bool tcpOk = probe.connect(sysConfig.mqttHost, sysConfig.mqttPort);
+                if(tcpOk){
+                    probe.stop();
+                    // ★ FIX : NE PAS appeler disconnect(true) ici — ça tue
+                    // la socket que connect() crée juste après (race AsyncTCP).
+                    // La socket précédente est déjà morte (on est dans le retry).
+                    // ★ FIX : utiliser IPAddress comme dans mqttSetup() — le
+                    // passage d'un char* numérique est mal interprété comme
+                    // hostname sur ESP32-S3 (résolution DNS qui timeout).
+                    IPAddress brokerIp;
+                    bool ipOk = brokerIp.fromString(sysConfig.mqttHost);
+                    {
+                        char tb[120];
+                        snprintf(tb, sizeof(tb), "[MQTT] probe OK → setServer(%s) + connect()",
+                                 ipOk ? brokerIp.toString().c_str() : sysConfig.mqttHost);
+                        logSys(tb);
+                    }
+                    if(ipOk){
+                        mqttClient.setServer(brokerIp, sysConfig.mqttPort);
+                    } else {
+                        mqttClient.setServer(sysConfig.mqttHost, sysConfig.mqttPort);
+                    }
+                    mqttClient.setClientId(sysConfig.mqttId);
+                    if(strlen(sysConfig.mqttUser)>0){
+                        mqttClient.setCredentials(sysConfig.mqttUser, sysConfig.mqttPass);
+                    }
+                    mqttClient.connect();
+                } else {
+                    logSys("[MQTT] ✗ Diagnostic: Probe TCP a échoué ! LwIP/routeur refuse le trafic sur ce port.");
+                    onMqttDisconnect(AsyncMqttClientDisconnectReason::TCP_DISCONNECTED);
+                }
+            }
         }
     }
 

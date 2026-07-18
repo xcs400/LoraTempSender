@@ -890,6 +890,30 @@ inline void webSetup(){
         safeRestart("Redémarrage demandé via Web");
     });
 
+    // ── Déconnexion MQTT forcée (Debug) POST /api/mqtt/disconnect
+    server.on("/api/mqtt/disconnect", HTTP_POST, [](AsyncWebServerRequest* req){
+        if(mqttConnected){
+            mqttClient.disconnect(true);
+            mqttConnected = false;
+            // ★ FIX : reset des timers pour que mqttLoop() relance
+            // immédiatement la reconnexion (sinon le watchdog/canari
+            // garde des timestamps obsolètes et bloque le retry).
+            mqttLastActivityMs       = 0;
+            lastMqttCanaryMs         = 0;
+            lastMqttForceReconnectMs = millis();
+            // ★ FIX : reset du compteur d'échecs — une déconnexion
+            // volontaire via UI n'est pas une panne, on reconnecte
+            // sans backoff accumulé (le backoff va se reconstruire
+            // si le broker est vraiment injoignable).
+            mqttConsecutiveFailures  = 0;
+            lastLoggedMqttFailureCount = 0;
+            logSys("[DEBUG] Déconnexion MQTT forcée via API Web — reconnexion immédiate planifiée");
+        } else {
+            logSys("[DEBUG] MQTT déjà déconnecté (commande UI ignorée)");
+        }
+        jsonResp(req,"{\"ok\":true}");
+    });
+
     // ── Compat legacy /reset GET
     server.on("/reset", HTTP_GET, [](AsyncWebServerRequest* req){
         req->send(200,"text/plain","Redémarrage...");
