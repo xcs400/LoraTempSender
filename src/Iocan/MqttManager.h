@@ -36,6 +36,7 @@
 #include "FlowMeter.h"
 #include "ValveManager.h"
 #include "AlarmManager.h"
+#include "HistoryManager.h"
 
 inline bool mqttDiscoveryPublished = false;
 
@@ -422,6 +423,25 @@ inline void mqttPublishState(){
     }
 }
 
+// ────────────────────────────────────────────────────────────
+// Publication de l'historique (7 jours)
+// ────────────────────────────────────────────────────────────
+// Publie l'historique des consommations sur 7 jours au format JSON.
+// Topic : <mqttPrefix>/<mqttId>/history
+// Retained : true (pour que HA ait la valeur au prochain reboot)
+inline void mqttPublishHistory(){
+    if(!mqttConnected) return;
+    
+    // Ne publier que si l'heure système est synchronisée (NTP) pour éviter
+    // de publier des dates invalides (ex. 1970-01-01) qui pollueraient le
+    // retained et seraient restaurées ultérieurement.
+    if(time(nullptr) < 1700000000UL) return; // ~2024-01-01, pas de NTP
+    
+    String json = historyToJson();
+    String topic = mqttTopic("history", "history");
+    mqttClient.publish(topic.c_str(), 1, true, json.c_str(), json.length());
+}
+
 // ★ Canari de confirmation de vie de la session.
 // Contrairement aux valeurs de capteurs publiées en QoS 0 par
 // mqttPublishState() (aucune garantie de livraison, aucun accusé de
@@ -511,7 +531,14 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     // CONS_MQTT_ONLY rien n'est persisté en NVS pour le total (pulseLoad/
     // pulseSave sont des no-ops), donc MQTT retained EST la source de
     // vérité après chaque reboot.
+    //
+    // Historique des consommations (7 jours) — aussi en retained sur
+    // <prefix>/<id>/history. On s'abonne à ce topic pendant la fenêtre de
+    // recovery et on restaure historyData via historyFromJson().
     if(!mqttRecoveryDone){
+        // S'abonner au retained history pour la récupération
+        String historyTopic = String(sysConfig.mqttPrefix) + "/" + sysConfig.mqttId + "/history";
+        mqttClient.subscribe(historyTopic.c_str(), 0);
         String sensorBase = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/";
         if(t.startsWith(sensorBase)){
             String objId = t.substring(sensorBase.length());
@@ -613,6 +640,18 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                         manualValveState.todayPulses = (uint32_t)mqttPulses;
                         manualValveDirty = true;
                     }
+                }
+            } else if(objId == "history"){
+                // ── Recovery historique (7 jours) ──
+                // Le payload est le JSON complet produit par historyToJson().
+                // On restaure historyData si le JSON est valide et semble plausible.
+                // On ne restaure que si le timestamp est récent (moins de 48h) pour éviter
+                // de restaurer un historique obsolète (ex. après une coupure de courant
+                // prolongée où le broker a gardé les données mais le device a été
+                // éteint plus de 2 jours).
+                unsigned long now = millis();
+                if(now - mqttRecoveryStartMs < 86400000UL){ // 24h
+                    historyFromJson(p);
                 }
             }
             return; // message de récupération traité — pas une commande switch

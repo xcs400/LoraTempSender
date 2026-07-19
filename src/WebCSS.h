@@ -327,12 +327,22 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   main{padding:14px}
   .valve-grid{grid-template-columns:1fr}
   .config-row{grid-template-columns:1fr}
+  /* Programmes table: ensure inactive rows are visible on mobile */
+  .sched-row.inactive td{
+    opacity:.75;
+    color:var(--text-muted);
+    background:var(--surface2);
+  }
 }
 /* ── LOADER ─────────────────────────────────────────── */
 .spinner{display:inline-block;width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--blue);border-radius:50%;animation:spin .7s linear infinite}
 @keyframes spin{to{transform:rotate(360deg)}}
 /* Programmes table: inactive row styling */
-.sched-row.inactive td{opacity:.6;color:var(--text-muted)}
+.sched-row.inactive td{
+  opacity:.7;
+  color:var(--text-muted);
+  background:var(--surface2);
+}
 
 /* ── BOÎTE STATUS SYSTÈME ────────────────────────────────────
    Regroupe les métriques globales (uptime, T°, conso, santé)
@@ -432,6 +442,69 @@ main{flex:1;padding:24px;max-width:1200px;width:100%;margin:0 auto}
   padding:6px 4px;
   border-top:1px solid var(--border);
   font-variant-numeric:tabular-nums;
+}
+
+/* ── HISTORIQUE ─────────────────────────────────────────── */
+#history-table th{
+  background:var(--surface2);
+  color:var(--text-muted);
+  font-weight:500;
+  text-align:right;
+  padding:8px 12px;
+  border-bottom:1px solid var(--border);
+}
+#history-table th:first-child,
+#history-table td:first-child{
+  text-align:left;
+}
+#history-table td{
+  padding:8px 12px;
+  border-top:1px solid var(--border);
+  font-variant-numeric:tabular-nums;
+}
+#history-table tr:hover td{
+  background:var(--surface2);
+}
+#history-table .hist-zero{
+  color:var(--text-muted);
+}
+#history-table .hist-positive{
+  color:var(--blue);
+  font-weight:600;
+}
+#history-table .hist-total{
+  font-weight:600;
+  color:var(--green);
+}
+
+/* Chart placeholder styling */
+#history-chart{
+  position:relative;
+}
+#history-chart .bar{
+  position:absolute;
+  bottom:0;
+  background:var(--blue);
+  border-radius:4px 4px 0 0;
+  transition:height .2s;
+}
+#history-chart .bar-label{
+  position:absolute;
+  bottom:-20px;
+  left:50%;
+  transform:translateX(-50%);
+  font-size:0.7rem;
+  color:var(--text-muted);
+  white-space:nowrap;
+}
+#history-chart .bar-value{
+  position:absolute;
+  top:-18px;
+  left:50%;
+  transform:translateX(-50%);
+  font-size:0.65rem;
+  color:var(--text);
+  font-weight:600;
 }
 </style>
 )CSS";

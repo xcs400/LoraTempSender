@@ -211,6 +211,10 @@ void setup(){
     // soit lue pour flowCoeff en mode CONS_MQTT_ONLY (les compteurs sont
     // ignorés mais flowCoeff est conservé — voir ConfigManager.h).
     applyFlowCoeffDefaults();
+    
+    // ── Initialiser l'historique des consommations
+    historyInit();
+    historyLoad();
     valveConsLoad();
     // Charge aussi l'état du compteur "Vanne manuelle" (cf. Globals.h /
     // ConfigManager.h). En mode CONS_MQTT_ONLY, c'est un no-op (la
@@ -408,6 +412,23 @@ void loop(){
             logSys("[CONS] Mode CONS_MQTT_ONLY actif : flush NVS périodique désactivé");
         }
 #endif
+    }
+
+    // ── Mise à jour de l'historique (1×/jour ou au boot)
+    // Vérifie si on a changé de jour et met à jour l'historique
+    static unsigned long lastHistoryUpdateMs = 0;
+    if(millis() - lastHistoryUpdateMs >= 86400000UL || !historyData.initialized){
+        lastHistoryUpdateMs = millis();
+        historyUpdateFromConsumption();
+        // Persister l'historique mis à jour (nouvelle entrée de jour, décalage, etc.)
+        historyFlushOne();
+    }
+
+    // ── Publication MQTT de l'historique (1×/heure si changement)
+    static unsigned long lastHistoryMqttMs = 0;
+    if(mqttConnected && millis() - lastHistoryMqttMs >= 3600000UL){
+        lastHistoryMqttMs = millis();
+        mqttPublishHistory();
     }
 
     // ── Timers vannes (fermeture auto)

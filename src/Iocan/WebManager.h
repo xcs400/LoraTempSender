@@ -147,6 +147,7 @@ inline void webSetup(){
                 WEB_EOS_HTML,
                 WEB_CALENDRIER_HTML,
                 WEB_JOURNAL_HTML,
+                WEB_HISTORIQUE_HTML,
             WEB_HTML2,
             WEB_PROGRAMMESMODAL_HTML,
             WEB_JS,
@@ -959,6 +960,19 @@ inline void webSetup(){
             vTaskDelay(pdMS_TO_TICKS(400));
             nvsFormatAndRestore();
         }, "nvsFormat", 4096, NULL, 1, NULL);
+    });
+
+    // ── Historique des consommations GET /api/history
+    // Retourne l'historique des 7 derniers jours
+    server.on("/api/history", HTTP_GET, [](AsyncWebServerRequest* req){
+        String json = historyToJson();
+        req->send(200, "application/json", json);
+    });
+
+    // ── Réinitialiser l'historique POST /api/history/reset
+    server.on("/api/history/reset", HTTP_POST, [](AsyncWebServerRequest* req){
+        historyReset();
+        jsonResp(req, "{\"ok\":true}");
     });
 
     // Catch-all : trace toute requête non routée pour faciliter le diag

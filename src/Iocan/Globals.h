@@ -625,4 +625,22 @@ const unsigned long WIFI_RECONNECT_INTERVAL_MS = 30000UL; // 30 s
 extern bool          pendingRestart;
 extern unsigned long pendingRestartMs;
 
+// Historique des consommations (7 jours)
+#define HISTORY_DAYS 7
+
+struct HistoryDay {
+    char date[11];           // YYYY-MM-DD
+    float totalLitres;       // Total global du jour
+    float valveLitres[VANNE_COUNT];  // Par vanne
+    float valveTotal[VANNE_COUNT];   // Total cumulé par vanne
+};
+
+struct HistoryData {
+    HistoryDay days[HISTORY_DAYS];
+    uint8_t headIdx;         // Index du jour le plus récent
+    bool initialized;        // Est-ce que l'historique a été initialisé
+};
+
+extern HistoryData historyData;
+
 #endif // IOCAN

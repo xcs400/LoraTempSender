@@ -495,6 +495,60 @@ inline void manualValveFlushDirty(){
     }
 }
 
+// ────────────────────────────────────────────────────────────
+inline void historyLoad(){
+#ifdef CONS_MQTT_ONLY
+    // Pas de persistance en CONS_MQTT_ONLY — la valeur sera ré-hydratée
+    // par la recovery MQTT au boot si elle a été publiée retained.
+#else
+    prefs.begin("irrhist", false);
+    historyData.headIdx = prefs.getUChar("hist_hi", 0);
+    historyData.initialized = prefs.getBool("hist_init", false);
+    for(int d=0;d<HISTORY_DAYS;d++){
+        char dateKey[16]; snprintf(dateKey,16,"hist_d%d",d);
+        historyData.days[d].totalLitres = prefs.getFloat(dateKey, 0.0f);
+        for(int v=0;v<VANNE_COUNT;v++){
+            char valveLitresKey[32]; snprintf(valveLitresKey,32,"hist_vl_%d_%d",d,v);
+            historyData.days[d].valveLitres[v] = prefs.getFloat(valveLitresKey, 0.0f);
+            char valveTotalKey[32]; snprintf(valveTotalKey,32,"hist_vt_%d_%d",d,v);
+            historyData.days[d].valveTotal[v] = prefs.getFloat(valveTotalKey, 0.0f);
+        }
+    }
+    prefs.end();
+#endif
+}
+
+inline void historySaveOne(){
+#ifdef CONS_MQTT_ONLY
+    // no-op (cohérent avec valveConsSaveOne)
+#else
+    prefs.begin("irrhist", false);
+    prefs.putUChar("hist_hi", historyData.headIdx);
+    prefs.putBool("hist_init", historyData.initialized);
+    for(int d=0;d<HISTORY_DAYS;d++){
+        char dateKey[16]; snprintf(dateKey,16,"hist_d%d",d);
+        prefs.putFloat(dateKey, historyData.days[d].totalLitres);
+        for(int v=0;v<VANNE_COUNT;v++){
+            char valveLitresKey[32]; snprintf(valveLitresKey,32,"hist_vl_%d_%d",d,v);
+            prefs.putFloat(valveLitresKey, historyData.days[d].valveLitres[v]);
+            char valveTotalKey[32]; snprintf(valveTotalKey,32,"hist_vt_%d_%d",d,v);
+            prefs.putFloat(valveTotalKey, historyData.days[d].valveTotal[v]);
+        }
+    }
+    prefs.end();
+#endif
+}
+
+inline void historyFlushOne(){
+    historySaveOne();
+}
+
+inline void historyFlushDirty(){
+    // Pas de flag dirty pour l'historique — on sauvegarde à chaque modification
+    // (via historySaveOne) pour garantir la persistance immédiate.
+    // Si besoin d'un flush périodique, on peut ajouter un flag.
+}
+
 // Sauvegarde/chargement des programmes
 inline void schedSave(){
     prefs.begin("schedcfg", false);

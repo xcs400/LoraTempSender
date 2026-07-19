@@ -151,4 +151,7 @@ unsigned long lastWifiReconnectMs = 0;
 bool          pendingRestart = false;
 unsigned long pendingRestartMs = 0;
 
+// Historique des consommations (7 jours)
+HistoryData historyData;
+
 #endif // IOCAN

@@ -56,6 +56,7 @@ const char WEB_HTML1[] PROGMEM =  R"HTML1EOF(
   <button onclick="showPage('calendrier',this)">Calendrier</button>
   <button onclick="showPage('calibration',this)">Calibration</button>
   <button onclick="showPage('journal',this)">Journal</button>
+  <button onclick="showPage('historique',this)">Historique</button>
   <button onclick="showPage('config',this)">Configuration</button>
   <button onclick="showPage('io',this)">Entr&eacute;es/Sorties</button>
 </nav>
@@ -73,6 +74,7 @@ const char WEB_HTML1[] PROGMEM =  R"HTML1EOF(
 #include "WebHTML_Calendrier.h"
 #include "WebHTML_EOS.h"
 #include "WebHTML_Journal.h"
+#include "WebHTML_Historique.h"
 
     
 
@@ -239,14 +241,17 @@ function getNextEventForValve(idx){
 }
 
 function showPage(id, btn) {
+  const page = document.getElementById('page-'+id);
+  if (!page) return;
   document.querySelectorAll('.page').forEach(p=>p.classList.remove('active'));
   document.querySelectorAll('nav button').forEach(b=>b.classList.remove('active'));
-  document.getElementById('page-'+id).classList.add('active');
+  page.classList.add('active');
   if(btn) btn.classList.add('active');
   if(id==='programmes') renderSchedules();
   if(id==='calendrier') loadSchedules().then(()=>renderCalendar());
   if(id==='calibration') refreshCalibration();
   if(id==='journal') loadLog();
+  if(id==='historique') loadHistory();
   if(id==='config') loadConfig();
 }
 
@@ -1873,6 +1878,259 @@ function refreshConsumption(){
 }
 
 // ══════════════════════════════════════════════════════════
+// HISTORIQUE DES CONSOMMATIONS
+// ══════════════════════════════════════════════════════════
+
+// Stockage local de l'historique (7 jours)
+let historyData = [];
+
+// Formate une date en format YYYY-MM-DD
+function formatDate(d) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+// Retourne le nom du jour de la semaine en français
+function getDayName(d) {
+  const names = ['Lundi', 'Mardi', 'Mercredi', 'Jeudi', 'Vendredi', 'Samedi', 'Dimanche'];
+  return names[d.getDay() === 0 ? 6 : d.getDay() - 1];
+}
+
+// Charge l'historique depuis le serveur
+function loadHistory() {
+  api('GET', '/api/history').then(d => {
+    if (!d || !d.data) {
+      historyData = [];
+      renderHistory();
+      return;
+    }
+    historyData = d.data;
+    renderHistory();
+  });
+}
+
+// Calcule les statistiques globales sur 7 jours
+function computeHistoryStats() {
+  if (!historyData.length) return null;
+
+  const total = historyData.reduce((sum, day) => sum + (day.totalLitres || 0), 0);
+  const moyenne = total / 7;
+
+  // Trouver le jour le plus consommateur
+  let maxDay = historyData[0];
+  for (const day of historyData) {
+    if ((day.totalLitres || 0) > (maxDay.totalLitres || 0)) {
+      maxDay = day;
+    }
+  }
+
+  return {
+    total: total.toFixed(2),
+    moyenne: moyenne.toFixed(2),
+    jourMax: maxDay.date || '—'
+  };
+}
+
+// Affiche le tableau d'historique
+function renderHistory() {
+  // Vérifier que la page historique est affichée (les éléments DOM existent)
+  const page = document.getElementById('page-historique');
+  if (!page) return;
+  
+  const tbody = document.getElementById('history-body');
+  if (!tbody) return;
+  
+  const stats = computeHistoryStats();
+
+  // Mettre à jour les statistiques globales (avec vérifications)
+  const elTotal = document.getElementById('hist-total-litres');
+  const elMoy = document.getElementById('hist-moy-litres');
+  const elJourMax = document.getElementById('hist-jour-max');
+  const elDernier = document.getElementById('hist-dernier');
+  
+  if (elTotal) elTotal.textContent = stats ? stats.total + ' L' : '— L';
+  if (elMoy) elMoy.textContent = stats ? stats.moyenne + ' L' : '— L';
+  if (elJourMax) elJourMax.textContent = stats ? stats.jourMax : '—';
+  if (elDernier) elDernier.textContent = historyData.length
+    ? new Date(historyData[historyData.length - 1].timestamp * 1000).toLocaleString('fr-FR')
+    : '—';
+
+  if (!historyData.length) {
+    tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:24px">Aucune donnée historique disponible</td></tr>';
+    // Vider aussi les en-têtes de colonnes
+    for (let i = 0; i < 7; i++) {
+      const col = document.getElementById('hist-col-' + i);
+      if (col) col.textContent = '—';
+    }
+    return;
+  }
+
+  // Trier les données par date (du plus ancien au plus récent)
+  const sorted = [...historyData].sort((a, b) => a.timestamp - b.timestamp);
+
+  // FIX (bug D) : peupler les en-têtes de colonnes avec les VRAIES dates
+  // de la fenêtre glissante (du plus ancien au plus récent), formatées
+  // "jj/mm" (ex: "14/07") — au lieu de laisser "—" statique.
+  // On suppose ici que sorted[0] = jour le plus ancien et
+  // sorted[sorted.length-1] = aujourd'hui (cohérent avec le tri ci-dessus
+  // et avec HistoryManager.h qui stocke days[0] = aujourd'hui puis décale).
+  // Pour 7 colonnes, on prend les 7 timestamps de sorted (tronqué à 7).
+  const headerDates = sorted.slice(-7); // 7 derniers = du plus ancien au + récent
+  for (let i = 0; i < 7; i++) {
+    const col = document.getElementById('hist-col-' + i);
+    if (!col) continue;
+    if (i < headerDates.length) {
+      const d = new Date(headerDates[i].timestamp * 1000);
+      const dd = String(d.getDate()).padStart(2, '0');
+      const mm = String(d.getMonth() + 1).padStart(2, '0');
+      col.textContent = `${dd}/${mm}`;
+    } else {
+      col.textContent = '—';
+    }
+  }
+
+  // Construire le tableau : une LIGNE PAR VANNE (et non une seule ligne V0)
+  // FIX (bug A) : ancienne version faisait sorted.map(day => ...) et
+  // retournait une seule ligne hardcodée "V0" / "Vanne principale",
+  // ignorant les 4 autres vannes. On itère maintenant sur les vannes,
+  // pas sur les jours.
+  //
+  // FIX (bug C) : dayValues est calculé UNE SEULE FOIS par colonne
+  // (par date de la fenêtre), pas re-fabriqué par vanne. Pour chaque
+  // colonne i, on cherche dans day.dailyData (de CHAQUE day) l'entrée
+  // correspondant à la date d'en-tête headerDates[i].date. Si pas
+  // trouvé, on prend day.valveLitres[v] (conso du jour spécifique à
+  // cette vanne, fournie par HistoryManager.h).
+  const valveCount = Math.max(
+    (historyData[0]?.valves?.length) || 0,
+    (historyData[0]?.valveLitres?.length) || 0,
+    (historyData[0]?.valveNames?.length) || 0,
+    window.VANNE_COUNT_FALLBACK || 5
+  );
+
+  // Pré-calculer la matrice [vanne][col] = litres
+  // Pour chaque colonne (= date), on cherche le day dont la date
+  // correspond à l'en-tête ; puis on prend day.valveLitres[v].
+  const matrix = [];
+  for (let v = 0; v < valveCount; v++) matrix.push(new Array(7).fill(0));
+
+  for (let i = 0; i < 7; i++) {
+    if (i >= headerDates.length) continue;
+    const targetDate = headerDates[i].date; // "YYYY-MM-DD"
+    const day = historyData.find(d => d.date === targetDate);
+    if (!day) continue;
+    const vl = day.valveLitres || [];
+    for (let v = 0; v < valveCount; v++) {
+      matrix[v][i] = vl[v] || 0;
+    }
+  }
+
+  // Récupérer les noms de vannes (communs à tous les jours)
+  const valveNames = historyData[0]?.valveNames || [];
+
+  const rows = [];
+  for (let v = 0; v < valveCount; v++) {
+    // FIX (bug B) : valves est un tableau de NOMBRES (cumulés), pas
+    // d'objets {total}. On prend le dernier jour (aujourd'hui) comme
+    // référence pour le total cumulé de cette vanne, puisque valves
+    // représente le cumul depuis toujours (cf. HistoryManager.h).
+    const lastDay = historyData[historyData.length - 1];
+    const valveCumul = (lastDay?.valves?.[v]) || 0;
+
+    // Total 7j = somme de la conso journalière sur la fenêtre
+    const valve7j = matrix[v].reduce((s, x) => s + x, 0);
+
+    const name = valveNames[v] || `Vanne ${v}`;
+    const cells = [];
+    for (let i = 0; i < 7; i++) {
+      const val = matrix[v][i];
+      const cls = val > 0 ? 'hist-positive' : 'hist-zero';
+      cells.push(`<td style="text-align:right" class="${cls}">${val.toFixed(2)} L</td>`);
+    }
+
+    rows.push(`<tr>
+      <td><strong>V${v}</strong></td>
+      <td>${name}</td>
+      ${cells.join('')}
+      <td style="text-align:right;font-weight:600;color:var(--green)" class="hist-total">${valve7j.toFixed(2)} L</td>
+    </tr>`);
+  }
+
+  tbody.innerHTML = rows.join('');
+
+  // Mettre à jour le graphique
+  renderHistoryChart(stats);
+}
+
+// Affiche le graphique d'évolution
+function renderHistoryChart(stats) {
+  const chart = document.getElementById('history-chart');
+  const placeholder = document.getElementById('history-chart-placeholder');
+
+  if (!stats || !historyData.length) {
+    chart.innerHTML = '<span style="color:var(--text-muted)">Aucune donnée disponible</span>';
+    return;
+  }
+
+  // FIX (bug E) : le conteneur parent doit être en position:relative
+  // pour que les barres (position:absolute) se positionnent par rapport
+  // au graphique et non par rapport à <body>. Sans cela, les barres
+  // "débordent" et se positionnent en haut de page.
+  chart.style.position = 'relative';
+  chart.innerHTML = '';
+
+  // Calculer les barres pour le graphique
+  const maxVal = Math.max(...historyData.map(d => d.totalLitres || 0), 1);
+  const sorted = [...historyData].sort((a, b) => a.timestamp - b.timestamp);
+
+  let barsHtml = '';
+  sorted.forEach((day, idx) => {
+    const height = ((day.totalLitres || 0) / maxVal) * 150;
+    const label = new Date(day.timestamp * 1000).toLocaleDateString('fr-FR', { weekday: 'short' });
+    barsHtml += `<div style="position:absolute;bottom:0;left:${(idx * 14)}%;width:12%;height:${height}px;background:var(--blue);border-radius:4px 4px 0 0;opacity:0.8"></div>`;
+  });
+
+  chart.innerHTML = barsHtml;
+
+  // Ajouter les labels
+  const labelsHtml = sorted.map((day, idx) => {
+    const label = new Date(day.timestamp * 1000).toLocaleDateString('fr-FR', { weekday: 'short' });
+    return `<div style="position:absolute;bottom:-20px;left:${(idx * 14) + 2}%;transform:translateX(-50%);font-size:0.7rem;color:var(--text-muted);white-space:nowrap">${label}</div>`;
+  }).join('');
+
+  chart.innerHTML += labelsHtml;
+}
+
+// Export de l'historique
+function exportHistory() {
+  const data = {
+    exportedAt: new Date().toISOString(),
+    version: 1,
+    history: historyData
+  };
+  const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `historique-${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Réinitialiser l'historique
+function resetHistory() {
+  if (!confirm('Êtes-vous sûr de vouloir réinitialiser l\'historique des consommations ?\n\nCette action est irréversible.')) return;
+  api('POST', '/api/history/reset').then(r => {
+    loadHistory();
+    alert('Historique réinitialisé.');
+  });
+}
+
+// ══════════════════════════════════════════════════════════
 // INIT
 // ══════════════════════════════════════════════════════════
 function buildSchedValveSelect() {
@@ -1916,6 +2174,9 @@ function init() {
   refreshPulse();
   refreshConsumption();
   loadSchedules();
+  // loadHistory() est appelé depuis showPage('historique') quand l'utilisateur
+  // clique sur l'onglet Historique, pour éviter d'accéder à des éléments DOM
+  // qui n'existent pas encore (la page n'est pas affichée au démarrage).
   // Charge aussi les coefficients de calibration au boot : ils sont
   // nécessaires au calcul du "volume restant" sur les cartes vanne du
   // dashboard (cf. renderValveCards). Sans cet appel, le premier
@@ -1929,6 +2190,8 @@ function init() {
   setInterval(()=>{ if(!wsConn||wsConn.readyState!==1) requestStatus(); }, 10000);
   // La conso par vanne change lentement, on rafraîchit toutes les 30 s
   setInterval(refreshConsumption, 30000);
+  // L'historique change quotidiennement, on rafraîchit une fois par jour
+  // (ou au chargement de la page)
 }
 
 init();
