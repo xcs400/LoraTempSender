@@ -726,7 +726,31 @@ inline void webSetup(){
             sysConfig.manualForceSec = doc["manualForceSec"] | sysConfig.manualForceSec;
 
             // --- MQTT
-            if(doc.containsKey("mqttEnabled")) sysConfig.mqttEnabled = doc["mqttEnabled"].as<bool>();
+            // Détection d'une transition false→true de mqttEnabled : on
+            // arme historyForcePublishNext pour que la 1ère publication
+            // d'historique parte sans attendre un retained (qui n'existera
+            // pas si MQTT n'a jamais été activé ou si le broker est neuf).
+            // Sans ce mécanisme, l'ESP resterait en mode "attente retained"
+            // indéfiniment et n'aurait jamais d'historique publié en
+            // CONS_MQTT_ONLY (broker vide = boucle).
+            if(doc.containsKey("mqttEnabled")){
+                bool prevMqtt = sysConfig.mqttEnabled;
+                bool newMqtt  = doc["mqttEnabled"].as<bool>();
+                sysConfig.mqttEnabled = newMqtt;
+                if(!prevMqtt && newMqtt){
+                    mqttForceHistoryPublish();
+                    logSys("[CFG] mqttEnabled activé → historyForcePublishNext armé");
+                } else if(prevMqtt && !newMqtt){
+                    // Désactivation : on coupe proprement la publication
+                    // forcée (sinon à la prochaine réactivation sans reboot,
+                    // la publication forcée pourrait partir avec un état
+                    // stale).
+#ifdef CONS_MQTT_ONLY
+                    historyForcePublishNext = false;
+#endif
+                    logSys("[CFG] mqttEnabled désactivé");
+                }
+            }
             if((v = doc["mqttHost"]   | (const char*)nullptr)) strlcpy(sysConfig.mqttHost,   v, sizeof(sysConfig.mqttHost));
             sysConfig.mqttPort   = doc["mqttPort"]   | sysConfig.mqttPort;
             if((v = doc["mqttUser"]   | (const char*)nullptr)) strlcpy(sysConfig.mqttUser,   v, sizeof(sysConfig.mqttUser));
@@ -973,6 +997,29 @@ inline void webSetup(){
     server.on("/api/history/reset", HTTP_POST, [](AsyncWebServerRequest* req){
         historyReset();
         jsonResp(req, "{\"ok\":true}");
+    });
+
+    // ── Forcer la publication MQTT de l'historique POST /api/history/publish
+    // Utile après :
+    //   - un changement de broker MQTT (l'ancien broker a peut-être
+    //     encore les retained, le nouveau est vide)
+    //   - un wipe manuel de la NVS (drapeau recovery perdu)
+    //   - un test de la chaîne MQTT
+    // Sans body, sans paramètre : on arme juste historyForcePublishNext.
+    // La publication effective aura lieu au prochain passage de
+    // mqttPublishHistory() (toutes les 5 min via la loop) ou dès que
+    // mqttConnected=true.
+    server.on("/api/history/publish", HTTP_POST, [](AsyncWebServerRequest* req){
+        if(!sysConfig.mqttEnabled){
+            jsonResp(req, "{\"ok\":false,\"reason\":\"mqtt-disabled\"}", 400);
+            return;
+        }
+        if(!mqttConnected){
+            jsonResp(req, "{\"ok\":false,\"reason\":\"mqtt-not-connected\"}", 503);
+            return;
+        }
+        mqttForceHistoryPublish();
+        jsonResp(req, "{\"ok\":true,\"message\":\"historyForcePublishNext armé\"}");
     });
 
     // Catch-all : trace toute requête non routée pour faciliter le diag

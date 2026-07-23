@@ -38,6 +38,12 @@ unsigned long   lastMqttForceReconnectMs  = 0;
 #ifdef CONS_MQTT_ONLY
 bool            mqttRecoveryDone    = false;
 unsigned long   mqttRecoveryStartMs = 0;
+// Garde-fou anti-écrasement history (cf. Globals.h pour la doc). Initialisés
+// à false en RAM : le MainIocan_S.cpp::setup() chargera la valeur NVS de
+// historyRecoveryDone (si présente) AVANT la connexion MQTT, et l'utilisateur
+// peut armer historyForcePublishNext via l'API Web (voir WebManager.h).
+bool            historyRecoveryDone    = false;
+bool            historyForcePublishNext = false;
 #endif
 
 // Vannes

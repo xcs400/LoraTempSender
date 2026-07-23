@@ -215,6 +215,22 @@ void setup(){
     // ── Initialiser l'historique des consommations
     historyInit();
     historyLoad();
+    // ── Charger le drapeau persistant "historyRecoveryDone" ──
+    // En mode CONS_MQTT_ONLY, ce drapeau survit aux reboots : si on
+    // l'avait déjà mis à true lors d'une session précédente (le broker
+    // nous avait envoyé un retained history valide), on le restaure tel
+    // quel pour ne pas avoir à re-attendre une recovery au prochain boot.
+    // Si par contre on a changé de broker / wipe NVS / 1er démarrage, la
+    // NVS retourne false → on attendra la recovery MQTT comme d'habitude.
+    {
+        bool recov = historyLoadRecoveryFlag();
+#ifdef CONS_MQTT_ONLY
+        historyRecoveryDone = recov;
+        char hb[80];
+        snprintf(hb, sizeof(hb), "[HIST] Drapeau recovery chargé depuis NVS = %d", (int)recov);
+        logSys(hb);
+#endif
+    }
     valveConsLoad();
     // Charge aussi l'état du compteur "Vanne manuelle" (cf. Globals.h /
     // ConfigManager.h). En mode CONS_MQTT_ONLY, c'est un no-op (la
@@ -414,21 +430,128 @@ void loop(){
 #endif
     }
 
-    // ── Mise à jour de l'historique (1×/jour ou au boot)
-    // Vérifie si on a changé de jour et met à jour l'historique
-    static unsigned long lastHistoryUpdateMs = 0;
-    if(millis() - lastHistoryUpdateMs >= 86400000UL || !historyData.initialized){
-        lastHistoryUpdateMs = millis();
-        historyUpdateFromConsumption();
-        // Persister l'historique mis à jour (nouvelle entrée de jour, décalage, etc.)
-        historyFlushOne();
+    // ── Mise à jour de l'historique
+    //
+    // Trois déclencheurs, par ordre de priorité :
+    //   1) Pas encore initialisé (NTP pas sync au boot, ou premier
+    //      démarrage) → une seule fois, dès que NTP est OK.
+    //   2) ROLLOVER MINUIT DÉTECTÉ → la date système (YYYYMMDD) a
+    //      changé depuis le dernier passage. On déclenche immédiatement
+    //      pour que la nouvelle entrée "today" soit créée et que l'entrée
+    //      d'hier soit figée avec ses litres définitifs, SANS attendre
+    //      que l'intervalle de 5 min tombe pile à 00:05:00 (avant ce
+    //      fix, on pouvait naviguer sur la page Historique le matin à
+    //      00:00:30 et voir "0 L aujourd'hui" car la maj quotidienne
+    //      était à 24h du dernier passage, pas alignée sur minuit).
+    //   3) Refresh périodique (5 min) → pour que `valveLitres` du jour
+    //      suive l'évolution réelle des litres (cas typique : un
+    //      utilisateur regarde l'historique pendant qu'un arrosage est
+    //      en cours et voit les litres grimper en temps quasi-réel).
+    //
+    // Coût : 5 itérations × 5 vannes = 25 accès RAM + 1 sprintf par
+    // appel. Total ≈ 0.1 ms — dérisoire même à 1 Hz.
+    {
+        static unsigned long lastHistoryUpdateMs = 0;
+        static uint16_t lastHistoryYmd = 0; // YYYYMMDD du dernier passage
+        const unsigned long HISTORY_REFRESH_MS = 300000UL; // 5 min
+        bool needUpdate = false;
+        const char* trigger = nullptr; // log diagnostique (cf. instrumentation)
+        if(!historyData.initialized){
+            // Initialisation initiale (NTP pas dispo au boot + NTP enfin OK)
+            if(time(nullptr) >= 1700000000UL){
+                needUpdate = true;
+                trigger = "INIT (1er passage NTP sync)";
+            }
+        } else {
+            uint16_t curYmd = todayYMD();
+            if(curYmd != 0 && curYmd != lastHistoryYmd){
+                // ROLLOVER MINUIT : la date système a changé, on MAJ tout
+                // de suite (décalage du buffer, cloture du jour précédent,
+                // création de l'entrée du nouveau jour).
+                needUpdate = true;
+                char rb[80];
+                // curYmd est en YYYYMMDD (ex. 20260721), on l'affiche tel quel.
+                snprintf(rb, sizeof(rb), "ROLLOVER MINUIT (lastYmd=%u → curYmd=%u)",
+                         (unsigned)lastHistoryYmd, (unsigned)curYmd);
+                trigger = rb; // pointeur vers buffer local — utilisé immédiatement
+                // IMPORTANT : on log ici directement, AVANT l'appel à
+                // historyUpdateFromConsumption(), pour avoir la trace même
+                // si la mise à jour échoue (ex. NTP pas stable, days[]
+                // corrompu). Log throttled via un static pour ne pas spammer
+                // si la loop repasse 1000 fois avant que le rollover
+                // effectif ne se produise.
+                static uint16_t lastLoggedRolloverYmd = 0;
+                if(lastLoggedRolloverYmd != curYmd){
+                    lastLoggedRolloverYmd = curYmd;
+                    logSys(rb);
+                }
+            } else if(millis() - lastHistoryUpdateMs >= HISTORY_REFRESH_MS){
+                // Refresh périodique : pour que valveLitres du jour suive
+                // l'évolution réelle (un pulse toutes les ~ms peut faire
+                // monter la conso de plusieurs L en quelques minutes).
+                needUpdate = true;
+                trigger = "REFRESH 5min";
+            }
+        }
+        if(needUpdate){
+            unsigned long updateStartMs = millis();
+            uint16_t prevYmd = lastHistoryYmd;
+            lastHistoryUpdateMs = updateStartMs;
+            lastHistoryYmd = todayYMD();
+            // ── Snapshot avant MAJ pour diagnostic ──
+            // On capture l'état de days[0] AVANT historyUpdateFromConsumption()
+            // pour pouvoir dire dans le log si une nouvelle entrée a été
+            // créée (date changée → décale le buffer) ou si on a juste
+            // mis à jour l'entrée existante du jour.
+            char prevDate0[12] = "";
+            float prevTotal0 = 0.0f;
+            if(historyData.initialized){
+                strncpy(prevDate0, historyData.days[0].date, 11);
+                prevDate0[11] = '\0';
+                prevTotal0 = historyData.days[0].totalLitres;
+            }
+            historyUpdateFromConsumption();
+            // Persister l'historique mis à jour (nouvelle entrée de
+            // jour, décalage, etc.) — sauf en CONS_MQTT_ONLY où c'est
+            // un no-op (source de vérité = MQTT retained).
+            historyFlushOne();
+            // ── Log post-rolldown : indique si une nouvelle entrée de
+            // jour a été créée (et l'ancien days[0] a glissé en days[1])
+            // ou si on a juste mis à jour l'entrée existante. Le throttling
+            // par YMD garantit 1 log/transition de jour, pas 1/5min.
+            if(historyData.initialized && trigger != nullptr){
+                static uint16_t lastLoggedUpdateYmd = 0;
+                uint16_t curYmd = todayYMD();
+                if(curYmd != 0 && curYmd != lastLoggedUpdateYmd){
+                    lastLoggedUpdateYmd = curYmd;
+                    char ub[200];
+                    const char* newDate0 = historyData.days[0].date;
+                    bool newEntryCreated = (strlen(prevDate0) == 0)
+                                        || (strncmp(prevDate0, newDate0, 10) != 0);
+                    snprintf(ub, sizeof(ub),
+                        "[HIST] Update OK trigger=%s prevDays0=%s/%.2fL → newDays0=%s/%.2fL (created=%d, took %lu ms)",
+                        trigger, prevDate0, (double)prevTotal0, newDate0,
+                        (double)historyData.days[0].totalLitres,
+                        (int)newEntryCreated, (unsigned long)(millis() - updateStartMs));
+                    logSys(ub);
+                }
+            }
+        }
     }
 
-    // ── Publication MQTT de l'historique (1×/heure si changement)
-    static unsigned long lastHistoryMqttMs = 0;
-    if(mqttConnected && millis() - lastHistoryMqttMs >= 3600000UL){
-        lastHistoryMqttMs = millis();
-        mqttPublishHistory();
+    // ── Publication MQTT de l'historique
+    //
+    // Avant : 1×/h — trop lent, l'UI et HA voyaient des "0 L" sur de
+    // longues périodes après chaque reboot / redémarrage de l'arrosage.
+    // Maintenant : 1×/5 min pour rester synchronisé avec le refresh
+    // ci-dessus, sans spammer le broker (5 min reste très conservateur
+    // pour un payload de quelques Ko en QoS 1 retained).
+    {
+        static unsigned long lastHistoryMqttMs = 0;
+        if(mqttConnected && millis() - lastHistoryMqttMs >= 300000UL){
+            lastHistoryMqttMs = millis();
+            mqttPublishHistory();
+        }
     }
 
     // ── Timers vannes (fermeture auto)

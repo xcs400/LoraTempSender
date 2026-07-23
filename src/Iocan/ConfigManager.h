@@ -549,6 +549,91 @@ inline void historyFlushDirty(){
     // Si besoin d'un flush périodique, on peut ajouter un flag.
 }
 
+// ────────────────────────────────────────────────────────────
+// Persistance du drapeau "historyRecoveryDone" (mode CONS_MQTT_ONLY)
+// ────────────────────────────────────────────────────────────
+//
+// OVERRIDE EXPLICITE DE LA RÈGLE "ZÉRO NVS EN CONS_MQTT_ONLY"
+// ────────────────────────────────────────────────────────────
+// Le mode CONS_MQTT_ONLY (cf. commentaire détaillé dans Globals.h) est
+// conçu pour éviter d'user la flash en désactivant toute persistance NVS
+// des COMPTEURS. La règle d'or est : les données dynamiques (compteurs,
+// historique 7 jours) ne sont PAS persistées en NVS — elles vivent en RAM
+// et sont ré-hydratées par la recovery MQTT au boot.
+//
+// CETTE FONCTION EST L'EXCEPTION DÉLIBÉRÉE à cette règle, pour la raison
+// suivante : le drapeau historyRecoveryDone est une MÉTA-DONNÉE DE
+// CONTRÔLE, pas un compteur. Elle ne représente pas une consommation
+// d'eau, mais l'état logique "ai-je déjà reçu un retained history valide
+// au moins une fois dans cette session". Sa perte ne corrompt aucune
+// donnée métier, et son cycle d'écriture est ridiculement faible :
+//
+//   • 1 écriture de booléen (~32 octets) par SESSION (un uptime de
+//     l'ESP entre deux boots), à la 1ère réception du retained history
+//     réussie.
+//   • En cas de reboot quotidien : ~365 écritures/an
+//   • Endurance NVS ESP32 : ~100 000 cycles par secteur physique
+//     (avec wear-leveling automatique de la lib nvs_flash sur toute
+//     la partition).
+//   • → Usure théorique : > 270 ans. Largement hors de la durée de
+//     vie de l'installation.
+//
+// Si l'ESP reboot en boucle (bug d'amorçage), la flash n'est PAS le
+// problème — l'installation ne fonctionne de toute façon pas. Ce
+// compteur ne dégrade pas le scénario catastrophique.
+//
+// Sans cette persistance, le scénario suivant devient impossible à
+// résoudre proprement : broker wipe (1er boot MQTT) → l'ESP n'a
+// aucun retained à lire → il refuse de publier pour ne pas écraser
+// la "valeur" (qui n'existe pas) → l'utilisateur doit explicitement
+// armer historyForcePublishNext via l'API Web. Le 1 bool NVS permet
+// d'éviter ce cas-limite en acceptant 1 micro-écriture par session.
+// ────────────────────────────────────────────────────────────
+//
+// Pourquoi persister ce simple booléen :
+//   1) Le firmware publie l'historique en retained UNIQUEMENT après avoir
+//      reçu le retained history de la session précédente (anti-écrasement
+//      d'une valeur correcte du broker par une RAM incomplète au boot).
+//   2) Le drapeau est donc mis à true lors de la recovery (réception du
+//      retained), mais doit SURVIVRE à un reboot en cours de session.
+//      Sinon, à chaque reboot on attendrait 3s de plus avant de pouvoir
+//      publier, et un reboot pile pendant la recovery perdrait l'état.
+//   3) Sans persistance, après un reboot, mqttPublishHistory() refuserait
+//      de publier tant qu'on n'a pas re-reçu un retained history — boucle
+//      vicieuse si le broker n'en a pas (premier démarrage, broker wipe…).
+//
+// Namespace dédié "irrhist" pour ne pas saturer "irrigcfg" (déjà bien
+// rempli). Clé unique "hist_recov" — un booléen, pas de risque de
+// collision avec les autres entrées hist_d* / hist_vl_* / hist_vt_*.
+inline bool historyLoadRecoveryFlag(){
+#ifdef CONS_MQTT_ONLY
+    prefs.begin("irrhist", true); // read-only
+    bool v = prefs.getBool("hist_recov", false);
+    prefs.end();
+    return v;
+#else
+    return true; // en mode normal, l'historique est persisté en NVS, pas besoin de garde
+#endif
+}
+
+inline void historySaveRecoveryFlag(bool done){
+#ifdef CONS_MQTT_ONLY
+    prefs.begin("irrhist", false);
+    prefs.putBool("hist_recov", done);
+    prefs.end();
+#endif
+}
+
+// Reset complet du drapeau de recovery (à appeler quand l'utilisateur
+// force la publication initiale, ou qu'on bascule d'un broker à un autre).
+// Permet de "réarmer" le garde-fou pour qu'il se redéclenche proprement.
+inline void historyResetRecoveryFlag(){
+    historySaveRecoveryFlag(false);
+#ifdef CONS_MQTT_ONLY
+    historyRecoveryDone = false;
+#endif
+}
+
 // Sauvegarde/chargement des programmes
 inline void schedSave(){
     prefs.begin("schedcfg", false);

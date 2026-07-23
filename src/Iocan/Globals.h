@@ -524,6 +524,26 @@ extern unsigned long   lastMqttForceReconnectMs;
 #ifdef CONS_MQTT_ONLY
 extern bool            mqttRecoveryDone;
 extern unsigned long   mqttRecoveryStartMs;
+// ── Garde-fou anti-écrasement de l'historique MQTT retained ──
+// historyRecoveryDone : passe à true après la 1ère réception du retained
+//   history (par le broker) lors de la recovery. Avant cela, l'ESP n'a
+//   aucune garantie que la valeur retained qu'il s'apprête à publier
+//   correspond bien à l'état NVS d'hier. Le laisser publier reviendrait à
+//   risquer d'écraser la valeur correcte du broker avec une valeur
+//   incomplète (NTP pas encore sync au reboot, ou NVS pas encore flushé,
+//   ou days[] initialisés à 0 par historyInit avant historyLoad).
+// historyForcePublishNext : armé par l'utilisateur (POST /api/config
+//   avec mqttEnabled qui passe de false à true, ou endpoint dédié
+//   /api/history/publish) pour forcer la publication au prochain tour
+//   de mqttPublishHistory() même sans retained reçu. Volatil (perdu au
+//   reboot) — c'est volontaire : un reboot sans demande explicite
+//   repart en mode "attendre le retained".
+// Persistance : historyRecoveryDone est persisté en NVS (namespace irrhist,
+//   clé hist_recovery_done) pour survivre à un reboot en cours de session
+//   — sans ça, un reboot après la 1ère recovery remettrait le drapeau à 0
+//   et on attendrait à nouveau 3s de plus avant de pouvoir publier.
+extern bool            historyRecoveryDone;
+extern bool            historyForcePublishNext;
 #endif
 
 // Vannes

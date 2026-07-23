@@ -1,0 +1,921 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<title>Dashboard Temperatures</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<style>
+  * { -webkit-box-sizing: border-box; box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    background: #0f1115;
+    color: #f2f3f5;
+    font-family: Arial, Helvetica, sans-serif;
+  }
+  body {
+    padding: 8px;
+  }
+
+  /* ---- Horloge (pas de boite) ---- */
+  .clock-bar {
+    text-align: center;
+    padding: 12px 6px 16px 6px;
+  }
+  .clock-time {
+    font-size: 96px;
+    font-weight: bold;
+    color: #4fc3f7;
+    line-height: 1;
+    display: inline-block;
+    vertical-align: baseline;
+  }
+  .clock-date {
+    font-size: 40px;
+    font-weight: bold;
+    color: #e4e6ea;
+    display: inline-block;
+    vertical-align: baseline;
+    margin-left: 14px;
+  }
+
+  /* ---- Barre meteo (premiere ligne) ---- */
+  .weather-bar {
+    max-width: 900px;
+    margin: 0 auto 14px auto;
+    overflow-x: auto;
+    white-space: nowrap;
+    padding: 2px 2px 8px 2px;
+  }
+  #weather-status {
+    font-size: 16px;
+    color: #9aa0ab;
+  }
+  .weather-card {
+    display: inline-block;
+    vertical-align: top;
+    width: 95px;
+    background: #1b1e26;
+    border: 3px solid #2a2e3a;
+    border-radius: 10px;
+    padding: 8px 4px;
+    text-align: center;
+    margin-right: 8px;
+    white-space: normal;
+  }
+  .weather-time {
+    font-size: 16px;
+    font-weight: bold;
+    color: #dfe2e8;
+  }
+  .weather-icon {
+    font-size: 30px;
+    line-height: 1;
+    margin: 6px 0;
+  }
+  .weather-temp {
+    font-size: 22px;
+    font-weight: bold;
+    color: #d35400;
+    margin: 4px 0;
+  }
+  .weather-info {
+    font-size: 12px;
+    color: #9aa0ab;
+  }
+
+  /* ---- Grille de capteurs (floats, pas de CSS Grid/Flexbox gap) ---- */
+  .grid {
+    max-width: 900px;
+    margin: 0 auto;
+    overflow: hidden; /* clearfix pour les floats */
+  }
+  .card {
+    float: left;
+    width: 48%;
+    margin: 0.8%;
+    background: #1b1e26;
+    border: 4px solid #2a2e3a;
+    padding: 10px 6px;
+    text-align: center;
+    min-height: 155px;
+  }
+  .card.error { border-color: #e05a5a; }
+
+  .sensor-name {
+    font-size: 21px;
+    font-weight: bold;
+    color: #dfe2e8;
+    margin-bottom: 6px;
+  }
+  .sensor-value {
+    font-size: 52px;
+    font-weight: bold;
+  }
+  .sensor-value .unit {
+    font-size: 26px;
+    font-weight: normal;
+    color: #cccccc;
+  }
+  .sensor-value .trend {
+    font-size: 50px;
+    font-weight: bold;
+    margin-left: 6px;
+    display: inline-block;
+  }
+  .sensor-updated {
+    margin-top: 6px;
+    font-size: 14px;
+    color: #9aa0ab;
+  }
+
+  #global-error {
+    max-width: 900px;
+    margin: 0 auto 10px auto;
+    padding: 10px 14px;
+    background: #3a1f1f;
+    border: 1px solid #e05a5a;
+    color: #ffb3b3;
+    display: none;
+    font-size: 16px;
+  }
+
+  #fullscreen-btn {
+    position: fixed;
+    top: 8px;
+    right: 8px;
+    background: #1b1e26;
+    border: 1px solid #2a2e3a;
+    color: #f2f3f5;
+    font-size: 22px;
+    width: 44px;
+    height: 44px;
+    text-align: center;
+    line-height: 44px;
+  }
+
+  #theme-btn {
+    position: fixed;
+    top: 8px;
+    right: 60px;
+    background: #1b1e26;
+    border: 1px solid #2a2e3a;
+    color: #f2f3f5;
+    font-size: 22px;
+    width: 44px;
+    height: 44px;
+    text-align: center;
+    line-height: 44px;
+  }
+
+  .card { cursor: pointer; }
+
+  /* ---- Modale historique ---- */
+  #history-overlay {
+    display: none;
+    position: fixed;
+    top: 0; left: 0; right: 0; bottom: 0;
+    background: rgba(0,0,0,0.75);
+    z-index: 200;
+  }
+  #history-box {
+    position: absolute;
+    top: 4%;
+    left: 3%;
+    right: 3%;
+    bottom: 4%;
+    background: #1b1e26;
+    border: 3px solid #2a2e3a;
+    padding: 14px;
+    overflow: auto;
+  }
+  #history-title {
+    font-size: 28px;
+    font-weight: bold;
+    color: #f2f3f5;
+    margin-bottom: 10px;
+    text-align: center;
+  }
+  #history-status {
+    font-size: 20px;
+    color: #9aa0ab;
+    text-align: center;
+    padding: 30px 0;
+  }
+  #history-close {
+    position: absolute;
+    top: 8px;
+    right: 8px;
+    width: 44px;
+    height: 44px;
+    background: #2a2e3a;
+    color: #f2f3f5;
+    border: none;
+    font-size: 22px;
+    text-align: center;
+    line-height: 44px;
+  }
+  #history-canvas {
+    width: 100%;
+    height: auto;
+    display: block;
+  }
+
+  /* ==================== MODE CLAIR ==================== */
+  body.light-mode, html.light-mode {
+    background: #f2f4f7;
+    color: #20242c;
+  }
+  body.light-mode .clock-time {
+    color: #0288d1;
+  }
+  body.light-mode .clock-date {
+    color: #20242c;
+  }
+  body.light-mode .card {
+    background: #ffffff;
+    border-color: #d5d9e0;
+  }
+  body.light-mode .card.error { border-color: #c73434; }
+  body.light-mode .sensor-name {
+    color: #3a3f4a;
+  }
+  body.light-mode .sensor-value .unit {
+    color: #666666;
+  }
+  body.light-mode .sensor-updated {
+    color: #6b7280;
+  }
+  body.light-mode #global-error {
+    background: #fde8e8;
+    border-color: #c73434;
+    color: #8a1f1f;
+  }
+  body.light-mode #fullscreen-btn,
+  body.light-mode #theme-btn {
+    background: #ffffff;
+    border-color: #d5d9e0;
+    color: #20242c;
+  }
+</style>
+</head>
+<body>
+
+<button id="fullscreen-btn">[ ]</button>
+<button id="theme-btn">&#9728;</button>
+<div id="global-error"></div>
+
+<div class="clock-bar">
+  <div class="clock-time" id="clock-time">--:--</div>
+  <div class="clock-date" id="clock-date">--</div>
+</div>
+
+ 
+ 
+<div class="grid" id="grid"></div>
+
+<div id="history-overlay">
+  <div id="history-box">
+    <button id="history-close">X</button>
+    <div id="history-title">--</div>
+    <div id="history-status">Chargement...</div>
+    <canvas id="history-canvas" width="1000" height="500"></canvas>
+  </div>
+</div>
+
+<script>
+/* ============================================================
+   CONFIGURATION
+    <div class="weather-bar" id="weather-bar">
+  <span id="weather-status">Chargement meteo...</span>
+</div>
+   ============================================================ */
+var HA_URL = "";
+var HA_TOKEN = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiIzZmM0YWNhYmVkODk0MTNlYWU4OGRhZGNmNGQwN2Y0MSIsImlhdCI6MTc4NDIzNjc5OCwiZXhwIjoyMDk5NTk2Nzk4fQ.iEWUbt74_ULuucG1rmuTYk6zSJwrqwwCWdhtUO6HFxw";
+
+var TIME_ZONE = "Europe/Rome";
+var TIME_FORMAT_24H = true;
+var SHOW_SECONDS = false;
+
+var REFRESH_INTERVAL = 30000;
+var STALE_AFTER_MS = 60 * 60 * 1000;
+
+var HISTORY_HOURS = 24;
+
+// Tendance (fleche montee/descente/stable)
+var TREND_WINDOW_MS = 5 * 60 * 1000; // comparer a il y a 5 min
+var TREND_THRESHOLD = 0.15; // ecart mini (deg) pour considerer une hausse/baisse
+
+var TEMP_MIN = 15;
+var TEMP_MAX = 30;
+
+// Meteo (Open-Meteo, pas de cle necessaire)
+var WEATHER_ENTITY = "weather.grezieu_la_varenne";
+var WEATHER_HOURS_SHOWN = 24;
+var WEATHER_REFRESH_INTERVAL = 15 * 60 * 1000; // 15 min
+
+var SENSORS = [
+  { entity: "sensor.sol_sensorplat_temperature" },  
+  { entity: "sensor.sol_sensorplat_soil_moisture" },   
+
+  { entity: "sensor.sensor_temperaturerond1_temperature" },
+  { entity: "sensor.irrigation01_irrigation01_temperature" },
+  { entity: "sensor.sol_sensorsolaire1_temperature" },
+  { entity: "sensor.fenetre_exterieur_temperature_exterieur_fenetre_2" },
+  { entity: "sensor.loradoubletemp_loradoubletemp_temperature_6" },
+  { entity: "sensor.loradoubletemp_loradoubletemp_temperature_7" },
+  { entity: "sensor.gros_pot_verre_ketchup_temperature" },
+  { entity: "sensor.yasolr_5c1e8_output1_temperature" }
+];
+
+/* ============================================================
+   FIN CONFIGURATION
+   ============================================================ */
+
+var grid = document.getElementById("grid");
+var globalError = document.getElementById("global-error");
+var sensorEls = {};
+var sensorNames = {};
+var sensorHistory = {}; // entity -> [{t, v}, ...] echantillons en memoire pour la tendance
+
+for (var i = 0; i < SENSORS.length; i++) {
+  (function(sensor) {
+    var card = document.createElement("div");
+    card.className = "card";
+    card.innerHTML =
+      '<div class="sensor-name">' + sensor.entity + '</div>' +
+      '<div class="sensor-value"><span class="val">--</span><span class="unit"></span><span class="trend"></span></div>' +
+      '<div class="sensor-updated">en attente...</div>';
+    grid.appendChild(card);
+    sensorEls[sensor.entity] = card;
+    sensorNames[sensor.entity] = sensor.entity;
+
+    card.addEventListener("click", function(e) {
+      e.stopPropagation();
+      openHistory(sensor.entity);
+    });
+  })(SENSORS[i]);
+}
+
+/* ---------------- Horloge ---------------- */
+function updateClock() {
+  var now = new Date();
+  var timeOpts = {
+    timeZone: TIME_ZONE,
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: !TIME_FORMAT_24H
+  };
+  if (SHOW_SECONDS) timeOpts.second = "2-digit";
+
+  var dateOpts = {
+    timeZone: TIME_ZONE,
+    day: "2-digit",
+    month: "2-digit"
+  };
+
+  document.getElementById("clock-time").textContent =
+    new Intl.DateTimeFormat("fr-FR", timeOpts).format(now);
+  document.getElementById("clock-date").textContent =
+    new Intl.DateTimeFormat("fr-FR", dateOpts).format(now).replace(/\./g, "/");
+}
+updateClock();
+setInterval(updateClock, SHOW_SECONDS ? 1000 : 5000);
+
+/* ---------------- Couleur du texte selon temperature ---------------- */
+function colorForTemp(tempC) {
+  var t = (tempC - TEMP_MIN) / (TEMP_MAX - TEMP_MIN);
+  if (t < 0) t = 0;
+  if (t > 1) t = 1;
+  var hue = 210 - (210 * t);
+  return "hsl(" + Math.round(hue) + ", 90%, 62%)";
+}
+
+/* ---------------- Themes clair / sombre ---------------- */
+var THEME_DARK = {
+  bg: "#0f1115",
+  text: "#f2f3f5",
+  cardBg: "#1b1e26",
+  cardBorder: "#2a2e3a",
+  clock: "#4fc3f7",
+  date: "#e4e6ea",
+  name: "#dfe2e8",
+  unit: "#cccccc",
+  updated: "#9aa0ab",
+  btnBg: "#1b1e26",
+  btnBorder: "#2a2e3a",
+  btnText: "#f2f3f5"
+};
+var THEME_LIGHT = {
+  bg: "#f2f4f7",
+  text: "#20242c",
+  cardBg: "#ffffff",
+  cardBorder: "#d5d9e0",
+  clock: "#0288d1",
+  date: "#20242c",
+  name: "#3a3f4a",
+  unit: "#666666",
+  updated: "#6b7280",
+  btnBg: "#ffffff",
+  btnBorder: "#d5d9e0",
+  btnText: "#20242c"
+};
+var currentTheme = THEME_DARK;
+var isLightMode = false;
+
+/* ---------------- Tendance (hausse / baisse / stable) ---------------- */
+function recordHistory(entityId, value) {
+  var hist = sensorHistory[entityId];
+  if (!hist) { hist = []; sensorHistory[entityId] = hist; }
+  hist.push({ t: Date.now(), v: value });
+
+  // Garde uniquement un peu plus que la fenetre de tendance (evite de grossir indefiniment)
+  var keepAfter = Date.now() - (TREND_WINDOW_MS * 2);
+  while (hist.length > 1 && hist[0].t < keepAfter) {
+    hist.shift();
+  }
+}
+
+function computeTrend(entityId, currentValue) {
+  var hist = sensorHistory[entityId];
+  if (!hist || hist.length < 2) return "stable"; // pas encore assez d'echantillons
+
+  var targetT = Date.now() - TREND_WINDOW_MS;
+  // Cherche l'echantillon le plus proche (avant ou egal) de "il y a 5 min".
+  // Si le capteur rafraichit lentement et qu'on n'a pas 5 min d'historique,
+  // on utilise simplement le plus ancien echantillon disponible.
+  var refSample = hist[0];
+  for (var i = 0; i < hist.length; i++) {
+    if (hist[i].t <= targetT) {
+      refSample = hist[i];
+    } else {
+      break;
+    }
+  }
+
+  var diff = currentValue - refSample.v;
+  if (diff > TREND_THRESHOLD) return "up";
+  if (diff < -TREND_THRESHOLD) return "down";
+  return "stable";
+}
+
+function showTrend(trendEl, trend) {
+  if (trend === "up") {
+    trendEl.innerHTML = "&#8593;"; // fleche haut
+    trendEl.style.color = "#ff6b57";
+  } else if (trend === "down") {
+    trendEl.innerHTML = "&#8595;"; // fleche bas
+    trendEl.style.color = "#4fc3f7";
+  } else {
+    trendEl.innerHTML = "&#8594;"; // fleche stable
+    trendEl.style.color = "#9aa0ab";
+  }
+}
+
+
+function formatRelative(dateStr) {
+  var d = new Date(dateStr);
+  var diffMin = Math.round((Date.now() - d.getTime()) / 60000);
+  if (diffMin < 1) return "a l'instant";
+  if (diffMin < 60) return "il y a " + diffMin + " min";
+  return "il y a " + Math.round(diffMin / 60) + " h";
+}
+
+function fetchSensor(sensor) {
+  var card = sensorEls[sensor.entity];
+  var url = HA_URL + "/api/states/" + sensor.entity;
+
+  fetch(url, {
+    headers: {
+      "Authorization": "Bearer " + HA_TOKEN,
+      "Content-Type": "application/json"
+    }
+  }).then(function(res) {
+    if (!res.ok) { throw new Error("HTTP " + res.status); }
+    return res.json();
+  }).then(function(data) {
+    var value = data.state;
+    var unit = data.attributes.unit_of_measurement || "";
+    var lastUpdated = data.last_updated;
+    // last_reported se met a jour a CHAQUE communication du capteur,
+    // meme si la valeur n'a pas change (contrairement a last_updated).
+    var lastSeen = data.last_reported || data.last_updated;
+
+    var isStale = (Date.now() - new Date(lastSeen).getTime()) > STALE_AFTER_MS;
+    var isUnavailable = (value === "unavailable" || value === "unknown");
+    var greyColor = "#7a8290"; // gris neutre utilise pour les capteurs non rafraichis
+
+    card.className = "card" + (isUnavailable ? " error" : "");
+    card.style.backgroundColor = currentTheme.cardBg;
+    if (isUnavailable) {
+      card.style.borderColor = "#e05a5a";
+    } else {
+      card.style.borderColor = currentTheme.cardBorder;
+    }
+
+    var valueEl = card.querySelector(".sensor-value");
+    var trendEl = card.querySelector(".trend");
+    var unitElRef = card.querySelector(".unit");
+    var nameElRef = card.querySelector(".sensor-name");
+
+    if (isUnavailable) {
+      valueEl.style.color = currentTheme.text;
+      trendEl.textContent = "";
+    } else {
+      var numVal = Number(value);
+      recordHistory(sensor.entity, numVal);
+
+      if (isStale) {
+        valueEl.style.color = greyColor;
+        unitElRef.style.color = greyColor;
+        nameElRef.style.color = greyColor;
+        showTrend(trendEl, "stable");
+        trendEl.style.color = greyColor;
+      } else {
+        valueEl.style.color = colorForTemp(numVal);
+        unitElRef.style.color = currentTheme.unit;
+        nameElRef.style.color = currentTheme.name;
+        showTrend(trendEl, computeTrend(sensor.entity, numVal));
+      }
+    }
+
+    card.querySelector(".val").textContent = isUnavailable ? "N/A" : Number(value).toFixed(1);
+    unitElRef.textContent = isUnavailable ? "" : unit;
+    card.querySelector(".sensor-updated").textContent = formatRelative(lastSeen);
+    card.querySelector(".sensor-updated").style.color = isStale ? greyColor : currentTheme.updated;
+
+    var friendlyName = (data.attributes && data.attributes.friendly_name) ? data.attributes.friendly_name : sensor.entity;
+    nameElRef.textContent = friendlyName;
+    sensorNames[sensor.entity] = friendlyName;
+
+    globalError.style.display = "none";
+  }).catch(function(err) {
+    card.className = "card error";
+    card.style.borderColor = "#e05a5a";
+    card.querySelector(".sensor-updated").textContent = "erreur";
+    globalError.textContent = "Erreur de connexion a l'API Home Assistant. Verifie le token et l'URL.";
+    globalError.style.display = "block";
+  });
+}
+
+function refreshAll() {
+  for (var i = 0; i < SENSORS.length; i++) {
+    fetchSensor(SENSORS[i]);
+  }
+}
+refreshAll();
+setInterval(refreshAll, REFRESH_INTERVAL);
+
+/* ---------------- Historique (modale + graphique canvas) ---------------- */
+var historyOverlay = document.getElementById("history-overlay");
+var historyBox = document.getElementById("history-box");
+var historyTitle = document.getElementById("history-title");
+var historyStatus = document.getElementById("history-status");
+var historyCanvas = document.getElementById("history-canvas");
+var historyClose = document.getElementById("history-close");
+
+function closeHistory() {
+  historyOverlay.style.display = "none";
+}
+historyClose.addEventListener("click", function(e) {
+  e.stopPropagation();
+  closeHistory();
+});
+historyOverlay.addEventListener("click", function(e) {
+  if (e.target === historyOverlay) closeHistory();
+});
+historyBox.addEventListener("click", function(e) {
+  e.stopPropagation();
+});
+
+function openHistory(entityId) {
+  historyOverlay.style.display = "block";
+  historyTitle.textContent = sensorNames[entityId] || entityId;
+  historyStatus.style.display = "block";
+  historyStatus.textContent = "Chargement...";
+  historyCanvas.style.display = "none";
+
+  var end = new Date();
+  var start = new Date(end.getTime() - HISTORY_HOURS * 3600 * 1000);
+  var url = HA_URL + "/api/history/period/" + start.toISOString() +
+            "?filter_entity_id=" + entityId +
+            "&end_time=" + encodeURIComponent(end.toISOString()) +
+            "&minimal_response";
+
+  fetch(url, {
+    headers: {
+      "Authorization": "Bearer " + HA_TOKEN,
+      "Content-Type": "application/json"
+    }
+  }).then(function(res) {
+    if (!res.ok) { throw new Error("HTTP " + res.status); }
+    return res.json();
+  }).then(function(data) {
+    var rows = (data && data[0]) ? data[0] : [];
+    var points = [];
+    for (var i = 0; i < rows.length; i++) {
+      var v = parseFloat(rows[i].state);
+      var ts = rows[i].last_changed || rows[i].last_updated;
+      if (!isNaN(v) && ts) {
+        points.push({ t: new Date(ts).getTime(), v: v });
+      }
+    }
+    if (points.length < 2) {
+      historyStatus.textContent = "Pas assez de donnees sur les dernieres " + HISTORY_HOURS + "h.";
+      return;
+    }
+    historyStatus.style.display = "none";
+    historyCanvas.style.display = "block";
+    drawHistoryChart(points, start.getTime(), end.getTime());
+  }).catch(function(err) {
+    historyStatus.textContent = "Erreur de chargement de l'historique.";
+  });
+}
+
+function drawHistoryChart(points, startMs, endMs) {
+  var canvas = historyCanvas;
+  var ctx = canvas.getContext("2d");
+  var W = canvas.width;
+  var H = canvas.height;
+  ctx.clearRect(0, 0, W, H);
+
+  var padL = 70, padR = 20, padT = 20, padB = 50;
+  var chartW = W - padL - padR;
+  var chartH = H - padT - padB;
+
+  var minV = points[0].v, maxV = points[0].v;
+  for (var i = 0; i < points.length; i++) {
+    if (points[i].v < minV) minV = points[i].v;
+    if (points[i].v > maxV) maxV = points[i].v;
+  }
+  if (minV === maxV) { minV -= 1; maxV += 1; }
+  var margin = (maxV - minV) * 0.1;
+  minV -= margin;
+  maxV += margin;
+
+  function xPos(t) { return padL + ((t - startMs) / (endMs - startMs)) * chartW; }
+  function yPos(v) { return padT + chartH - ((v - minV) / (maxV - minV)) * chartH; }
+
+  var isLight = isLightMode;
+  var gridColor = isLight ? "#d5d9e0" : "#2a2e3a";
+  var textColor = isLight ? "#3a3f4a" : "#c8ccd4";
+  var lineColor = isLight ? "#0288d1" : "#4fc3f7";
+
+  ctx.strokeStyle = gridColor;
+  ctx.fillStyle = textColor;
+  ctx.font = "20px Arial";
+  ctx.lineWidth = 1;
+
+  var steps = 4;
+  for (var s = 0; s <= steps; s++) {
+    var val = minV + (maxV - minV) * (s / steps);
+    var y = yPos(val);
+    ctx.beginPath();
+    ctx.moveTo(padL, y);
+    ctx.lineTo(W - padR, y);
+    ctx.stroke();
+    ctx.textAlign = "right";
+    ctx.fillText(val.toFixed(1), padL - 10, y + 6);
+  }
+
+  ctx.textAlign = "center";
+  ctx.fillText(formatAxisTime(startMs), padL + 40, H - 15);
+  ctx.fillText(formatAxisTime(endMs), W - padR - 40, H - 15);
+  var midMs = (startMs + endMs) / 2;
+  ctx.fillText(formatAxisTime(midMs), padL + chartW / 2, H - 15);
+
+  ctx.strokeStyle = lineColor;
+  ctx.lineWidth = 4;
+  ctx.beginPath();
+  for (var p = 0; p < points.length; p++) {
+    var x = xPos(points[p].t);
+    var y2 = yPos(points[p].v);
+    if (p === 0) { ctx.moveTo(x, y2); } else { ctx.lineTo(x, y2); }
+  }
+  ctx.stroke();
+
+  ctx.fillStyle = lineColor;
+  for (var p2 = 0; p2 < points.length; p2++) {
+    var x2 = xPos(points[p2].t);
+    var y3 = yPos(points[p2].v);
+    ctx.beginPath();
+    ctx.arc(x2, y3, 3, 0, 2 * Math.PI);
+    ctx.fill();
+  }
+}
+
+function formatAxisTime(ms) {
+  var d = new Date(ms);
+  var opts = { timeZone: TIME_ZONE, hour: "2-digit", minute: "2-digit", day: "2-digit", month: "2-digit" };
+  return new Intl.DateTimeFormat("fr-FR", opts).format(d);
+}
+
+/* ---------------- Meteo (via Home Assistant, premiere ligne) ---------------- */
+// Conditions standard Home Assistant -> icone
+var CONDITION_ICONS = {
+  "clear-night": "\u263D",
+  "cloudy": "\u2601",
+  "fog": "\u2601",
+  "hail": "\u2744",
+  "lightning": "\u26A1",
+  "lightning-rainy": "\u26A1",
+  "partlycloudy": "\u26C5",
+  "pouring": "\u2614",
+  "rainy": "\u2614",
+  "snowy": "\u2744",
+  "snowy-rainy": "\u2744",
+  "sunny": "\u2600",
+  "windy": "\u2601",
+  "windy-variant": "\u2601",
+  "exceptional": "?"
+};
+
+function fetchWeather() {
+  var weatherBar = document.getElementById("weather-bar");
+  var url = HA_URL + "/api/services/weather/get_forecasts?return_response";
+
+  fetch(url, {
+    method: "POST",
+    headers: {
+      "Authorization": "Bearer " + HA_TOKEN,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({ entity_id: WEATHER_ENTITY, type: "hourly" })
+  }).then(function(res) {
+    if (!res.ok) { throw new Error("HTTP " + res.status); }
+    return res.json();
+  }).then(function(data) {
+    var forecast = null;
+    if (data && data.service_response && data.service_response[WEATHER_ENTITY]) {
+      forecast = data.service_response[WEATHER_ENTITY].forecast;
+    }
+    if (!forecast || !forecast.length) {
+      weatherBar.innerHTML = '<span id="weather-status">Pas de donnees</span>';
+      return;
+    }
+
+    var now = new Date();
+    var html = "";
+    var shown = 0;
+
+    for (var i = 0; i < forecast.length && shown < WEATHER_HOURS_SHOWN; i++) {
+      var item = forecast[i];
+      var t = new Date(item.datetime);
+      if (t <= now) continue;
+
+      var hourLabel = t.toLocaleTimeString("fr-FR", { hour: "2-digit", minute: "2-digit" });
+      var icon = CONDITION_ICONS[item.condition] || "?";
+      var temp = (item.temperature !== null && item.temperature !== undefined) ? Math.round(item.temperature) : "-";
+
+      var extra = "";
+      if (item.precipitation_probability !== undefined && item.precipitation_probability !== null) {
+        extra = Math.round(item.precipitation_probability) + " %";
+      } else if (item.precipitation !== undefined && item.precipitation !== null) {
+        extra = item.precipitation + " mm";
+      }
+      var wind = (item.wind_speed !== undefined && item.wind_speed !== null) ? Math.round(item.wind_speed) + " km/h" : "";
+
+      html += '<div class="weather-card">' +
+                '<div class="weather-time">' + hourLabel + '</div>' +
+                '<div class="weather-icon">' + icon + '</div>' +
+                '<div class="weather-temp">' + temp + '\u00B0</div>' +
+                (wind ? '<div class="weather-info">' + wind + '</div>' : '') +
+                (extra ? '<div class="weather-info">' + extra + '</div>' : '') +
+              '</div>';
+      shown++;
+    }
+
+    html += '<div style="display:inline-block;vertical-align:top;padding:20px 8px;font-size:13px;color:#9aa0ab;">' +
+              forecast.length + ' prevs recues<br>de l API HA' +
+            '</div>';
+
+    weatherBar.innerHTML = html || '<span id="weather-status">Pas de donnees</span>';
+    applyWeatherTheme();
+  }).catch(function(err) {
+    weatherBar.innerHTML = '<span id="weather-status">Meteo indisponible</span>';
+  });
+}
+
+function applyWeatherTheme() {
+  var t = currentTheme;
+  var cards = document.querySelectorAll(".weather-card");
+  for (var i = 0; i < cards.length; i++) {
+    cards[i].style.backgroundColor = t.cardBg;
+    cards[i].style.borderColor = t.cardBorder;
+    var timeEl = cards[i].querySelector(".weather-time");
+    var infoEls = cards[i].querySelectorAll(".weather-info");
+    if (timeEl) timeEl.style.color = t.name;
+    for (var j = 0; j < infoEls.length; j++) { infoEls[j].style.color = t.updated; }
+  }
+}
+
+fetchWeather();
+setInterval(fetchWeather, WEATHER_REFRESH_INTERVAL);
+
+/* ---------------- Plein ecran ---------------- */
+function isFullscreen() {
+  return !!(document.fullscreenElement || document.webkitFullscreenElement);
+}
+function enterFullscreen() {
+  var el = document.documentElement;
+  var req = el.requestFullscreen || el.webkitRequestFullscreen;
+  if (req) { req.call(el); }
+}
+function exitFullscreen() {
+  var exit = document.exitFullscreen || document.webkitExitFullscreen;
+  if (exit) { exit.call(document); }
+}
+document.getElementById("fullscreen-btn").addEventListener("click", function(e) {
+  e.stopPropagation();
+  isFullscreen() ? exitFullscreen() : enterFullscreen();
+});
+document.body.addEventListener("click", function() {
+  if (!isFullscreen()) enterFullscreen();
+});
+
+/* ---------------- Mode clair / sombre : bouton + persistance ---------------- */
+var themeBtn = document.getElementById("theme-btn");
+var fsBtn = document.getElementById("fullscreen-btn");
+
+function applyTheme(isLight) {
+  currentTheme = isLight ? THEME_LIGHT : THEME_DARK;
+  isLightMode = isLight;
+  var t = currentTheme;
+
+  document.documentElement.style.backgroundColor = t.bg;
+  document.body.style.backgroundColor = t.bg;
+  document.body.style.color = t.text;
+
+  var clockTime = document.getElementById("clock-time");
+  var clockDate = document.getElementById("clock-date");
+  if (clockTime) clockTime.style.color = t.clock;
+  if (clockDate) clockDate.style.color = t.date;
+
+  var cards = document.querySelectorAll(".card");
+  for (var i = 0; i < cards.length; i++) {
+    var card = cards[i];
+    card.style.backgroundColor = t.cardBg;
+    if (card.className.indexOf("stale") === -1 && card.className.indexOf("error") === -1) {
+      card.style.borderColor = t.cardBorder;
+    }
+    var nameEl = card.querySelector(".sensor-name");
+    var unitEl = card.querySelector(".unit");
+    var updEl = card.querySelector(".sensor-updated");
+    if (nameEl) nameEl.style.color = t.name;
+    if (unitEl) unitEl.style.color = t.unit;
+    if (updEl) updEl.style.color = t.updated;
+  }
+
+  fsBtn.style.backgroundColor = t.btnBg;
+  fsBtn.style.borderColor = t.btnBorder;
+  fsBtn.style.color = t.btnText;
+  themeBtn.style.backgroundColor = t.btnBg;
+  themeBtn.style.borderColor = t.btnBorder;
+  themeBtn.style.color = t.btnText;
+
+  themeBtn.innerHTML = isLight ? "&#9789;" : "&#9728;";
+
+  if (typeof applyWeatherTheme === "function") applyWeatherTheme();
+
+  var hBox = document.getElementById("history-box");
+  var hTitle = document.getElementById("history-title");
+  var hStatus = document.getElementById("history-status");
+  var hClose = document.getElementById("history-close");
+  if (hBox) {
+    hBox.style.backgroundColor = t.cardBg;
+    hBox.style.borderColor = t.cardBorder;
+  }
+  if (hTitle) hTitle.style.color = t.text;
+  if (hStatus) hStatus.style.color = t.updated;
+  if (hClose) {
+    hClose.style.backgroundColor = t.btnBg;
+    hClose.style.color = t.btnText;
+  }
+}
+
+function getSavedTheme() {
+  try {
+    return localStorage.getItem("dashtemp-theme");
+  } catch (e) {
+    return null;
+  }
+}
+function saveTheme(value) {
+  try {
+    localStorage.setItem("dashtemp-theme", value);
+  } catch (e) {}
+}
+
+applyTheme(getSavedTheme() === "light");
+
+themeBtn.addEventListener("click", function(e) {
+  e.stopPropagation();
+  var switchToLight = !isLightMode;
+  applyTheme(switchToLight);
+  saveTheme(switchToLight ? "light" : "dark");
+});
+</script>
+
+</body>
+</html>

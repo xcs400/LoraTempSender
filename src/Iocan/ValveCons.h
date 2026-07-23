@@ -122,6 +122,27 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
                         valveCons[i].history[valveCons[i].todayIdx % CONS_HISTORY_DAYS] = ds;
                         valveCons[i].todayIdx = (uint16_t)((valveCons[i].todayIdx + 1) % CONS_HISTORY_DAYS);
                     }
+                    // ── Log rollover par vanne (instrumentation) ──
+                    // On log ici (pas dans la loop) car c'est l'endroit
+                    // exact où les compteurs par vanne basculent. Le
+                    // throttling par todayAll garantit 1 seule ligne par
+                    // rollover (la 1ère vanne qui bascule émet, les
+                    // suivantes ne font que mettre à jour todayYmd sans
+                    // re-logger grâce à todayAll == valveCons[i].todayYmd
+                    // après la 1ère itération).
+                    static uint16_t lastLoggedRolloverYmd = 0;
+                    if(lastLoggedRolloverYmd != todayAll){
+                        lastLoggedRolloverYmd = todayAll;
+                        char rb[120];
+                        // On log la 1ère vanne rollée (celle qui déclenche
+                        // le rollover) avec son compteur d'hier pour avoir
+                        // une trace chiffrée de ce qui a été clôturé.
+                        snprintf(rb, sizeof(rb),
+                            "[ROLLOVER] ROLLOVER JOURNALIER ymd=%u : V%d clôture (todayYmd=%u → %u, todayPulses cloturés=0)",
+                            (unsigned)todayAll, i+1,
+                            (unsigned)valveCons[i].todayYmd, (unsigned)todayAll);
+                        logSys(rb);
+                    }
                     valveCons[i].todayYmd = todayAll;
                     valveCons[i].todayPulses = 0;
                     valveConsMarkDirty(i);
@@ -136,6 +157,22 @@ inline void pulseDistribute(unsigned long totalPulsesGlobal){
                     ds.litres = (float)ds.pulses / PULSES_PER_LITRE;
                     manualValveState.history[manualValveState.todayIdx % CONS_HISTORY_DAYS] = ds;
                     manualValveState.todayIdx = (uint16_t)((manualValveState.todayIdx + 1) % CONS_HISTORY_DAYS);
+                }
+                // ── Log rollover vanne manuelle ──
+                // Émis une seule fois par jour (throttling par todayAll),
+                // après que toutes les vannes auto ont été rollées. C'est
+                // utile pour distinguer dans les logs si le rollover a été
+                // détecté "à l'heure" (juste après minuit) ou en retard
+                // (boot à 7h du matin après une coupure de nuit).
+                static uint16_t lastLoggedMvRolloverYmd = 0;
+                if(lastLoggedMvRolloverYmd != todayAll){
+                    lastLoggedMvRolloverYmd = todayAll;
+                    char rb[120];
+                    snprintf(rb, sizeof(rb),
+                        "[ROLLOVER] ROLLOVER JOURNALIER ymd=%u : VanneManuelle clôture (todayYmd=%u → %u)",
+                        (unsigned)todayAll,
+                        (unsigned)manualValveState.todayYmd, (unsigned)todayAll);
+                    logSys(rb);
                 }
                 manualValveState.todayYmd    = todayAll;
                 manualValveState.todayPulses = 0;

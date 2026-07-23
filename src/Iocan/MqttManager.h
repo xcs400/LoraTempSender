@@ -53,7 +53,7 @@ inline unsigned long lastMqttDownHeartbeatMs  = 0;
 #define MQTT_CANARY_INTERVAL_MS 45000UL   // 45s < keepAlive 60s
 #endif
 #ifndef MQTT_FORCED_RECONNECT_MS
-#define MQTT_FORCED_RECONNECT_MS 900000UL // 15 min
+#define MQTT_FORCED_RECONNECT_MS 3600000UL // 60 min
 #endif
 
 // ────────────────────────────────────────────────────────────
@@ -429,17 +429,98 @@ inline void mqttPublishState(){
 // Publie l'historique des consommations sur 7 jours au format JSON.
 // Topic : <mqttPrefix>/<mqttId>/history
 // Retained : true (pour que HA ait la valeur au prochain reboot)
+//
+// GARDE-FOUS ANTI-ÉCRASEMENT (cf. cause n°1 du bug "history à 0 le matin") :
+//   1) NTP synchronisé (sinon dates 1970 invalides)
+//   2) historyData.initialized (historyLoad a réussi)
+//   3) todayYMD() != 0 (date du jour lisible)
+//   4) En mode CONS_MQTT_ONLY, on attend la RÉCEPTION du retained history
+//      de la session précédente avant d'écrire le nôtre — sans ça, on
+//      risquerait d'écraser une valeur broker correcte avec une RAM
+//      incomplète (reboot en pleine nuit, NTP pas sync, NVS pas flushé…).
+//      L'utilisateur peut outrepasser cette garde en armer
+//      historyForcePublishNext (via POST /api/config quand mqttEnabled
+//      passe false→true, ou via POST /api/history/publish).
 inline void mqttPublishHistory(){
     if(!mqttConnected) return;
-    
-    // Ne publier que si l'heure système est synchronisée (NTP) pour éviter
-    // de publier des dates invalides (ex. 1970-01-01) qui pollueraient le
-    // retained et seraient restaurées ultérieurement.
-    if(time(nullptr) < 1700000000UL) return; // ~2024-01-01, pas de NTP
-    
+
+    // Garde 1 : NTP sync (dates 1970 corrompraient irrémédiablement le retained)
+    if(time(nullptr) < 1700000000UL) {
+        logSys("[HIST] Publication refusée : NTP pas synchronisé");
+        return;
+    }
+    // Garde 2 : historyData doit être initialisé (historyLoad OK)
+    if(!historyData.initialized) {
+        logSys("[HIST] Publication refusée : historyData non initialisé");
+        return;
+    }
+    // Garde 3 : date du jour lisible
+    if(todayYMD() == 0) {
+        logSys("[HIST] Publication refusée : todayYMD()=0 (NTP partiellement sync ?)");
+        return;
+    }
+#ifdef CONS_MQTT_ONLY
+    // Garde 4 (critique) : on a déjà reçu le retained history au moins une
+    // fois pendant la session, OU l'utilisateur a explicitement demandé
+    // une publication forcée (ex. activation de MQTT). Sans cette garde,
+    // le 1er mqttPublishHistory() après un reboot publierait un payload
+    // potentiellement partiel (historyData tout à 0 si historyLoad a
+    // échoué silencieusement, ou tampon days[] pas encore rollé à 00:00)
+    // et ÉCRASERAIT la valeur correcte retenue sur le broker.
+    if(!historyRecoveryDone && !historyForcePublishNext) {
+        static unsigned long lastRefusedLogMs = 0;
+        unsigned long now = millis();
+        // Log throttled : 1×/5min pour ne pas spammer si la recovery MQTT
+        // n'aboutit pas (broker KO, payload retained absent…).
+        if(now - lastRefusedLogMs > 300000UL) {
+            lastRefusedLogMs = now;
+            logSys("[HIST] Publication refusée : en attente du retained history (recovery non terminée)");
+        }
+        return;
+    }
+    // Si on a été autorisé via le drapeau "force", on le consomme (one-shot).
+    // Permet à un seul mqttPublishHistory() forcé de partir, puis on
+    // repasse en mode "attente retained".
+    if(historyForcePublishNext) {
+        historyForcePublishNext = false;
+        logSys("[HIST] Publication forcée par l'utilisateur (historyForcePublishNext consommé)");
+    }
+#endif
+
     String json = historyToJson();
     String topic = mqttTopic("history", "history");
     mqttClient.publish(topic.c_str(), 1, true, json.c_str(), json.length());
+#ifdef CONS_MQTT_ONLY
+    {
+        char b[80];
+        snprintf(b, sizeof(b), "[HIST] Publication retained OK (%u octets, recoveryDone=%d)",
+                 (unsigned)json.length(), (int)historyRecoveryDone);
+        logSys(b);
+    }
+#endif
+}
+
+// ────────────────────────────────────────────────────────────
+// Force la publication de l'historique au prochain tour
+// ────────────────────────────────────────────────────────────
+// À appeler depuis l'API Web (POST /api/history/publish) ou
+// automatiquement depuis POST /api/config quand mqttEnabled passe de
+// false à true (premier boot MQTT, ou réactivation après désactivation).
+// En mode NVS normal, l'historique est déjà persisté localement donc cette
+// fonction n'a pas de garde particulière (la publication reste triviale).
+inline void mqttForceHistoryPublish(){
+#ifdef CONS_MQTT_ONLY
+    historyForcePublishNext = true;
+    // Reset aussi le drapeau persistant : on veut qu'après une demande
+    // explicite de l'utilisateur, le prochain retained history qu'on
+    // recevra (s'il arrive) soit traité normalement ET que la prochaine
+    // session n'attende pas inutilement.
+    historyRecoveryDone = false;
+    historySaveRecoveryFlag(false);
+    logSys("[HIST] mqttForceHistoryPublish() armé — publication au prochain tour");
+#else
+    logSys("[HIST] mqttForceHistoryPublish() : no-op hors CONS_MQTT_ONLY");
+#endif
 }
 
 // ★ Canari de confirmation de vie de la session.
@@ -485,8 +566,9 @@ inline void resetManualValveCounters(){
 // Un compteur ne peut que progresser entre deux sessions : une valeur MQTT
 // plus basse que la RAM est forcément anormale et on garde la valeur locale.
 // Retourne true (et logue) si mqttVal doit remplacer currentVal.
+
 inline bool mqttRecoverIfGreater(unsigned long mqttVal, unsigned long currentVal, const char* label){
-    if(mqttVal > currentVal){
+    if(mqttVal > currentVal ){
         char b[140];
         snprintf(b, sizeof(b), "[RECOVERY] %s: RAM=%lu < MQTT=%lu — restauré",
                  label, currentVal, mqttVal);
@@ -535,11 +617,47 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
     // Historique des consommations (7 jours) — aussi en retained sur
     // <prefix>/<id>/history. On s'abonne à ce topic pendant la fenêtre de
     // recovery et on restaure historyData via historyFromJson().
+    //
+    // NOTE : le subscribe est fait UNE SEULE FOIS dans onMqttConnect()
+    // (voir mqttClient.subscribe(historyTopic, 0) juste après l'ouverture
+    // de la fenêtre). Le topic exact DOIT correspondre au publish dans
+    // mqttPublishHistory() → utiliser mqttTopic("history", "history") pour
+    // garantir la cohérence. Ne PAS re-subscribe à chaque message reçu
+    // (ça marcherait mais c'est du gaspillage CPU/bande passante).
     if(!mqttRecoveryDone){
-        // S'abonner au retained history pour la récupération
-        String historyTopic = String(sysConfig.mqttPrefix) + "/" + sysConfig.mqttId + "/history";
-        mqttClient.subscribe(historyTopic.c_str(), 0);
         String sensorBase = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/";
+        // Topic history : même chemin que le publish dans
+        // mqttPublishHistory() → mqttTopic("history", "history") =
+        // <prefix>/history/<id>/history
+        String historyTopicExpected = mqttTopic("history", "history");
+
+        // ── Cas 1 : message history retained pendant la fenêtre de recovery
+        // Traité EN PREMIER (avant les sensorBase) car le topic ne matche
+        // pas le préfixe sensorBase. C'est ici qu'on hydrate historyData
+        // et qu'on arme historyRecoveryDone → la garde anti-écrasement
+        // de mqttPublishHistory() peut alors se débloquer.
+        if(t == historyTopicExpected){
+                char hb[140];
+                  snprintf(hb, sizeof(hb), "[HIST] Retained history reçu )");
+                    logSys(hb);
+
+
+            unsigned long now = millis();
+            if(now - mqttRecoveryStartMs < 86400000UL){ // 24h
+                historyFromJson(p);
+              //                    logSys(p.c_str(  ));
+                if(!historyRecoveryDone ) {
+                    historyRecoveryDone = true;
+                    historySaveRecoveryFlag(true);
+                    char hb[140];
+                    snprintf(hb, sizeof(hb), "[HIST]  history— publication MQTT autorisée (taille=%u, jours chargés=%d)",
+                             (unsigned)p.length(), (int)historyData.initialized);
+                    logSys(hb);
+                }
+            }
+            return; // message de récupération traité
+        }
+
         if(t.startsWith(sensorBase)){
             String objId = t.substring(sensorBase.length());
             float val = p.toFloat();
@@ -553,7 +671,7 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                 unsigned long mqttPulses = (unsigned long)(val + 0.5f);
                 noInterrupts(); cnt = pulseCount; interrupts();
                 unsigned long liveTotal = persistedPulseCount + cnt;
-                if(mqttRecoverIfGreater(mqttPulses, liveTotal, "pulse_total")){
+                if(mqttRecoverIfGreater(mqttPulses, liveTotal, "pulse_total" )){
                     persistedPulseCount = mqttPulses;
                     // CRITIQUE : realigner lastDistributedTotal sur le total
                     // restauré, sinon pulseDistribute() verra un delta énorme
@@ -640,18 +758,6 @@ inline void mqttHandleMessage(char* topic, char* payload, size_t len){
                         manualValveState.todayPulses = (uint32_t)mqttPulses;
                         manualValveDirty = true;
                     }
-                }
-            } else if(objId == "history"){
-                // ── Recovery historique (7 jours) ──
-                // Le payload est le JSON complet produit par historyToJson().
-                // On restaure historyData si le JSON est valide et semble plausible.
-                // On ne restaure que si le timestamp est récent (moins de 48h) pour éviter
-                // de restaurer un historique obsolète (ex. après une coupure de courant
-                // prolongée où le broker a gardé les données mais le device a été
-                // éteint plus de 2 jours).
-                unsigned long now = millis();
-                if(now - mqttRecoveryStartMs < 86400000UL){ // 24h
-                    historyFromJson(p);
                 }
             }
             return; // message de récupération traité — pas une commande switch
@@ -764,12 +870,24 @@ inline void onMqttConnect(bool sessionPresent){
     String availTopic = mqttAvailabilityTopic();
     mqttClient.publish(availTopic.c_str(), 0, true, "online", 6);
 #ifdef CONS_MQTT_ONLY
-    // Recovery : s'abonne aux retained et ouvre la fenêtre 3s
+    // Recovery : s'abonne aux retained et ouvre la fenêtre 3s.
+    // Le subscribe au topic history DOIT utiliser le même chemin que
+    // mqttPublishHistory() (mqttTopic("history", "history") = préfixe
+    // "history" + mqttId + suffix "history"). L'ancien code s'abonnait
+    // à <prefix>/<id>/history (sans le segment "history/" au milieu) —
+    // bug : le broker publie sur <prefix>/history/<id>/history et
+    // l'ESP s'abonnait à <prefix>/<id>/history, donc le retained
+    // n'était JAMAIS reçu → historyFromJson() jamais appelé →
+    // historyRecoveryDone restait false → garde bloquait la
+    // publication à perpétuité → l'UI affichait 0.
     String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
     mqttClient.subscribe(recovPattern.c_str(), 0);
+    String historyTopic = mqttTopic("history", "history");
+    mqttClient.subscribe(historyTopic.c_str(), 0);
     mqttRecoveryDone    = false;
     mqttRecoveryStartMs = millis();
-    logSys("[CONS] Recovery MQTT démarrée (fenêtre 3s)");
+    logSys(historyTopic.c_str());
+    logSys("[CONS] Recovery MQTT démarrée (fenêtre 3s) ");
 #else
     mqttPublishDiscovery();
     mqttPublishState();
@@ -984,13 +1102,17 @@ inline void mqttLoop(){
 #ifdef CONS_MQTT_ONLY
         // ── Fin de fenêtre de récupération (3 s après connexion) ──
         // On ferme la fenêtre, on flush les valeurs restaurées en NVS, on se
-        // désabonne du pattern sensor (pour ne plus recevoir les états
-        // futurs comme des retained de récupération), puis on publie la
-        // discovery et l'état fusionné final.
+        // désabonne du pattern sensor ET du topic history (pour ne plus
+        // recevoir les états futurs comme des retained de récupération, et
+        // pour éviter un auto-écho permanent sur nos propres publications
+        // retained de mqttPublishHistory()), puis on publie la discovery et
+        // l'état fusionné final.
         if(!mqttRecoveryDone && (now - mqttRecoveryStartMs >= 3000UL)){
             mqttRecoveryDone = true;
             String recovPattern = String(sysConfig.mqttPrefix) + "/sensor/" + sysConfig.mqttId + "/+";
             mqttClient.unsubscribe(recovPattern.c_str());
+            String historyTopic = mqttTopic("history", "history");
+            mqttClient.unsubscribe(historyTopic.c_str());
             valveConsFlushDirty();
             logSys("[CONS] Recovery MQTT terminée — NVS mis à jour");
             mqttPublishDiscovery();

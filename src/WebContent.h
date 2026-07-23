@@ -614,7 +614,7 @@ function renderValveCards() {
       // Débit mesuré > 0 : on affiche la valeur réelle. Couleur bleue
       // pour signaler "mesure live". Tooltip rappelle qu'il s'agit
       // d'une moyenne lissée sur FLOW_WINDOW_MS (4 s).
-      lpmHtml = `<span class="vc-flow" title="Débit instantané mesuré (moyenne lissée sur ~4 s)">? ${_liveFlow.toFixed(2)} L/min</span>`;
+      lpmHtml = `<span class="vc-flow" title="Débit instantané mesuré (moyenne lissée sur ~4 s)">💧 ${_liveFlow.toFixed(2)} L/min</span>`;
     } else if(_capLpm > 0){
       // Pas (encore) de débit mesuré, vanne calibrée : on affiche la
       // capacité théorique. Couleur discrète pour différencier d'une
@@ -653,7 +653,7 @@ function renderValveCards() {
                    ? (s.durationSec * fc / ppl).toFixed(2) + ' L'
                    : null;
       const volHtml = vol
-        ? `<span style="color:var(--blue);font-weight:600;margin-left:4px">? ${vol}</span>`
+        ? `<span style="color:var(--blue);font-weight:600;margin-left:4px">💧 ${vol}</span>`
         : '';
       nextHtml = `
         <div style="color:var(--text);font-weight:600;margin-bottom:3px">${name}</div>
@@ -970,7 +970,7 @@ function openSchedModal() {
   setSchedUnit('sec'); // par défaut on saisit en secondes
   updateSchedCalMode();
   // Reset jours
-  document.querySelectorAll('.day-btn').forEach(b=>{
+  document.querySelectorAll('.days-picker .day-btn').forEach(b=>{
     b.classList.toggle('sel', parseInt(b.dataset.d)<5);
   });
   document.getElementById('sched-modal').classList.add('open');
@@ -1006,7 +1006,7 @@ function editSched(flatIdx) {
     document.getElementById('sched-season-end').value =
       String(s.seasonEndMonth).padStart(2,'0')+'-'+String(s.seasonEndDay).padStart(2,'0');
   }
-  document.querySelectorAll('.day-btn').forEach(b=>{
+  document.querySelectorAll('.days-picker .day-btn').forEach(b=>{
     b.classList.toggle('sel', !!(s.weekDays & (1<<parseInt(b.dataset.d))));
   });
   updateSchedCalMode();
@@ -1058,7 +1058,7 @@ function updateSchedCalMode() {
   document.getElementById('sched-season-row').style.display  = m===2?'block':'none';
 }
 
-document.querySelectorAll('.day-btn').forEach(b=>{
+document.querySelectorAll('.days-picker .day-btn').forEach(b=>{
   b.addEventListener('click',()=>b.classList.toggle('sel'));
 });
 
@@ -1186,7 +1186,7 @@ function syncSchedFromVol(){
 function saveSched() {
   const time = document.getElementById('sched-time').value.split(':');
   let weekDays = 0;
-  document.querySelectorAll('.day-btn.sel').forEach(b=>{ weekDays |= (1<<parseInt(b.dataset.d)); });
+  document.querySelectorAll('.days-picker .day-btn.sel').forEach(b=>{ weekDays |= (1<<parseInt(b.dataset.d)); });
   const calMode = parseInt(document.getElementById('sched-calmode').value);
   const [sm,sd] = (document.getElementById('sched-season-start').value||'01-01').split('-').map(Number);
   const [em,ed] = (document.getElementById('sched-season-end').value||'12-31').split('-').map(Number);
@@ -1881,8 +1881,14 @@ function refreshConsumption(){
 // HISTORIQUE DES CONSOMMATIONS
 // ══════════════════════════════════════════════════════════
 
-// Stockage local de l'historique (7 jours)
+// Stockage local de l'historique (7 jours).
+// Chaque entrée = 1 jour calendaire (objet issu de `data[]` dans le
+// JSON /api/history). Le timestamp `generatedAt` racine du payload
+// est conservé séparément (historyGeneratedAt ci-dessous) car il
+// décrit le moment où le firmware a produit le snapshot — pas une
+// propriété de chaque jour.
 let historyData = [];
+let historyGeneratedAt = 0; // Unix timestamp, mis par loadHistory()
 
 // Formate une date en format YYYY-MM-DD
 function formatDate(d) {
@@ -1903,26 +1909,87 @@ function loadHistory() {
   api('GET', '/api/history').then(d => {
     if (!d || !d.data) {
       historyData = [];
+      historyGeneratedAt = 0;
       renderHistory();
       return;
     }
     historyData = d.data;
+    // generatedAt est au niveau RACINE du JSON (cf. HistoryManager.h::
+    // historyToJson() : `doc["generatedAt"] = (uint64_t)time(nullptr);`).
+    // On le stocke séparément de historyData (qui ne contient QUE le
+    // tableau `data[]`) pour pouvoir l'afficher dans la carte "Dernière
+    // MAJ" sans dépendre de l'horloge locale du navigateur.
+    historyGeneratedAt = (d.generatedAt !== undefined && d.generatedAt !== null)
+                        ? Number(d.generatedAt) : 0;
     renderHistory();
   });
 }
 
-// Calcule les statistiques globales sur 7 jours
-function computeHistoryStats() {
+// Calcule les statistiques globales sur 7 jours.
+//
+// IMPORTANT : on ne se base PAS uniquement sur `day.totalLitres` du
+// snapshot firmware — ce champ est mis à 0 tant que le firmware n'a
+// pas fait son `historyUpdateFromConsumption()` (cf. MainIocan_S.cpp,
+// toutes les 5 min après le fix). Pendant cette fenêtre, le snapshot
+// est périmé mais la matrice `[vanne][col]` construite dans
+// renderHistory() est, elle, corrigée en live pour la colonne "today"
+// via les compteurs WebSocket `valves[v].litresToday` (cf. fallback
+// mis en place pour le bug "0 L aujourd'hui").
+//
+// Pour éviter que les stats globales soient à 0 alors que la matrice
+// affiche des valeurs correctes, on accepte en paramètre la matrice
+// déjà calculée + le nombre de vannes et on s'en sert comme source
+// de vérité pour la somme 7j et la moyenne/jour. Le "jour max" reste
+// basé sur le snapshot car c'est le seul moment où on a besoin d'une
+// DATE — pas d'une valeur.
+function computeHistoryStats(matrix, valveCount) {
   if (!historyData.length) return null;
 
-  const total = historyData.reduce((sum, day) => sum + (day.totalLitres || 0), 0);
+  // Si la matrice est fournie, on s'en sert (cohérent avec ce qui est
+  // affiché dans le tableau en-dessous). Sinon (compat ancien appel),
+  // on retombe sur day.totalLitres du snapshot.
+  let total;
+  if (matrix && matrix.length && valveCount > 0) {
+    total = 0;
+    for (let v = 0; v < valveCount; v++) {
+      for (let i = 0; i < 7; i++) {
+        total += (matrix[v][i] || 0);
+      }
+    }
+  } else {
+    total = historyData.reduce((sum, day) => sum + (day.totalLitres || 0), 0);
+  }
   const moyenne = total / 7;
 
-  // Trouver le jour le plus consommateur
+  // Trouver le jour le plus consommateur (sur les 7 derniers,
+  // aligné sur ce que montre le tableau — pas sur tout l'historique
+  // potentiellement plus long). Si la matrice est dispo, on calcule
+  // la somme par colonne (= par jour), sinon on retombe sur
+  // day.totalLitres du snapshot.
   let maxDay = historyData[0];
-  for (const day of historyData) {
-    if ((day.totalLitres || 0) > (maxDay.totalLitres || 0)) {
-      maxDay = day;
+  let maxVal = -1;
+  if (matrix && matrix.length && valveCount > 0) {
+    // On parcourt les 7 colonnes (= 7 derniers jours) en sommant
+    // matrix[*][col]. La date correspondante est dans sorted
+    // (rendu précédent), mais on n'y a pas accès ici ; on utilise
+    // donc historyData trié par timestamp pour récupérer la date.
+    const sorted = [...historyData].sort((a, b) => a.timestamp - b.timestamp);
+    const last7 = sorted.slice(-7);
+    for (let i = 0; i < last7.length; i++) {
+      let colTotal = 0;
+      for (let v = 0; v < valveCount; v++) {
+        colTotal += (matrix[v][i] || 0);
+      }
+      if (colTotal > maxVal) {
+        maxVal = colTotal;
+        maxDay = last7[i];
+      }
+    }
+  } else {
+    for (const day of historyData) {
+      if ((day.totalLitres || 0) > (maxDay.totalLitres || 0)) {
+        maxDay = day;
+      }
     }
   }
 
@@ -1941,23 +2008,19 @@ function renderHistory() {
   
   const tbody = document.getElementById('history-body');
   if (!tbody) return;
-  
-  const stats = computeHistoryStats();
 
-  // Mettre à jour les statistiques globales (avec vérifications)
-  const elTotal = document.getElementById('hist-total-litres');
-  const elMoy = document.getElementById('hist-moy-litres');
-  const elJourMax = document.getElementById('hist-jour-max');
-  const elDernier = document.getElementById('hist-dernier');
-  
-  if (elTotal) elTotal.textContent = stats ? stats.total + ' L' : '— L';
-  if (elMoy) elMoy.textContent = stats ? stats.moyenne + ' L' : '— L';
-  if (elJourMax) elJourMax.textContent = stats ? stats.jourMax : '—';
-  if (elDernier) elDernier.textContent = historyData.length
-    ? new Date(historyData[historyData.length - 1].timestamp * 1000).toLocaleString('fr-FR')
-    : '—';
-
+  // Early return si aucune donnée — dans ce cas on ne peut rien
+  // calculer (pas de matrice, pas de stats). On vide les en-têtes
+  // et on affiche un message d'attente, sans chercher à toucher aux
+  // compteurs du bloc "Statistiques 7j" (computeHistoryStats() gère
+  // déjà le cas historyData vide en retournant null → affichage "—").
   if (!historyData.length) {
+    const elTotal = document.getElementById('hist-total-litres');
+    const elMoy = document.getElementById('hist-moy-litres');
+    const elJourMax = document.getElementById('hist-jour-max');
+    if (elTotal) elTotal.textContent = '— L';
+    if (elMoy) elMoy.textContent = '— L';
+    if (elJourMax) elJourMax.textContent = '—';
     tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:var(--text-muted);padding:24px">Aucune donnée historique disponible</td></tr>';
     // Vider aussi les en-têtes de colonnes
     for (let i = 0; i < 7; i++) {
@@ -1966,6 +2029,18 @@ function renderHistory() {
     }
     return;
   }
+
+  // Calculer le nombre de vannes à partir du snapshot. On le fait ICI
+  // (avant la matrice) pour pouvoir passer matrix+valveCount à
+  // computeHistoryStats() — les stats doivent refléter EXACTEMENT ce
+  // qui est affiché dans le tableau, sinon on retombe sur le bug
+  // "Total 7j = 0.00 L alors que V1=1.50 L et V3=2.42 L".
+  const valveCount = Math.max(
+    (historyData[0]?.valves?.length) || 0,
+    (historyData[0]?.valveLitres?.length) || 0,
+    (historyData[0]?.valveNames?.length) || 0,
+    window.VANNE_COUNT_FALLBACK || 5
+  );
 
   // Trier les données par date (du plus ancien au plus récent)
   const sorted = [...historyData].sort((a, b) => a.timestamp - b.timestamp);
@@ -1978,6 +2053,19 @@ function renderHistory() {
   // et avec HistoryManager.h qui stocke days[0] = aujourd'hui puis décale).
   // Pour 7 colonnes, on prend les 7 timestamps de sorted (tronqué à 7).
   const headerDates = sorted.slice(-7); // 7 derniers = du plus ancien au + récent
+  // Annotation `isToday` : on marque l'entrée qui correspond à la date
+  // calendaire du jour (YYYY-MM-DD local). Utilisée plus bas par
+  // renderHistory() pour sur-écrire la cellule "today" avec les
+  // compteurs temps réel du WebSocket (cf. fix "0 L aujourd'hui alors
+  // que le Dashboard affiche la conso").
+  {
+    const d = new Date();
+    const ty = d.getFullYear(), tm = d.getMonth() + 1, td = d.getDate();
+    for (let i = 0; i < headerDates.length; i++) {
+      const dd = new Date(headerDates[i].timestamp * 1000);
+      headerDates[i].isToday = (dd.getFullYear() === ty && dd.getMonth() + 1 === tm && dd.getDate() === td);
+    }
+  }
   for (let i = 0; i < 7; i++) {
     const col = document.getElementById('hist-col-' + i);
     if (!col) continue;
@@ -2003,18 +2091,42 @@ function renderHistory() {
   // correspondant à la date d'en-tête headerDates[i].date. Si pas
   // trouvé, on prend day.valveLitres[v] (conso du jour spécifique à
   // cette vanne, fournie par HistoryManager.h).
-  const valveCount = Math.max(
-    (historyData[0]?.valves?.length) || 0,
-    (historyData[0]?.valveLitres?.length) || 0,
-    (historyData[0]?.valveNames?.length) || 0,
-    window.VANNE_COUNT_FALLBACK || 5
-  );
+  //
+  // Note : `valveCount` est déjà calculé plus haut (juste après
+  // l'early return `!historyData.length`) pour pouvoir être passé à
+  // computeHistoryStats(). On le réutilise ici.
 
   // Pré-calculer la matrice [vanne][col] = litres
   // Pour chaque colonne (= date), on cherche le day dont la date
   // correspond à l'en-tête ; puis on prend day.valveLitres[v].
   const matrix = [];
   for (let v = 0; v < valveCount; v++) matrix.push(new Array(7).fill(0));
+
+  // FIX (bug "0 L aujourd'hui" alors que le Dashboard affiche la conso
+  // réelle) : on capture l'index de la colonne qui correspond à la
+  // date DU JOUR. Si on la trouve, on SUR-ECRIT la matrice[v][colToday]
+  // avec `valves[v].litresToday` (compteur temps réel fourni par le
+  // WebSocket STATUS, mis à jour à chaque pulseDistribute()). C'est la
+  // source de vérité la plus fraîche : le snapshot historyData[i].
+  // valveLitres est rafraîchi toutes les 5 min côté firmware (depuis
+  // le fix de MainIocan_S.cpp), donc potentiellement en retard de
+  // quelques minutes sur la conso réelle. En utilisant le WebSocket
+  // pour aujourd'hui SEULEMENT, on garantit que l'utilisateur voit
+  // toujours la même valeur sur le Dashboard ET sur l'Historique, sans
+  // casser la cohérence des jours PASSÉS (qui eux ne peuvent être mis
+  // à jour qu'au prochain rollover minuit, et de toute façon ne bougent
+  // plus rétroactivement).
+  let colToday = -1;
+  for (let i = 0; i < headerDates.length; i++) {
+    if (headerDates[i].isToday) { colToday = i; break; }
+  }
+  const todayStr = (() => {
+    const d = new Date();
+    const y = d.getFullYear();
+    const m = String(d.getMonth() + 1).padStart(2, '0');
+    const dd = String(d.getDate()).padStart(2, '0');
+    return `${y}-${m}-${dd}`;
+  })();
 
   for (let i = 0; i < 7; i++) {
     if (i >= headerDates.length) continue;
@@ -2027,8 +2139,78 @@ function renderHistory() {
     }
   }
 
-  // Récupérer les noms de vannes (communs à tous les jours)
-  const valveNames = historyData[0]?.valveNames || [];
+  // Sur-écriture "today" avec les compteurs temps réel du WebSocket.
+  // On ne le fait QUE si :
+  //   1) on a bien identifié la colonne du jour
+  //   2) on a au moins UNE vanne avec un compteur live positif (sinon
+  //      on ne fait rien — le snapshot est notre seule source)
+  // On prend le MAX entre (snapshot firmware) et (live WebSocket) :
+  // si le firmware a déjà une valeur plus grande (cas rare, ex. rollover
+  // raté), on garde la sienne. En temps normal c'est la valeur live
+  // qui gagne.
+  if (colToday >= 0 && valves && valves.length) {
+    for (let v = 0; v < valveCount; v++) {
+      const live = (valves[v] && typeof valves[v].litresToday === 'number')
+                   ? valves[v].litresToday : null;
+      if (live === null) continue;
+      if (live > matrix[v][colToday]) {
+        matrix[v][colToday] = live;
+      }
+    }
+  }
+
+  // ── Mise à jour des stats 7j (Total / Moyenne / Jour max) ──
+  // On appelle computeHistoryStats() ICI, APRÈS la sur-écriture live
+  // de la matrice, pour que les sommes reflètent EXACTEMENT ce que
+  // l'utilisateur voit dans le tableau en-dessous (cf. bug "Total 7j
+  // = 0.00 L alors que V1=1.50 L et V3=2.42 L").
+  const stats = computeHistoryStats(matrix, valveCount);
+  const elTotal = document.getElementById('hist-total-litres');
+  const elMoy = document.getElementById('hist-moy-litres');
+  const elJourMax = document.getElementById('hist-jour-max');
+  const elDernier = document.getElementById('hist-dernier');
+  if (elTotal) elTotal.textContent = stats ? stats.total + ' L' : '— L';
+  if (elMoy) elMoy.textContent = stats ? stats.moyenne + ' L' : '— L';
+  if (elJourMax) elJourMax.textContent = stats ? stats.jourMax : '—';
+  if (elDernier) elDernier.textContent = (() => {
+    // La "Dernière MAJ" doit refléter le moment où le firmware a
+    // généré le snapshot, PAS la date calendaire du dernier jour
+    // (qui est figée à minuit et donnerait un horaire absurde type
+    // "01:00:00" peu importe l'heure réelle). Le firmware expose
+    // `generatedAt` (timestamp Unix) au niveau racine du JSON (cf.
+    // HistoryManager.h::historyToJson()). Si l'ESP a une heure NTP
+    // correcte, on est synchro avec lui ; sinon au moins on n'invente
+    // pas et on tombe sur "—".
+    if (historyGeneratedAt && isFinite(historyGeneratedAt)) {
+      const d = new Date(historyGeneratedAt * 1000);
+      if (!isNaN(d.getTime())) return d.toLocaleString('fr-FR');
+    }
+    // Repli : si le firmware n'envoie pas generatedAt (ancien build),
+    // on prend la date du dernier jour calendaire du snapshot (toujours
+    // plus parlant que "—") + l'heure locale du navigateur comme
+    // approximation de l'horodatage.
+    if (historyData.length) {
+      const lastDay = historyData[historyData.length - 1];
+      if (lastDay && lastDay.timestamp) {
+        const d = new Date(lastDay.timestamp * 1000);
+        d.setHours(new Date().getHours(), new Date().getMinutes(), new Date().getSeconds());
+        return d.toLocaleString('fr-FR');
+      }
+    }
+    return '—';
+  })();
+
+  // Récupérer les noms de vannes.
+  //
+  // Source de vérité = `valves[]` (rempli par handleStatus() à chaque push
+  // WebSocket, et donc TOUJOURS frais — y compris si l'utilisateur a
+  // modifié le libellé via /api/config APRÈS le chargement de l'historique).
+  // Le tableau `valveNames` (snapshot renvoyé par /api/history au moment de
+  // l'appel) reste utilisé en repli si le WebSocket n'a pas encore eu le
+  // temps de peupler `valves[]` (premier rendu de la page avant la 1re
+  // trame STATUS). En dernier recours (aucune source dispo), on retombe
+  // sur "Vanne N" pour ne jamais afficher une case vide.
+  const valveNamesFromHistory = historyData[0]?.valveNames || [];
 
   const rows = [];
   for (let v = 0; v < valveCount; v++) {
@@ -2042,7 +2224,22 @@ function renderHistory() {
     // Total 7j = somme de la conso journalière sur la fenêtre
     const valve7j = matrix[v].reduce((s, x) => s + x, 0);
 
-    const name = valveNames[v] || `Vanne ${v}`;
+    // Libellé user : priorité à valves[v].name (live WebSocket), puis
+    // valveNames[v] (snapshot /api/history), puis "Vanne N" en repli.
+    // Le `String()` autour permet d'accepter un libellé numérique (cas
+    // défensif — valves[v].name est normalement une string).
+    const userLabel = String(
+      (valves[v] && valves[v].name) ? valves[v].name :
+      (valveNamesFromHistory[v] || '')
+    ).trim();
+    // Format d'affichage demandé : "V0   LIBELLE_USER" (V0 + espaces +
+    // libellé), 3 espaces entre l'identifiant court et le libellé pour
+    // aligner les colonnes quand le libellé est absent (3 espaces =
+    // largeur visuelle de "V10" minimum). Si pas de libellé user, on
+    // retombe sur "Vanne N" pour rester lisible.
+    const name = userLabel.length
+      ? `V${v}   ${userLabel}`
+      : `Vanne ${v}`;
     const cells = [];
     for (let i = 0; i < 7; i++) {
       const val = matrix[v][i];
@@ -2060,47 +2257,104 @@ function renderHistory() {
 
   tbody.innerHTML = rows.join('');
 
-  // Mettre à jour le graphique
-  renderHistoryChart(stats);
+  // Mettre à jour le graphique (en lui passant la matrice déjà calculée
+  // et corrigée, pour que les barres reflètent exactement le tableau
+  // affiché et les stats 7j — sinon on retombe sur day.totalLitres
+  // du snapshot, potentiellement périmé de plusieurs minutes).
+  renderHistoryChart(matrix, valveCount, headerDates, stats);
 }
 
-// Affiche le graphique d'évolution
-function renderHistoryChart(stats) {
+// Affiche le graphique d'évolution globale sur 7 jours.
+//
+// Source de vérité = la matrice `[vanne][col]` passée par renderHistory().
+// On somme la matrice par colonne (= par jour) pour obtenir la conso
+// globale du jour, identique à ce que l'utilisateur voit dans le tableau
+// et dans les stats 7j. Avantage : si la colonne "today" a été sur-écrite
+// par le fallback WebSocket temps réel (cf. fix "0 L aujourd'hui"), le
+// graphique en tient compte automatiquement.
+//
+// headerDates : les 7 dates d'en-tête, déjà calculées par renderHistory()
+// (du plus ancien au plus récent). On s'en sert pour étiqueter chaque
+// barre avec la bonne date (au lieu du weekday court moins informatif).
+function renderHistoryChart(matrix, valveCount, headerDates, stats) {
   const chart = document.getElementById('history-chart');
   const placeholder = document.getElementById('history-chart-placeholder');
 
-  if (!stats || !historyData.length) {
+  if (!matrix || !matrix.length || !valveCount || !headerDates || !headerDates.length) {
     chart.innerHTML = '<span style="color:var(--text-muted)">Aucune donnée disponible</span>';
     return;
   }
 
-  // FIX (bug E) : le conteneur parent doit être en position:relative
-  // pour que les barres (position:absolute) se positionnent par rapport
-  // au graphique et non par rapport à <body>. Sans cela, les barres
-  // "débordent" et se positionnent en haut de page.
+  // FIX (bug E) : conteneur en position:relative pour que les barres
+  // (position:absolute) se positionnent par rapport au graphique et non
+  // par rapport à <body>. Sans cela, les barres "débordent" et se
+  // positionnent en haut de page.
   chart.style.position = 'relative';
+  // Hauteur augmentée pour faire de la place à la valeur affichée
+  // au-dessus de chaque barre + au label de date en dessous (sans
+  // sortir du conteneur cette fois — on laisse ~50px en bas pour
+  // les labels, contre 20px avant qui les faisaient sortir).
+  chart.style.minHeight = '220px';
   chart.innerHTML = '';
 
-  // Calculer les barres pour le graphique
-  const maxVal = Math.max(...historyData.map(d => d.totalLitres || 0), 1);
-  const sorted = [...historyData].sort((a, b) => a.timestamp - b.timestamp);
+  // ── 1) Calculer la conso globale par jour (= somme par colonne) ──
+  // On n'utilise PAS day.totalLitres du snapshot : on prend la matrice
+  // (déjà corrigée par le fallback WebSocket) pour rester cohérent avec
+  // le tableau et les stats 7j.
+  const colTotals = new Array(headerDates.length).fill(0);
+  for (let i = 0; i < headerDates.length; i++) {
+    for (let v = 0; v < valveCount; v++) {
+      colTotals[i] += (matrix[v][i] || 0);
+    }
+  }
 
-  let barsHtml = '';
-  sorted.forEach((day, idx) => {
-    const height = ((day.totalLitres || 0) / maxVal) * 150;
-    const label = new Date(day.timestamp * 1000).toLocaleDateString('fr-FR', { weekday: 'short' });
-    barsHtml += `<div style="position:absolute;bottom:0;left:${(idx * 14)}%;width:12%;height:${height}px;background:var(--blue);border-radius:4px 4px 0 0;opacity:0.8"></div>`;
-  });
+  // ── 2) Échelle : max de la fenêtre pour que la barre la plus haute
+  //        touche le haut du graphique. Si tout est à 0, on évite la
+  //        division par zéro en mettant maxVal=1. ──
+  const maxVal = Math.max(...colTotals, 1);
 
-  chart.innerHTML = barsHtml;
+  // ── 3) Largeur dynamique des barres ──
+  // Avant : left = idx*14% codé en dur pour 7 barres fixes. Si on a
+  // moins de colonnes (ex: 5), elles étaient collées à gauche. On
+  // calcule maintenant la largeur et le pas en fonction du nombre
+  // réel de barres, en gardant un gap visuel de ~15% entre barres.
+  const N = headerDates.length;
+  const slotPct = 100 / N;          // largeur d'un "slot" par barre
+  const barWidthPct = slotPct * 0.7; // barre remplit 70% du slot
+  const barLeftOffsetPct = (slotPct - barWidthPct) / 2; // centrage
+  const CHART_BOTTOM = 40;   // px réservés en bas pour les labels
+  const CHART_TOP = 30;      // px réservés en haut pour la valeur
+  const chartH = 200;        // hauteur totale de la zone graphique
+  const usableH = chartH - CHART_BOTTOM - CHART_TOP;
 
-  // Ajouter les labels
-  const labelsHtml = sorted.map((day, idx) => {
-    const label = new Date(day.timestamp * 1000).toLocaleDateString('fr-FR', { weekday: 'short' });
-    return `<div style="position:absolute;bottom:-20px;left:${(idx * 14) + 2}%;transform:translateX(-50%);font-size:0.7rem;color:var(--text-muted);white-space:nowrap">${label}</div>`;
-  }).join('');
+  // ── 4) Rendu : barres + valeurs + labels ──
+  let html = '';
+  for (let i = 0; i < N; i++) {
+    const val = colTotals[i];
+    const heightPx = maxVal > 0 ? Math.max(2, (val / maxVal) * usableH) : 0;
+    const leftPct = i * slotPct + barLeftOffsetPct;
+    const d = new Date(headerDates[i].timestamp * 1000);
+    const dd = String(d.getDate()).padStart(2, '0');
+    const mm = String(d.getMonth() + 1).padStart(2, '0');
+    const isToday = !!headerDates[i].isToday;
+    // Couleur différente pour aujourd'hui (plus saturé) pour le repérer
+    // rapidement. Les autres jours en bleu/green selon la conso.
+    const barColor = isToday ? 'var(--green)' : 'var(--blue)';
+    // Affichage de la valeur : on la met au-dessus de la barre. Si la
+    // barre est trop courte pour contenir la valeur, on l'affiche quand
+    // même au-dessus (CHART_TOP = 30px réservés, ça suffit pour 1 ligne).
+    const valStr = val > 0 ? val.toFixed(1) + ' L' : '—';
+    const valueColor = isToday ? 'var(--green)' : 'var(--text-muted)';
+    html += `<div style="position:absolute;bottom:${CHART_BOTTOM}px;left:${leftPct}%;width:${barWidthPct}%;height:${heightPx}px;background:${barColor};border-radius:4px 4px 0 0;opacity:0.85;transition:height .3s ease"></div>`;
+    // Valeur affichée au-dessus de la barre
+    html += `<div style="position:absolute;bottom:${CHART_BOTTOM + heightPx + 2}px;left:${leftPct}%;width:${barWidthPct}%;text-align:center;font-size:.68rem;font-weight:600;color:${valueColor};white-space:nowrap">${valStr}</div>`;
+    // Label date en bas (jj/mm), centré sous la barre
+    const labelBg = isToday ? 'var(--green-dim)' : 'var(--surface2)';
+    const labelColor = isToday ? 'var(--green)' : 'var(--text-muted)';
+    html += `<div style="position:absolute;bottom:8px;left:${leftPct}%;width:${barWidthPct}%;text-align:center;font-size:.7rem;padding:2px 0;background:${labelBg};color:${labelColor};border-radius:3px;font-weight:${isToday ? 600 : 400}">${dd}/${mm}</div>`;
+  }
 
-  chart.innerHTML += labelsHtml;
+  chart.innerHTML = html;
 }
 
 // Export de l'historique
