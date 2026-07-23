@@ -92,42 +92,93 @@
     overflow: hidden; /* clearfix pour les floats */
   }
   .card {
+    position: relative;
+    overflow: hidden;
     float: left;
     width: 48%;
-    margin: 0.8%;
+    margin: 0.7%;
     background: #1b1e26;
-    border: 4px solid #2a2e3a;
-    padding: 10px 6px;
+    border: 3px solid #2a2e3a;
+    padding: 8px 6px;
     text-align: center;
-    min-height: 155px;
+    min-height: 125px;
   }
   .card.error { border-color: #e05a5a; }
+  .card.empty {
+    background: transparent;
+    border: none;
+    box-shadow: none;
+    cursor: default;
+  }
+
+  .bg-icon {
+    position: absolute;
+    left: 2px;
+    top: 50%;
+    transform: translateY(-50%);
+    width: 49px;
+    height: 49px;
+    line-height: 1;
+    opacity: 0.9;
+    pointer-events: none;
+    z-index: 0;
+  }
+  .bg-icon svg {
+    width: 100%;
+    height: 100%;
+    display: block;
+  }
+  .bg-icon svg path {
+    fill: #4fc3f7;
+  }
+  body.light-mode .bg-icon {
+    opacity: 0.75;
+  }
+  body.light-mode .bg-icon svg path {
+    fill: #0288d1;
+  }
 
   .sensor-name {
-    font-size: 21px;
+    position: relative;
+    z-index: 1;
+    font-size: 19px;
     font-weight: bold;
     color: #dfe2e8;
-    margin-bottom: 6px;
+    margin-bottom: 4px;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
   .sensor-value {
-    font-size: 52px;
+    position: relative;
+    z-index: 1;
+    font-size: 44px;
     font-weight: bold;
+    line-height: 1;
   }
   .sensor-value .unit {
-    font-size: 26px;
+    font-size: 22px;
     font-weight: normal;
     color: #cccccc;
   }
-  .sensor-value .trend {
-    font-size: 50px;
-    font-weight: bold;
-    margin-left: 6px;
+  .sensor-value .trend-wrap {
     display: inline-block;
+    vertical-align: middle;
+    margin-left: 8px;
+    text-align: center;
+    line-height: 1;
+  }
+  .sensor-value .trend {
+    font-size: 34px;
+    font-weight: bold;
+    display: block;
   }
   .sensor-updated {
-    margin-top: 6px;
     font-size: 14px;
+    font-weight: normal;
     color: #9aa0ab;
+    display: block;
+    margin-top: 2px;
   }
 
   #global-error {
@@ -315,23 +366,58 @@ var WEATHER_ENTITY = "weather.grezieu_la_varenne";
 var WEATHER_HOURS_SHOWN = 24;
 var WEATHER_REFRESH_INTERVAL = 15 * 60 * 1000; // 15 min
 
+// entity: "" => case vide sans cadre (garde juste la place dans la grille)
+// icon: "water" | "temp" | "hum" => icone de fond, tout a gauche de la boite
 var SENSORS = [
-  { entity: "sensor.sol_sensorplat_temperature" },  
-  { entity: "sensor.sol_sensorplat_soil_moisture" },   
+  { entity: "sensor.sol_sensorplat_temperature", icon: "temp" },
+  { entity: "sensor.sol_sensorplat_soil_moisture", icon: "hum" },
+  
+  { entity: "sensor.sensor_temperaturerond1_temperature", icon: "temp" },
+  { entity: "sensor.sensor_temperaturerond1_humidity", icon: "hum" },
+  
+ 
+  { entity: "sensor.sol_sensorsolaire1_temperature", icon: "temp" },
+  { entity: "sensor.sol_sensorsolaire1_humidity", icon: "hum" },
+  
+  { entity: "sensor.fenetre_exterieur_temperature_exterieur_fenetre_2", icon: "temp" },
+  { entity: "sensor.irrigation01_irrigation01_temperature", icon: "temp" },
 
-  { entity: "sensor.sensor_temperaturerond1_temperature" },
-  { entity: "sensor.irrigation01_irrigation01_temperature" },
-  { entity: "sensor.sol_sensorsolaire1_temperature" },
-  { entity: "sensor.fenetre_exterieur_temperature_exterieur_fenetre_2" },
-  { entity: "sensor.loradoubletemp_loradoubletemp_temperature_6" },
-  { entity: "sensor.loradoubletemp_loradoubletemp_temperature_7" },
-  { entity: "sensor.gros_pot_verre_ketchup_temperature" },
-  { entity: "sensor.yasolr_5c1e8_output1_temperature" }
+ 
+  { entity: "sensor.loradoubletemp_loradoubletemp_temperature_6", icon: "temp" },
+  { entity: "sensor.loradoubletemp_loradoubletemp_temperature_7", icon: "temp" },
+  { entity: "sensor.gros_pot_verre_ketchup_temperature", icon: "water" },
+  { entity: "sensor.yasolr_5c1e8_output1_temperature", icon: "water" }
 ];
 
 /* ============================================================
    FIN CONFIGURATION
    ============================================================ */
+
+/* ---------------- Icones de fond (eau / temperature / humidite) ---------------- */
+function buildIconHtml(iconType, color) {
+  if (iconType === "water") {
+    return '<span class="bg-icon"><svg viewBox="0 0 24 24">' +
+      '<path class="icon-shape" fill="' + color + '" d="M12 2C12 2 5 11 5 15.5C5 19.09 8.13 22 12 22C15.87 22 19 19.09 19 15.5C19 11 12 2 12 2Z"/>' +
+      '</svg></span>';
+  }
+  if (iconType === "temp") {
+    return '<span class="bg-icon"><svg viewBox="0 0 24 24">' +
+      '<rect class="icon-shape" fill="' + color + '" x="10" y="3" width="4" height="12" rx="2"/>' +
+      '<circle class="icon-shape" fill="' + color + '" cx="12" cy="17" r="4.2"/>' +
+      '</svg></span>';
+  }
+  if (iconType === "hum") {
+    return '<span class="bg-icon"><svg viewBox="0 0 24 24">' +
+      '<path class="icon-shape" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" d="M5 20c0-2 2-2 2-4s-2-2-2-4 2-2 2-4-2-2-2-4"/>' +
+      '<path class="icon-shape" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" d="M12 20c0-2 2-2 2-4s-2-2-2-4 2-2 2-4-2-2-2-4"/>' +
+      '<path class="icon-shape" fill="none" stroke="' + color + '" stroke-width="2" stroke-linecap="round" d="M19 20c0-2 2-2 2-4s-2-2-2-4 2-2 2-4-2-2-2-4"/>' +
+      '</svg></span>';
+  }
+  return "";
+}
+function currentIconColor() {
+  return isLightMode ? "#0288d1" : "#4fc3f7";
+}
 
 var grid = document.getElementById("grid");
 var globalError = document.getElementById("global-error");
@@ -342,11 +428,22 @@ var sensorHistory = {}; // entity -> [{t, v}, ...] echantillons en memoire pour 
 for (var i = 0; i < SENSORS.length; i++) {
   (function(sensor) {
     var card = document.createElement("div");
+
+    if (!sensor.entity) {
+      card.className = "card empty";
+      grid.appendChild(card);
+      return;
+    }
+
     card.className = "card";
+
+    var iconHtml = buildIconHtml(sensor.icon, currentIconColor());
+
     card.innerHTML =
+      iconHtml +
       '<div class="sensor-name">' + sensor.entity + '</div>' +
-      '<div class="sensor-value"><span class="val">--</span><span class="unit"></span><span class="trend"></span></div>' +
-      '<div class="sensor-updated">en attente...</div>';
+      '<div class="sensor-value"><span class="val">--</span><span class="unit"></span>' +
+      '<span class="trend-wrap"><span class="trend"></span><span class="sensor-updated">--</span></span></div>';
     grid.appendChild(card);
     sensorEls[sensor.entity] = card;
     sensorNames[sensor.entity] = sensor.entity;
@@ -403,6 +500,7 @@ var THEME_DARK = {
   name: "#dfe2e8",
   unit: "#cccccc",
   updated: "#9aa0ab",
+  water: "#4fc3f7",
   btnBg: "#1b1e26",
   btnBorder: "#2a2e3a",
   btnText: "#f2f3f5"
@@ -417,6 +515,7 @@ var THEME_LIGHT = {
   name: "#3a3f4a",
   unit: "#666666",
   updated: "#6b7280",
+  water: "#0288d1",
   btnBg: "#ffffff",
   btnBorder: "#d5d9e0",
   btnText: "#20242c"
@@ -477,9 +576,9 @@ function showTrend(trendEl, trend) {
 function formatRelative(dateStr) {
   var d = new Date(dateStr);
   var diffMin = Math.round((Date.now() - d.getTime()) / 60000);
-  if (diffMin < 1) return "a l'instant";
-  if (diffMin < 60) return "il y a " + diffMin + " min";
-  return "il y a " + Math.round(diffMin / 60) + " h";
+  if (diffMin < 1) return "0min";
+  if (diffMin < 60) return diffMin + "min";
+  return Math.round(diffMin / 60) + "h";
 }
 
 function fetchSensor(sensor) {
@@ -561,7 +660,7 @@ function fetchSensor(sensor) {
 
 function refreshAll() {
   for (var i = 0; i < SENSORS.length; i++) {
-    fetchSensor(SENSORS[i]);
+    if (SENSORS[i].entity) fetchSensor(SENSORS[i]);
   }
 }
 refreshAll();
@@ -855,9 +954,20 @@ function applyTheme(isLight) {
   var cards = document.querySelectorAll(".card");
   for (var i = 0; i < cards.length; i++) {
     var card = cards[i];
+    if (card.className.indexOf("empty") !== -1) continue;
     card.style.backgroundColor = t.cardBg;
     if (card.className.indexOf("stale") === -1 && card.className.indexOf("error") === -1) {
       card.style.borderColor = t.cardBorder;
+    }
+    var iconShapes = card.querySelectorAll(".bg-icon .icon-shape");
+    for (var k = 0; k < iconShapes.length; k++) {
+      var shape = iconShapes[k];
+      if (shape.getAttribute("fill") && shape.getAttribute("fill") !== "none") {
+        shape.setAttribute("fill", t.water);
+      }
+      if (shape.getAttribute("stroke")) {
+        shape.setAttribute("stroke", t.water);
+      }
     }
     var nameEl = card.querySelector(".sensor-name");
     var unitEl = card.querySelector(".unit");
