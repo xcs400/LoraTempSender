@@ -24,11 +24,11 @@ const char WEB_PROGRAMMES_HTML[] PROGMEM = R"HTML(
       <table class="tbl" id="sched-table">
         <thead>
           <tr>
-            <th>Vanne</th><th>Nom</th><th>Heure</th><th>Durée</th><th>Jours</th><th>Mode</th><th>Actif</th><th>Actions</th>
+            <th>Vanne</th><th>Nom</th><th>Heure</th><th>Durée</th><th>Litres</th><th>Jours</th><th>Mode</th><th>Actif</th><th>Actions</th>
           </tr>
         </thead>
         <tbody id="sched-body">
-          <tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
+          <tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px">Chargement…</td></tr>
         </tbody>
       </table>
     </div>

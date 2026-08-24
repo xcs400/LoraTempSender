@@ -886,7 +886,7 @@ function loadSchedules() {
 function renderSchedules() {
   const tbody = document.getElementById('sched-body');
   if(!schedules || !schedules.length){
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
     return;
   }
   // Seuls les programmes actifs (ou en cours d'utilisation) ont un sens à
@@ -908,17 +908,18 @@ function renderSchedules() {
     return false;
   });
   if(!meaningful.length){
-    tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
+    tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:var(--text-muted);padding:24px">Aucun programme</td></tr>';
     return;
   }
-  // Tri stable par vanne puis par heure, pour un affichage prévisible qui
-  // ne "saute" jamais : une ligne reste à une position cohérente entre deux
-  // rendus tant que ses données (vanne/heure) ne changent pas vraiment.
+  // Tri stable par heure de début, quelque soit le jour associé au
+  // programme. On ignore la validité du jour pour l'ordre d'affichage,
+  // afin que les lignes soient toujours classées selon l'heure de départ
+  // réelle, puis par vanne pour casser les égalités.
   const sorted = [...meaningful].sort((a,b)=>{
-    if(a.valve !== b.valve) return a.valve - b.valve;
     const ta = (a.hour||0)*60 + (a.minute||0);
     const tb = (b.hour||0)*60 + (b.minute||0);
-    return ta - tb;
+    if(ta !== tb) return ta - tb;
+    return (a.valve || 0) - (b.valve || 0);
   });
   const CAL_MODES = ['Hebdo','Intervalle','Saison'];
   let rows = '';
@@ -927,11 +928,17 @@ function renderSchedules() {
     // editSched(), qui a besoin de l'objet exact (avec valve/schedIdx).
     const flatIdx = schedules.indexOf(s);
     const rowCls = s.active ? '' : 'sched-row inactive';
+    const fc = (window.__flowCoeffs && window.__flowCoeffs[s.valve] !== undefined)
+              ? Number(window.__flowCoeffs[s.valve]) : 0;
+    const ppl = (window.PULSES_PER_LITRE && window.PULSES_PER_LITRE > 0)
+                ? Number(window.PULSES_PER_LITRE) : 0;
+    const litres = (fc > 0 && ppl > 0) ? (s.durationSec * fc / ppl) : null;
     rows += `<tr class="${rowCls}">
       <td>${(valves[s.valve]&&valves[s.valve].name)||'V'+(s.valve+1)}</td>
       <td>${s.name || ''}</td>
       <td>${String(s.hour).padStart(2,'0')}:${String(s.minute).padStart(2,'0')}</td>
       <td>${fmtSec(s.durationSec)}</td>
+      <td>${litres !== null ? litres.toFixed(2)+' L' : '—'}</td>
       <td style="font-size:.75rem">
         ${s.calMode==1?'Tous les '+s.intervalDays+'j': s.calMode==2?'Saison': weekdayBits(s.weekDays)||'—'}
       </td>
